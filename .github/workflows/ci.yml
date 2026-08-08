@@ -5,23 +5,5 @@ on:
   pull_request:
 
 jobs:
-  # Deploys (added later) are `needs: test` — a red suite silently skips deploy,
-  # so this MUST run the full gate. Never gate a deploy on a subset.
   test:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: backend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt
-      - name: ruff
-        run: ruff check app tests
-      - name: mypy
-        run: mypy app
-      - name: pytest
-        run: pytest
-  # frontend job (tsc + vitest) and e2e (playwright) added with Phase-0 FE shell.
+    uses: ./.github/workflows/_test.yml

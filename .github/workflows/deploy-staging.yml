@@ -1,0 +1,62 @@
+# Auto-deploy to staging on every push to develop. `deploy` needs `test`, so a red
+# suite silently SKIPS the deploy (the Loyaltybase lesson). Migrate runs in-VPC with
+# --wait BEFORE the new revision serves, so a bad migration fails the deploy.
+#
+# Owner must set (after GCP setup): secrets WIF_PROVIDER, DEPLOY_SA; var GCP_PROJECT_ID.
+name: Deploy staging
+on:
+  push:
+    branches: [develop]
+
+env:
+  REGION: asia-south1
+  SERVICE: opshub-api
+  MIGRATE_JOB: opshub-migrate
+  AR_REPO: opshub
+
+jobs:
+  test:
+    uses: ./.github/workflows/_test.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build & push image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/${AR_REPO}/api:staging-${GITHUB_SHA::7}"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Migrate (in-VPC job, --wait)
+        run: |
+          gcloud run jobs update "$MIGRATE_JOB" --image "$IMAGE" \
+            --region "$REGION" --project "${{ vars.GCP_PROJECT_ID }}"
+          gcloud run jobs execute "$MIGRATE_JOB" --wait \
+            --region "$REGION" --project "${{ vars.GCP_PROJECT_ID }}"
+
+      - name: Deploy Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE" --image "$IMAGE" \
+            --region "$REGION" --project "${{ vars.GCP_PROJECT_ID }}"
+
+      - name: Verify serving image SHA ("pushed" != "deployed")
+        run: |
+          SERVING=$(gcloud run services describe "$SERVICE" \
+            --region "$REGION" --project "${{ vars.GCP_PROJECT_ID }}" \
+            --format='value(spec.template.spec.containers[0].image)')
+          echo "serving: $SERVING"
+          echo "$SERVING" | grep -q "staging-${GITHUB_SHA::7}"

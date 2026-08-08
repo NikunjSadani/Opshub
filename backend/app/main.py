@@ -5,7 +5,10 @@ same-origin. Modules self-register via ModuleSpec; adding a module is additive.
 """
 from __future__ import annotations
 
-from fastapi import FastAPI
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import FileResponse
 
 from app.config import get_settings
 from app.modules.files.routes import router as files_router
@@ -31,7 +34,29 @@ def create_app() -> FastAPI:
     app.include_router(files_router, prefix="/api/v1/files", tags=["files"])
     app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
+    _mount_spa(app, settings.static_dir)
     return app
+
+
+def _mount_spa(app: FastAPI, static_dir: str) -> None:
+    """Serve the built React SPA same-origin (added last, after the API routers).
+
+    A real file is served if it exists; any other non-API path returns index.html
+    so client-side routing works. Skipped when static_dir is unset (local dev).
+    """
+    root = Path(static_dir)
+    index = root / "index.html"
+    if not static_dir or not index.is_file():
+        return
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa(full_path: str) -> FileResponse:
+        if full_path.startswith("api/"):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
+        candidate = (root / full_path).resolve()
+        if full_path and candidate.is_file() and candidate.is_relative_to(root.resolve()):
+            return FileResponse(candidate)
+        return FileResponse(index)
 
 
 app = create_app()

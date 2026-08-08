@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     # --- uploads ---
     max_upload_bytes: int = 50 * 1024 * 1024  # 50 MB cap (DoS guard)
 
+    # --- static SPA ---
+    # Empty locally (dev uses the Vite dev server + proxy). In the container this
+    # points at the built React app, which FastAPI serves same-origin.
+    static_dir: str = ""
+
     # --- misc ---
     cors_allow_origins: list[str] = []  # SPA is served same-origin; empty by design
 

@@ -61,10 +61,13 @@ cd backend && python -m venv .venv && ./.venv/Scripts/python.exe -m pip install 
 - **`app/seed.py`** — guarded (fail-closed for prod), idempotent; seeds an Admin + an MIS user (explicit `document_automation` grant) + `eway_threshold` setting. *(pytest 26/26 incl. prod-refusal + idempotency.)*
 - **`infra/terraform/`** — full separate-project infra, **`terraform validate` Success** (fmt clean): project + APIs · VPC + Private Service Access · **Cloud SQL Option-B** (one small single-zone instance, prod+non-prod DBs, backups/PITR, private IP) · GCS (isolated) · least-priv SAs · Secret Manager (`@localhost/…?host=/cloudsql/…` form) · **Cloud Run scale-to-zero** + **in-VPC Alembic migrate job** · billing budget + threshold alerts. **APPLY needs owner GCP org/billing access.**
 
+### Increment 4 — same-origin SPA serving + CI/CD (done + gate-green)
+- **FastAPI serves the built SPA same-origin** (`config.static_dir` + `_mount_spa` in `main.py`): real files served, client routes fall back to `index.html`, `/api/*` still resolves (and 404s as API). *(pytest now 31/31; 5 SPA tests.)* Local dev leaves `static_dir` empty (Vite dev server + proxy).
+- **Root multi-stage `Dockerfile`** — builds the SPA then bakes it into the FastAPI image (`STATIC_DIR=/app/static`). One image = whole product; used by the Cloud Run service AND the migrate job. (`backend/Dockerfile` removed.)
+- **CI/CD** (all 4 workflows YAML-valid): `_test.yml` (reusable full gate — backend ruff/mypy/pytest + frontend tsc/vitest/build) · `ci.yml` (PRs/pushes) · `deploy-staging.yml` (auto on `develop`, `deploy` **needs `test`**, build→push→**in-VPC migrate `--wait`**→deploy→**verify serving SHA**) · `deploy-prod.yml` (on `main`, `environment: production` **required-reviewer gate**).
+
 ## Next (Phase 0 remaining)
-Access-independent (buildable now):
-1. **Settings-backed config surface** for the modules that need it (e.g. e-way threshold) — thin.
-2. **CI/CD** — GitHub Actions frontend job (tsc+vitest+build) + deploy jobs (`needs: test`), staging auto-deploy + migrate `--wait`.
+Access-independent (buildable now): **Settings-backed config surface** (thin, e.g. e-way threshold) — the last non-blocked item.
 
 Blocked on owner GCP/Firebase access (needed for runtime-verification):
 5. **User Management** module (Admin) — create/invite via Firebase Admin SDK, assign role + explicit module access, enable/disable; audited. *(auth path → dual audit; needs Firebase.)*
@@ -73,7 +76,8 @@ Blocked on owner GCP/Firebase access (needed for runtime-verification):
 8. **Verify the migration on Postgres** (enum DDL) before staging.
 
 ## Needed from owner
-- **GCP + Firebase access** to provision/deploy (Terraform written but not applied without it).
+- **GCP + Firebase access** to provision/deploy (Terraform written + validate-clean, not applied without it).
+- **Deploy wiring after GCP** (for the CI/CD workflows): GitHub secrets `WIF_PROVIDER`, `DEPLOY_SA`; vars `GCP_PROJECT_ID` (staging) + `GCP_PROJECT_ID_PROD`; an Artifact Registry repo `opshub`; and a `production` GitHub Environment with required reviewers (the prod gate).
 - The 4 module inputs (Phase 1/2): second use case · challan `L`-seed · master data · GST retention.
 
 ## Conventions

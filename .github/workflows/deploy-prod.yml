@@ -1,0 +1,64 @@
+# Prod cutover on push to main. GATED: the `deploy` job uses the `production`
+# GitHub Environment, so a required reviewer must approve before it (and its
+# migration) runs — the deliberate, non-auto prod cutover (WoW #8).
+#
+# Owner must set: the `production` environment + required reviewers; secrets
+# WIF_PROVIDER, DEPLOY_SA; var GCP_PROJECT_ID_PROD.
+name: Deploy prod
+on:
+  push:
+    branches: [main]
+
+env:
+  REGION: asia-south1
+  SERVICE: opshub-api
+  MIGRATE_JOB: opshub-migrate
+  AR_REPO: opshub
+
+jobs:
+  test:
+    uses: ./.github/workflows/_test.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production # required-reviewer gate
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build & push image
+        run: |
+          IMAGE="${REGION}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID_PROD }}/${AR_REPO}/api:prod-${GITHUB_SHA::7}"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+      - name: Migrate (in-VPC job, --wait)
+        run: |
+          gcloud run jobs update "$MIGRATE_JOB" --image "$IMAGE" \
+            --region "$REGION" --project "${{ vars.GCP_PROJECT_ID_PROD }}"
+          gcloud run jobs execute "$MIGRATE_JOB" --wait \
+            --region "$REGION" --project "${{ vars.GCP_PROJECT_ID_PROD }}"
+
+      - name: Deploy Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE" --image "$IMAGE" \
+            --region "$REGION" --project "${{ vars.GCP_PROJECT_ID_PROD }}"
+
+      - name: Verify serving image SHA
+        run: |
+          SERVING=$(gcloud run services describe "$SERVICE" \
+            --region "$REGION" --project "${{ vars.GCP_PROJECT_ID_PROD }}" \
+            --format='value(spec.template.spec.containers[0].image)')
+          echo "serving: $SERVING"
+          echo "$SERVING" | grep -q "prod-${GITHUB_SHA::7}"
