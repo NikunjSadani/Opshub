@@ -1,0 +1,583 @@
+<title>Delivery Challan Module — Design Document · Gifsy OpsHub</title>
+<style>
+  :root{
+    --paper:#f4f5f8; --surface:#ffffff; --surface-2:#fafbfc;
+    --ink:#1a2032; --ink-soft:#545c70; --ink-faint:#8b93a4;
+    --accent:#364a86; --accent-strong:#26325f; --accent-soft:#eef1f9;
+    --seal:#a8482f; --seal-soft:#f6ece8;
+    --rule:#e3e5ec; --rule-strong:#cdd1dc;
+    --good:#2f7d55; --good-bg:#e7f3ec;
+    --warn:#8a6210; --warn-bg:#f8efd9;
+    --crit:#b23a2e; --crit-bg:#f8e7e4;
+    --code-bg:#eef0f6;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:"Cascadia Code","SF Mono",Consolas,"Liberation Mono",ui-monospace,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --paper:#11141c; --surface:#191e29; --surface-2:#151a24;
+      --ink:#e7e9f0; --ink-soft:#9aa2b4; --ink-faint:#727b8e;
+      --accent:#93a4e2; --accent-strong:#b3c0ee; --accent-soft:#1e2740;
+      --seal:#d98d75; --seal-soft:#2a1f1b;
+      --rule:#262c3a; --rule-strong:#38404f;
+      --good:#63c48f; --good-bg:#16281f;
+      --warn:#d6a854; --warn-bg:#2b2413;
+      --crit:#e37c6d; --crit-bg:#2c1815;
+      --code-bg:#1d2330;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#11141c; --surface:#191e29; --surface-2:#151a24;
+    --ink:#e7e9f0; --ink-soft:#9aa2b4; --ink-faint:#727b8e;
+    --accent:#93a4e2; --accent-strong:#b3c0ee; --accent-soft:#1e2740;
+    --seal:#d98d75; --seal-soft:#2a1f1b;
+    --rule:#262c3a; --rule-strong:#38404f;
+    --good:#63c48f; --good-bg:#16281f;
+    --warn:#d6a854; --warn-bg:#2b2413;
+    --crit:#e37c6d; --crit-bg:#2c1815;
+    --code-bg:#1d2330;
+  }
+  :root[data-theme="light"]{
+    --paper:#f4f5f8; --surface:#ffffff; --surface-2:#fafbfc;
+    --ink:#1a2032; --ink-soft:#545c70; --ink-faint:#8b93a4;
+    --accent:#364a86; --accent-strong:#26325f; --accent-soft:#eef1f9;
+    --seal:#a8482f; --seal-soft:#f6ece8;
+    --rule:#e3e5ec; --rule-strong:#cdd1dc;
+    --good:#2f7d55; --good-bg:#e7f3ec;
+    --warn:#8a6210; --warn-bg:#f8efd9;
+    --crit:#b23a2e; --crit-bg:#f8e7e4;
+    --code-bg:#eef0f6;
+  }
+
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+    font-size:16px;line-height:1.65;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1160px;margin:0 auto;padding:0 24px;}
+
+  header.masthead{border-bottom:1px solid var(--rule);background:var(--surface-2);}
+  .masthead .wrap{padding-top:44px;padding-bottom:34px;}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--accent);font-weight:600;}
+  .masthead h1{font-family:var(--serif);font-weight:600;font-size:clamp(30px,5vw,46px);
+    line-height:1.08;margin:14px 0 6px;letter-spacing:-.01em;text-wrap:balance;max-width:20ch;}
+  .masthead .sub{color:var(--ink-soft);font-size:17px;max-width:62ch;margin:0;}
+  .meta-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px;}
+  .tag{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:12.5px;
+    padding:5px 11px;border-radius:999px;border:1px solid var(--rule-strong);
+    background:var(--surface);color:var(--ink-soft);}
+  .tag.status{border-color:transparent;background:var(--seal-soft);color:var(--seal);font-weight:600;}
+  .tag.rev{border-color:transparent;background:var(--good-bg);color:var(--good);font-weight:600;}
+  .tag .dot{width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block;}
+
+  .doc{display:grid;grid-template-columns:1fr;gap:0;padding:34px 0 90px;}
+  @media(min-width:960px){.doc{grid-template-columns:236px minmax(0,1fr);gap:52px;}}
+
+  nav.toc{align-self:start;}
+  @media(min-width:960px){nav.toc{position:sticky;top:24px;max-height:calc(100vh - 48px);overflow:auto;}}
+  nav.toc .toc-head{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--ink-faint);padding:14px 0 8px;margin-bottom:4px;}
+  nav.toc .toc-head:first-child{padding-top:0;}
+  nav.toc .part{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--seal);font-weight:600;padding:2px 0 6px;border-bottom:1px solid var(--rule);margin-bottom:6px;}
+  nav.toc a{display:flex;gap:10px;text-decoration:none;color:var(--ink-soft);font-size:13.5px;
+    padding:5px 8px;border-radius:7px;line-height:1.35;transition:background .12s,color .12s;}
+  nav.toc a:hover{background:var(--accent-soft);color:var(--accent);}
+  nav.toc a .n{font-family:var(--mono);font-size:12px;color:var(--ink-faint);min-width:24px;text-align:right;}
+  nav.toc a:hover .n{color:var(--accent);}
+
+  main{min-width:0;}
+  section{margin-bottom:42px;scroll-margin-top:24px;}
+  .part-band{display:flex;align-items:center;gap:14px;margin:6px 0 26px;padding:16px 20px;
+    border-radius:12px;background:var(--accent-soft);border:1px solid var(--rule);}
+  .part-band .pl{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent);font-weight:600;}
+  .part-band h2{font-family:var(--serif);font-size:22px;margin:0;color:var(--ink);font-weight:600;}
+  .measure{max-width:74ch;}
+  p{margin:0 0 14px;}
+  .sec-head{display:flex;align-items:baseline;gap:14px;margin:0 0 16px;padding-bottom:12px;
+    border-bottom:1px solid var(--rule);}
+  .sec-head .num{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--seal);
+    background:var(--seal-soft);border-radius:6px;padding:3px 9px;flex:none;letter-spacing:.02em;}
+  .sec-head h3{font-family:var(--serif);font-weight:600;font-size:23px;margin:0;letter-spacing:-.01em;
+    color:var(--ink);text-wrap:balance;}
+  h4{font-size:15px;font-weight:700;margin:22px 0 8px;letter-spacing:.005em;}
+  strong{font-weight:670;color:var(--ink);}
+
+  ul{margin:0 0 14px;padding-left:0;list-style:none;}
+  ul li{position:relative;padding-left:20px;margin-bottom:7px;max-width:76ch;}
+  ul li::before{content:"";position:absolute;left:3px;top:11px;width:5px;height:5px;
+    border-radius:1px;background:var(--accent);transform:rotate(45deg);}
+  ol{max-width:76ch;padding-left:22px;margin:0 0 14px;}
+  ol li{margin-bottom:7px;}
+
+  code{font-family:var(--mono);font-size:.88em;background:var(--code-bg);color:var(--accent-strong);
+    padding:2px 6px;border-radius:5px;}
+
+  .stamp{display:inline-flex;flex-direction:column;gap:4px;align-items:flex-start;
+    border:1.5px dashed var(--seal);border-radius:10px;padding:14px 18px;margin:6px 0 18px;
+    background:var(--seal-soft);}
+  .stamp .lbl{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--seal);}
+  .stamp .val{font-family:var(--mono);font-size:19px;font-weight:600;color:var(--seal);
+    letter-spacing:.02em;font-variant-numeric:tabular-nums;}
+
+  .note{border-left:3px solid var(--accent);background:var(--accent-soft);border-radius:0 10px 10px 0;
+    padding:14px 18px;margin:4px 0 18px;max-width:78ch;}
+  .note.seal{border-left-color:var(--seal);background:var(--seal-soft);}
+  .note .k{font-family:var(--mono);font-size:11px;letter-spacing:.13em;text-transform:uppercase;
+    color:var(--accent);font-weight:600;display:block;margin-bottom:5px;}
+  .note.seal .k{color:var(--seal);}
+  .note p{margin:0;color:var(--ink);}
+
+  .tbl{overflow-x:auto;border:1px solid var(--rule);border-radius:12px;margin:6px 0 20px;
+    background:var(--surface);}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;}
+  thead th{background:var(--surface-2);text-align:left;font-weight:650;color:var(--ink-soft);
+    padding:11px 14px;border-bottom:1px solid var(--rule-strong);white-space:nowrap;
+    font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;}
+  tbody td{padding:11px 14px;border-bottom:1px solid var(--rule);vertical-align:top;color:var(--ink);}
+  tbody tr:last-child td{border-bottom:none;}
+  tbody tr:hover td{background:var(--accent-soft);}
+  td code{white-space:nowrap;}
+  .mono-col{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap;}
+
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.03em;
+    padding:2px 8px;border-radius:999px;white-space:nowrap;text-transform:uppercase;}
+  .pill.crit{background:var(--crit-bg);color:var(--crit);}
+  .pill.warn{background:var(--warn-bg);color:var(--warn);}
+  .pill.good{background:var(--good-bg);color:var(--good);}
+  .pill.accent{background:var(--accent-soft);color:var(--accent);}
+  .pill.p1{background:var(--good-bg);color:var(--good);}
+  .pill.p2{background:var(--warn-bg);color:var(--warn);}
+  .pill.later{background:var(--code-bg);color:var(--ink-soft);}
+
+  pre{background:var(--code-bg);border:1px solid var(--rule);border-radius:12px;padding:18px 20px;
+    overflow-x:auto;margin:6px 0 18px;line-height:1.5;}
+  pre code{background:none;padding:0;color:var(--ink);font-size:13px;}
+
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 16px;}
+  .chip{font-size:13px;padding:6px 12px;border-radius:8px;border:1px solid var(--rule-strong);
+    background:var(--surface);color:var(--ink-soft);}
+  .chip.in{border-color:transparent;background:var(--good-bg);color:var(--good);font-weight:600;}
+  .chip.out{border-color:transparent;background:var(--crit-bg);color:var(--crit);font-weight:600;}
+
+  footer.foot{border-top:1px solid var(--rule);padding:26px 0 60px;color:var(--ink-faint);
+    font-size:13px;font-family:var(--mono);}
+  a:focus-visible,nav.toc a:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px;}
+  @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important;}}
+  html{scroll-behavior:smooth;}
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <div class="eyebrow">Gifsy OpsHub · Platform + Document Automation</div>
+    <h1>Delivery Challan Module</h1>
+    <p class="sub">Design document for sign-off, restructured into a shared <strong>Platform</strong> spine and the first <strong>Module</strong>. No code is written until this is approved.</p>
+    <div class="meta-row">
+      <span class="tag"><span class="dot"></span>Version 4.0</span>
+      <span class="tag">31 Jul 2026</span>
+      <span class="tag status">Finalised</span>
+      <span class="tag rev">Reviewed · costed · finalised for build</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="doc">
+    <nav class="toc" aria-label="Contents">
+      <div class="toc-head" style="padding-top:0">Front</div>
+      <a href="#changes"><span class="n">·</span><span>What changed in v2</span></a>
+      <div class="part part-toc" style="margin-top:14px">Part A · Platform</div>
+      <a href="#a1"><span class="n">A1</span><span>Identity &amp; access</span></a>
+      <a href="#a2"><span class="n">A2</span><span>Data &amp; module boundary</span></a>
+      <a href="#a3"><span class="n">A3</span><span>Shared runtime primitives</span></a>
+      <a href="#a4"><span class="n">A4</span><span>Jobs &amp; async</span></a>
+      <a href="#a5"><span class="n">A5</span><span>Audit, security, compliance</span></a>
+      <a href="#a6"><span class="n">A6</span><span>Architecture &amp; stack</span></a>
+      <a href="#a7"><span class="n">A7</span><span>Document Intelligence</span></a>
+      <div class="part part-toc">Part B · Delivery Challan</div>
+      <a href="#b1"><span class="n">B1</span><span>Upload → generate flow</span></a>
+      <a href="#b2"><span class="n">B2</span><span>Domain model</span></a>
+      <a href="#b3"><span class="n">B3</span><span>Numbering &amp; integrity</span></a>
+      <a href="#b4"><span class="n">B4</span><span>Validation</span></a>
+      <a href="#b5"><span class="n">B5</span><span>Rendering (HTML→PDF)</span></a>
+      <a href="#b6"><span class="n">B6</span><span>Master data</span></a>
+      <a href="#b7"><span class="n">B7</span><span>Void &amp; lifecycle</span></a>
+      <a href="#b8"><span class="n">B8</span><span>Reports &amp; dashboards</span></a>
+      <div class="part part-toc">Close</div>
+      <a href="#topo"><span class="n">·</span><span>Project topology</span></a>
+      <a href="#cost"><span class="n">·</span><span>Cost &amp; scaling</span></a>
+      <a href="#dec"><span class="n">·</span><span>Open items</span></a>
+      <a href="#scope"><span class="n">·</span><span>Out of scope</span></a>
+      <a href="#phase"><span class="n">·</span><span>Phasing</span></a>
+    </nav>
+
+    <main>
+      <section id="changes">
+        <div class="note seal"><span class="k">What changed in v2 — after an independent 3-lens review</span>
+        <p>This revision folds in a cold architecture review from three perspectives (platform / pragmatist / security). Seven deltas from v1:</p></div>
+        <div class="tbl"><table>
+          <thead><tr><th>Area</th><th>v1</th><th>v2</th></tr></thead>
+          <tbody>
+            <tr><td>Rendering</td><td>DOCX + LibreOffice</td><td><strong>HTML→PDF (WeasyPrint), self-hosted, egress-locked</strong></td></tr>
+            <tr><td>Data</td><td>schema-per-module</td><td><strong>one schema, table-prefixed</strong> + platform tables</td></tr>
+            <tr><td>Async</td><td>Cloud Tasks queue</td><td><strong>in-process background + polling + idempotency key</strong></td></tr>
+            <tr><td>Deploy</td><td>SPA + API split</td><td><strong>SPA served same-origin from the API</strong>, one service, cookie auth</td></tr>
+            <tr><td>Downloads</td><td>signed URLs</td><td><strong>streamed through the authenticated API</strong></td></tr>
+            <tr><td>Numbering</td><td>a module detail</td><td><strong>a hardened platform service</strong> (§B3)</td></tr>
+            <tr><td>Auth</td><td>undecided</td><td><strong>Firebase Auth · email/password</strong></td></tr>
+          </tbody>
+        </table></div>
+        <div class="note"><span class="k">v3 additions</span><p>Stack finalised to <strong>Python/FastAPI</strong> (you're building document extraction in-house); a reusable <strong>Document Intelligence service</strong> with a swappable engine (§A7); prod DB isolated from Loyaltybase; Cloud Run scale-to-zero (see Cost &amp; scaling).</p></div>
+        <div class="note seal"><span class="k">v4 — finalised for build</span><p><strong>Separate GCP project</strong> (same billing account) · database <strong>Option B</strong> (one small instance, prod + non-prod databases) · extraction = <strong>your own engine primary</strong>, Document AI as backup · a <strong>project-topology &amp; isolation</strong> model · a finalised <strong>~₹2,000/mo</strong> run cost. This is the version we build from.</p></div>
+      </section>
+
+      <!-- ================= PART A ================= -->
+      <div class="part-band" id="partA"><span class="pl">Part A</span><h2>Platform — the shared spine every module inherits</h2></div>
+      <div class="measure"><p>Decisions made <strong>once</strong> here are inherited by Delivery Challan and every future module (QR, courier files, reward letters…). We build shared <strong>runtime primitives</strong>, not a speculative plugin framework: modules stay decoupled by ownership and code review, not by heavyweight machinery.</p></div>
+
+      <section id="a1">
+        <div class="sec-head"><span class="num">A1</span><h3>Identity &amp; access</h3></div>
+        <h4>Authentication — Firebase Auth, email/password</h4>
+        <div class="measure"><ul>
+          <li>GCP-native (same cloud as everything else), managed — we never store or hash passwords ourselves.</li>
+          <li>Every API request <strong>verifies the Firebase token server-side</strong>; the provider is the sole authority for "is this account active."</li>
+          <li><strong>Offboarding:</strong> disabling a user in Firebase instantly kills access. A valid token with no active RBAC row is <strong>denied, never auto-provisioned</strong>. Short token lifetime; a periodic reconcile flags RBAC rows with no live account. (No Google Workspace = no central directory, so this runbook matters.)</li>
+        </ul></div>
+        <h4>Authorization — RBAC in Postgres</h4>
+        <div class="measure"><ul>
+          <li>Two axes: a <strong>role</strong> (Admin · MIS · Operations · Finance) governs <em>what actions</em> you can do; a per-user <strong>module-access list</strong> (explicit grants, not role-derived) governs <em>which modules</em> you can open. Checked by <code>can(user, action, resource?)</code> + <code>can_access_module(user, module)</code>.</li>
+          <li><strong>User Management screen (Admin):</strong> create/invite a user by email, assign their role + tick the modules they can access, enable/disable. Users are provisioned via the <strong>Firebase Admin SDK</strong> and set their own password through an invite/reset link — the admin never handles passwords. Every user/role/access change is audited.</li>
+          <li>The <code>resource</code> arg is shaped in now so per-consignor/brand segregation is a later toggle, not a rewrite. Default: all staff, all entities. (A full per-<em>action</em> permission matrix stays out of scope — module-level access is the granularity you asked for.)</li>
+        </ul></div>
+        <div class="note"><span class="k">Panel note</span><p>All three reviewers agreed the provider choice is secondary; the real work is server-side token verification + Postgres RBAC as the "active" authority + a documented offboarding path. That's what's specified here.</p></div>
+        <h4>Admin-only actions <span style="font-weight:400;color:var(--ink-faint)">(hard-coded)</span></h4>
+        <div class="measure"><p>Void a challan · override the duplicate-number block · bulk-accept validation warnings · edit master data · change settings · seed a number series · <strong>User Management</strong> (create/invite users, assign role + module access, enable/disable). Every one writes an append-only audit row (§A5).</p></div>
+      </section>
+
+      <section id="a2">
+        <div class="sec-head"><span class="num">A2</span><h3>Data &amp; module boundary</h3></div>
+        <div class="measure"><ul>
+          <li><strong>One PostgreSQL database, one schema.</strong> Platform tables unprefixed (<code>user</code>, <code>role</code>, <code>audit_log</code>, <code>file</code>, <code>setting</code>, <code>doc_sequence</code>); module tables prefixed (<code>challan_batch</code>, <code>challan_document</code>, <code>challan_line</code>).</li>
+          <li>Modules are decoupled by <strong>ownership convention + code review</strong>, not by database walls. Cross-module reporting stays a plain join instead of a growing UNION across schemas.</li>
+          <li>One migration chain (Alembic).</li>
+          <li><strong>Module registration is a convention:</strong> each module exports <code>registerModule({ nav, routes, permissions, migrations })</code>. This is a static object the app composes at build — <em>not</em> a runtime plugin loader.</li>
+        </ul></div>
+        <div class="note seal"><span class="k">Reversed from v1</span><p>Schema-per-module was overruled: it buys isolation a single-tenant, ~50-user app doesn't need while taxing cross-module reporting and migrations. Table prefixes give the same decoupling for free.</p></div>
+      </section>
+
+      <section id="a3">
+        <div class="sec-head"><span class="num">A3</span><h3>Shared runtime primitives</h3></div>
+        <div class="measure"><p>Built once, consumed by every module — real reusable code, so modules don't each hand-roll uploads, polling, and audit calls:</p></div>
+        <div class="tbl"><table>
+          <thead><tr><th>Primitive</th><th>What it gives every module</th></tr></thead>
+          <tbody>
+            <tr><td class="mono-col">can(user, action, resource?)</td><td>the one authorization check</td></tr>
+            <tr><td class="mono-col">audit(actor, event, …)</td><td>append-only write; mandatory on every mutating handler</td></tr>
+            <tr><td class="mono-col">useAsyncJob(jobId) + job contract</td><td>standard progress-polling hook + status envelope</td></tr>
+            <tr><td class="mono-col">upload() / streamDownload()</td><td>file upload + authenticated, authorized, audited download</td></tr>
+            <tr><td class="mono-col">notify(user, event)</td><td>in-app + email sink ("your batch is ready")</td></tr>
+            <tr><td class="mono-col">/api/v1 envelope</td><td>one versioned response/error/pagination shape</td></tr>
+            <tr><td>Design system</td><td>shared shadcn/Tailwind component library so modules look identical</td></tr>
+          </tbody>
+        </table></div>
+        <div class="measure"><p><strong>Deliberately NOT built:</strong> schema walls · a runtime plugin loader · registries-as-frameworks · a permissions admin UI · micro-frontends. The right abstraction for module #2 is extracted <em>after</em> it exists.</p></div>
+        <div class="note"><span class="k">Where the two reviewers met</span><p>The platform lens wanted shared runtime primitives; the pragmatist wanted near-zero speculative infra. They agree on this list — cheap, needed by Module #1 anyway, and nothing whose only justification is a module that doesn't exist yet.</p></div>
+      </section>
+
+      <section id="a4">
+        <div class="sec-head"><span class="num">A4</span><h3>Jobs &amp; async</h3></div>
+        <div class="measure"><ul>
+          <li><strong>In-process background task</strong> writing status rows to Postgres; the SPA polls job status for the progress bar. <strong>No queue infrastructure in v1.</strong></li>
+          <li>Justified by the numbers: HTML→PDF renders a one-page challan in ~50–200 ms, so 1000 docs ≈ 2–5 min — well inside Cloud Run's 60-minute request window.</li>
+          <li>An <strong>idempotency key</strong> on batch creation makes double-submits and retries no-ops (this is a correctness requirement, not an optimisation — see §B3).</li>
+          <li>Guardrails: bounded render concurrency + per-job memory ceiling; Cloud Run <strong>min-instances ≥ 1</strong> to avoid cold-start latency on a spiky internal tool.</li>
+          <li>We add Cloud Tasks <em>only</em> the day a batch genuinely can't finish in one window — it will fail loudly first.</li>
+        </ul></div>
+        <div class="note"><span class="k">Module 2 exception</span><p>Self-hosted OCR + image processing is CPU/memory-heavy, so the Expense module runs on a <strong>queue-backed worker tier</strong> (Cloud Tasks + a separately-scaled worker) rather than the in-process model. The jobs primitive is the shared seam either way.</p></div>
+      </section>
+
+      <section id="a5">
+        <div class="sec-head"><span class="num">A5</span><h3>Audit, security &amp; compliance</h3></div>
+        <div class="measure"><ul>
+          <li><strong>Append-only, hash-chained audit log.</strong> The app DB role has no <code>UPDATE</code>/<code>DELETE</code> on it. Captures actor, IST timestamp, before/after, reason, IP, downloads, overrides, seeds — tamper-evident for a legal register.</li>
+          <li><strong>PII protection.</strong> Names, addresses, phones, GSTINs. Structured logging <strong>redacts PII by default</strong> — we log row <em>ids</em>, not row <em>contents</em>.</li>
+          <li><strong>Retention.</strong> Generated GST documents are write-once and retained ~6–8 years; the raw uploaded Excel (the rawest PII) gets a short lifecycle. Documented against India's DPDP Act storage-limitation expectation.</li>
+          <li><strong>Downloads stream through the authenticated API</strong> with an authorization re-check + audit on every fetch — no long-lived signed URLs handed to the browser.</li>
+          <li><strong>Renderer is egress-locked</strong> (no network — blocks SSRF to metadata endpoints), HTML autoescape on, and all cell values are passed as <strong>bound data, never concatenated into a template</strong> (kills template-injection from a malicious Excel cell). Leading <code>= + - @</code> escaped on any Excel export.</li>
+          <li>Secrets in <strong>Secret Manager</strong>. Observability: structured logs + error tracking (Sentry) + trace continuity across the background boundary. <strong>Golden-file PDF regression tests</strong> in CI so layout drift fails the build.</li>
+        </ul></div>
+      </section>
+
+      <section id="a6">
+        <div class="sec-head"><span class="num">A6</span><h3>Architecture &amp; stack</h3></div>
+        <div class="tbl"><table>
+          <thead><tr><th>Layer</th><th>Choice</th></tr></thead>
+          <tbody>
+            <tr><td>Deploy shape</td><td><strong>One Cloud Run service</strong>: FastAPI serves the React SPA (same-origin) <em>and</em> the API. Session-cookie auth, no CORS, one pipeline.</td></tr>
+            <tr><td>Frontend</td><td>React + TypeScript + Tailwind + shadcn/ui + React Router + React Query · lazy per-module bundles · light theme</td></tr>
+            <tr><td>Backend</td><td>Python <strong>FastAPI</strong>, modular monolith</td></tr>
+            <tr><td>Rendering</td><td><strong>WeasyPrint</strong> in-process (Gotenberg sidecar as the escape hatch for complex layouts)</td></tr>
+            <tr><td>Database</td><td>PostgreSQL (Cloud SQL) · one schema</td></tr>
+            <tr><td>Storage</td><td>Google Cloud Storage</td></tr>
+            <tr><td>Auth</td><td>Firebase Authentication (email/password)</td></tr>
+            <tr><td>Jobs</td><td>In-process background + Postgres status + polling</td></tr>
+            <tr><td>Ops</td><td>Secret Manager · Cloud Logging · Sentry · Docker · CI/CD · Terraform · dev / staging / prod</td></tr>
+          </tbody>
+        </table></div>
+        <div class="measure"><p>Modular monolith, explicitly <strong>not</strong> microservices — correct for ~50 users and spiky traffic.</p></div>
+        <div class="note"><span class="k">Finalised</span><p>Stack = <strong>Python/FastAPI</strong>, chosen deliberately: OpsHub is a document-processing platform and you're building document intelligence in-house — Python's core competency. Runs in its <strong>own separate GCP project</strong> (same billing account); compute <strong>scales to zero</strong>; the DB is isolated (see Project topology and Cost &amp; scaling).</p></div>
+      </section>
+
+      <section id="a7">
+        <div class="sec-head"><span class="num">A7</span><h3>Document Intelligence <span style="font-weight:400;color:var(--seal);font-size:15px">— a reusable, swappable service</span></h3></div>
+        <div class="measure"><p>Extraction (OCR + field parsing) is built as a <strong>standalone platform service</strong>, not baked into any module — because you intend to reuse the capability elsewhere. It owns a clean, product-agnostic contract; any module (or later, any product) consumes it over HTTP.</p></div>
+<pre><code>POST /extract   { document, doc_type }
+   → { fields, confidence_per_field, raw_text, review_needed }</code></pre>
+        <h4>Swappable engine — the escape hatch</h4>
+        <div class="measure"><ul>
+          <li>Internally, an <code>ExtractionEngine</code> interface with pluggable implementations: <code>SelfBuiltEngine</code> (layered — searchable-PDF text → OCR → rule-based → optional vision-LLM fallback) and a <code>DocumentAIEngine</code> adapter.</li>
+          <li>Every engine <strong>maps into your canonical field schema</strong> — consumers never see an engine's raw shape, so switching engines changes nothing upstream.</li>
+          <li><strong>Decision: your SelfBuiltEngine is primary from day one</strong> (justified by a real second use case for the capability); the <code>DocumentAIEngine</code> is the wired-in <strong>backup / escape hatch</strong>, not the initial engine. Because every engine maps to the canonical schema, falling back is a config flip — fully reversible.</li>
+          <li>Originals stay in GCS, so any engine can <strong>re-extract the back-catalogue</strong> later — no historical lock-in.</li>
+        </ul></div>
+        <h4>Build guardrails <span style="font-weight:400;color:var(--ink-faint)">(non-negotiable, from review)</span></h4>
+        <div class="measure"><ul>
+          <li><strong>Engine-neutral canonical schema, up front</strong> — per-field envelope <code>{value_normalized, value_raw, confidence, source_engine, page, bbox|null, status}</code>; money = <strong>BigInt-paise</strong> + rounding line; <strong>line items</strong> first-class; document/page model; <strong>calibrated</strong> confidence contract; schema version.</li>
+          <li><strong>Evaluation harness before the engine</strong> — labelled gold set + field-level scoring (exact / numeric-tolerance / date-normalized). Without it you can't prove accuracy or safely swap; checksums validate only ~half the fields (not date, number, or vendor).</li>
+          <li><strong>Invert the pipeline</strong> — Vision/LLM primary for non-text-layer docs; rules as validator/normalizer, not primary parser.</li>
+          <li><strong>HEIC + quality gate</strong> (deskew/denoise, fail-closed on unreadable) · <strong>dedup key</strong> (GSTIN + invoice# + date + total, plus perceptual hash) · <strong>every human correction feeds the eval set</strong>.</li>
+        </ul></div>
+        <div class="note seal"><span class="k">Why a platform service, not module code</span><p>You chose to <strong>build and own</strong> extraction to reuse it later. The durable asset is the service + its API + your canonical schema; the engine underneath is an implementation detail you control and can replace. First consumer: the Expense &amp; Invoice module. When a <em>second, external</em> consumer (a client app) arrives, it <strong>graduates to its own platform-services home</strong> rather than being reached into inside the internal OpsHub project — the versioned contract makes that a day of work.</p></div>
+        <div class="note"><span class="k">Honest note on accuracy</span><p>Document AI would out-score a hand-built pipeline on raw extraction from messy scans, out of the box. Built <em>well</em> — validation (GSTIN checksum, tax-sum reconciliation) + confidence scoring + a review queue + LLM fallback for hard cases — accuracy is good and, crucially, wrong reads are <em>caught, not silently saved</em>. At ~100 invoices/month the residual gap is a handful of extra reviews.</p></div>
+      </section>
+
+      <!-- ================= PART B ================= -->
+      <div class="part-band" id="partB"><span class="pl">Part B</span><h2>Module — Delivery Challan generation</h2></div>
+
+      <section id="b1">
+        <div class="sec-head"><span class="num">B1</span><h3>Upload → generate flow</h3></div>
+<pre><code>Pick Consignor + Brand + Date + Series + Mode
+        ↓
+Upload Excel  →  Validate  →  (download English error report if issues)
+        ↓                         ↑ fix inline OR re-upload
+Preview data (first rows) + Preview one rendered challan
+        ↓
+Reserve numbers  →  In-process generation (progress bar, N / total)
+        ↓
+Success  →  Download ZIP + merged print-PDF (streamed)  →  History</code></pre>
+        <div class="measure"><ul>
+          <li><strong>Batch-level selections</strong> (not in Excel): consignor entity, brand, challan date, series, numbering mode.</li>
+          <li><strong>Grouping:</strong> rows sharing <code>Challan Ref</code> = one multi-line challan (explicit).</li>
+          <li><strong>Outputs:</strong> per-challan PDFs, a ZIP, and a single merged PDF for print operators — all streamed through the authenticated API.</li>
+        </ul></div>
+      </section>
+
+      <section id="b2">
+        <div class="sec-head"><span class="num">B2</span><h3>Domain model</h3></div>
+        <div class="measure"><p>Generic naming where it's free (<code>challan_document</code>, not a bespoke table) so a second document type is data, not a schema change.</p></div>
+        <div class="tbl"><table>
+          <thead><tr><th>Entity</th><th>Key fields</th></tr></thead>
+          <tbody>
+            <tr><td><strong>ConsignorEntity</strong></td><td>name, warehouse_address, gstin, phone, active <span style="color:var(--ink-faint)">· picked per batch</span></td></tr>
+            <tr><td><strong>Brand</strong></td><td>name, pan, active <span style="color:var(--ink-faint)">· one file = one brand</span></td></tr>
+            <tr><td><strong>BrandStateRegistration</strong></td><td>brand_id, state, state_code, gstin, address <span style="color:var(--ink-faint)">· consignee block by ship-to state</span></td></tr>
+            <tr><td><strong>HsnGstRate</strong></td><td>hsn_code, gst_rate, active <span style="color:var(--ink-faint)">· validation history</span></td></tr>
+            <tr><td><strong>NumberSeries</strong> / <strong>SeriesCounter</strong></td><td>series_code · (series, fin_year) → last_number</td></tr>
+            <tr><td><strong>GenerationJob</strong></td><td>user, consignor, brand, series, mode, challan_date, <strong>idempotency_key</strong>, source_file, total_docs, number_from/to, status, ip</td></tr>
+            <tr><td><strong>challan_document</strong></td><td>job_id, document_number, ship_to_*, <strong>consignee_snapshot(json)</strong>, total_qty, total_amount, eway_required, status, void_reason, pdf_ref</td></tr>
+            <tr><td><strong>challan_line</strong></td><td>document_id, sl_no, product_desc, hsn_code, qty, rate <em>(text)</em>, amount <em>(text)</em></td></tr>
+            <tr><td><strong>Template</strong></td><td>name, version, html_ref, active <span style="color:var(--ink-faint)">· linear versioning + rollback</span></td></tr>
+            <tr><td><strong>ValidationOverride</strong></td><td>job, row, field, issue, decided_by, decision</td></tr>
+          </tbody>
+        </table></div>
+        <div class="measure"><p>Consignee is <strong>snapshotted</strong> onto each document at generation, so later registry edits never rewrite historical challans.</p></div>
+      </section>
+
+      <section id="b3">
+        <div class="sec-head"><span class="num">B3</span><h3>Numbering &amp; integrity <span style="font-weight:400;color:var(--seal);font-size:15px">— the load-bearing spec</span></h3></div>
+        <div class="stamp"><span class="lbl">Document number format</span><span class="val">GIF/DC/26-27/L/000189</span></div>
+        <div class="measure"><ul>
+          <li><code>FY</code> = Indian financial year (Apr–Mar), <strong>computed in Asia/Kolkata</strong> everywhere; we store both UTC and the IST business date the number was issued under.</li>
+          <li>Independent counter per <strong>(series × FY)</strong>, resetting each April. Series: one shared <code>L</code> by default; Admin can add more.</li>
+          <li><strong>Cutover seed:</strong> a one-time, audited, admin-signed action records the last manual number (e.g. <code>L / 26-27 = 188</code>), with a guard so the first system number can't precede it.</li>
+        </ul></div>
+        <div class="note seal"><span class="k">Why this is its own section</span><p>Every reviewer independently escalated numbering as the highest risk and the real IP — a duplicated live GST number is a compliance failure that's unfixable once documents leave the building. It's a <strong>platform service</strong>; every future numbered-document module inherits it.</p></div>
+        <h4>Reserve-before-generate</h4>
+        <div class="measure"><ol>
+          <li>Validate the whole batch first — no numbers are touched until validation passes.</li>
+          <li>In one transaction: <strong>lock the counter row</strong> (<code>SELECT … FOR UPDATE</code>), reserve N numbers, write documents as <code>RESERVED</code>, bump the counter.</li>
+          <li>Generate PDFs; mark each <code>GENERATED</code> (per-document idempotent — skip any already generated).</li>
+          <li>On failure → job <code>FAILED</code>; reserved numbers are consumed, never recycled (gaps are legal and explained by FAILED/VOID status).</li>
+        </ol></div>
+        <h4>Integrity controls <span style="font-weight:400;color:var(--ink-faint)">(the defects the security review found, and their fixes)</span></h4>
+        <div class="tbl"><table>
+          <thead><tr><th>Risk</th><th>Sev</th><th>Control</th></tr></thead>
+          <tbody>
+            <tr><td>Two batches issue the same live number</td><td><span class="pill crit">crit</span></td><td><strong>Unique partial index</strong> on non-void <code>(series, fy, number)</code> — the one control that must exist before go-live</td></tr>
+            <tr><td>Double-submit / retry double-reserves</td><td><span class="pill crit">crit</span></td><td><strong>Idempotency key</strong> on batch creation; a retry returns the existing reservation</td></tr>
+            <tr><td>FAILED-batch retry grabs a fresh block</td><td><span class="pill crit">crit</span></td><td>Retry <strong>resumes the existing reservation</strong>; never re-enters the counter lock</td></tr>
+            <tr><td>FY computed in UTC near Apr-1 midnight IST</td><td><span class="pill crit">crit</span></td><td>Compute FY in <strong>Asia/Kolkata</strong>; atomic create/lock of the new-FY counter</td></tr>
+            <tr><td>Worker dies → orphan <code>RESERVED</code> rows</td><td><span class="pill warn">med</span></td><td>Reconcile sweeper surfaces stale reservations for admin resolution; no auto-recycle</td></tr>
+            <tr><td>Single admin silently voids / overrides</td><td><span class="pill warn">high</span></td><td>Append-only audit of every override/void; optional maker-checker on voiding GENERATED docs</td></tr>
+          </tbody>
+        </table></div>
+        <div class="measure"><p><strong>Modes:</strong> <code>continue-from-last</code> (default) and <code>custom-start</code> ship in v1. <span class="pill later">deferred</span> <code>read-from-Excel</code> (mode 3) moves to phase 2 — it's the highest collision risk and ships only once the unique-constraint + in-lock validation is proven.</p></div>
+      </section>
+
+      <section id="b4">
+        <div class="sec-head"><span class="num">B4</span><h3>Validation</h3></div>
+        <h4>Hard errors <span class="pill crit">block generation</span></h4>
+        <div class="measure"><ul>
+          <li>Missing mandatory: Ship-To Name / Address / State, Product Description, HSN, Qty, Amount.</li>
+          <li>Ship-To State has no matching Brand-State registration (consignee GSTIN can't be derived).</li>
+          <li>A Challan Ref group with no line items; unparseable Qty.</li>
+        </ul></div>
+        <h4>Soft warnings <span class="pill warn">accept / reject each</span></h4>
+        <div class="measure"><ul>
+          <li><strong>HSN → GST-rate mismatch</strong> vs saved history (rate only — same HSN carries many descriptions).</li>
+          <li><strong>Amount sanity:</strong> where Qty &amp; Rate are numeric, warn if <code>Amount ≠ Qty × Rate × (1 + GST%)</code>; skipped when Rate is blank/text (e.g. "Gift").</li>
+          <li><strong>Duplicate-dispatch:</strong> same Ship-To + same products on the same date. · <strong>GSTIN checksum</strong> anomalies.</li>
+        </ul></div>
+        <div class="measure"><p><strong>e-way flag</strong> <span class="pill accent">informational</span> — challans over <code>eway_threshold</code> (admin-set, default ₹50,000) are flagged "e-way bill required." Accepted warnings are logged as <code>ValidationOverride</code>. Every issue is exportable as a plain-English <code>.xlsx</code> (Row · Ref · Field · Severity · Issue · Suggested fix · Your value · Expected).</p></div>
+      </section>
+
+      <section id="b5">
+        <div class="sec-head"><span class="num">B5</span><h3>Rendering — HTML → PDF</h3></div>
+        <div class="measure"><ul>
+          <li><strong>Template is HTML/CSS</strong> with a repeating line-item loop, rendered by <strong>WeasyPrint</strong> in-process. Versioned in git, snapshot-tested, deterministic — no LibreOffice.</li>
+          <li>One PDF per challan (multi-line). Naming: <code>GIF_DC_26-27_L_000189.pdf</code>. Copies (Original / Duplicate / Triplicate) are an admin-enabled toggle.</li>
+          <li>Egress-locked renderer, autoescape on, cell values bound as data (§A5).</li>
+        </ul></div>
+        <div class="note"><span class="k">Reversed from v1 — unanimous</span><p>All three reviewers voted HTML→PDF over DOCX/LibreOffice: lighter, testable, deterministic, and it removes the Jinja-in-DOCX template-injection class. LibreOffice was called an "operational tarpit."</p></div>
+        <h4>Template variable → source</h4>
+        <div class="tbl"><table>
+          <thead><tr><th>Variable</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr><td class="mono-col">document_number, date</td><td>generated / batch</td></tr>
+            <tr><td class="mono-col">consignor_*</td><td>Consignor master (batch)</td></tr>
+            <tr><td class="mono-col">consignee_* (name/address/gstin/state/phone)</td><td>Brand + Brand-State registry (by Ship-To State)</td></tr>
+            <tr><td class="mono-col">ship_to_* , po_no, invoice_no</td><td>Excel row</td></tr>
+            <tr><td class="mono-col">lines[] (sl, product, hsn, qty, rate, amount)</td><td>Excel line rows</td></tr>
+            <tr><td class="mono-col">total_qty, total_amount</td><td>computed = sum of lines</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section id="b6">
+        <div class="sec-head"><span class="num">B6</span><h3>Master data</h3></div>
+        <div class="measure"><p><span class="pill accent">Admin</span> <span class="pill good">audited</span> CRUD for: Consignor entities · Brand + Brand-State registry · HSN → GST rates · Number series &amp; counters (seed / adjust) · Templates (upload / activate / rollback) · Settings (e-way threshold, copies toggle).</p></div>
+      </section>
+
+      <section id="b7">
+        <div class="sec-head"><span class="num">B7</span><h3>Void &amp; lifecycle</h3></div>
+        <div class="measure">
+          <p>Document: <code>RESERVED → GENERATED → VOID</code>. &nbsp;Job: <code>PENDING → GENERATING → COMPLETED / FAILED</code>.</p>
+          <p><strong>Void</strong> <span class="pill accent">admin</span> — reason mandatory, audited; the number is retained, never reused. A <strong>reconcile sweeper</strong> resolves orphaned <code>RESERVED</code> rows. This is the correct handling of a cancelled dispatch under gap-tolerant numbering.</p>
+        </div>
+      </section>
+
+      <section id="b8">
+        <div class="sec-head"><span class="num">B8</span><h3>Reports &amp; dashboards</h3></div>
+        <div class="measure"><p><strong>Dashboard:</strong> challans today / this month / this FY (count + ₹ value) · current number per series · in-progress / failed batches · recent activity.</p></div>
+        <div class="tbl"><table>
+          <thead><tr><th>Report</th><th>Audience</th><th>When</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Challan Register</strong> — gap-annotated per FY/series (every number 1..N with state + reason for each gap)</td><td>Finance / Compliance</td><td><span class="pill p1">v1</span></td></tr>
+            <tr><td>Generation Job history</td><td>Ops / MIS</td><td><span class="pill p1">v1</span></td></tr>
+            <tr><td>e-way exposure (over threshold)</td><td>Compliance</td><td><span class="pill p1">v1</span></td></tr>
+            <tr><td>Void report</td><td>Audit</td><td><span class="pill p1">v1</span></td></tr>
+            <tr><td>Audit log</td><td>Admin</td><td><span class="pill p1">v1</span></td></tr>
+            <tr><td>State / Brand dispatch summary · Item / HSN dispatch · HSN-override</td><td>Mgmt / Inventory / Finance</td><td><span class="pill p2">phase 2</span></td></tr>
+          </tbody>
+        </table></div>
+        <div class="note"><span class="k">Bridge to loyalty</span><p>The Item / HSN dispatch report is reward-fulfilment inventory data ("340 Titan watches dispatched this month") — built from data already captured, a natural future bridge to the loyalty side.</p></div>
+      </section>
+
+      <!-- ================= CLOSE ================= -->
+      <section id="topo">
+        <div class="sec-head"><span class="num">·</span><h3>Project topology &amp; isolation</h3></div>
+        <div class="measure"><p>OpsHub runs in its <strong>own GCP project</strong> (same billing account → one consolidated invoice + a per-project budget alert to catch spikes). Three projects, each isolated by <strong>risk class</strong> — not one per app, not one shared blob:</p></div>
+        <div class="tbl"><table>
+          <thead><tr><th>Project</th><th>Risk class</th><th>Holds</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Loyaltybase</strong></td><td>External · money-critical</td><td>Multi-tenant loyalty (existing)</td></tr>
+            <tr><td><strong>OpsHub</strong></td><td>Internal staff</td><td>Delivery Challan · Expense · Document Intelligence</td></tr>
+            <tr><td><strong>gifsy-clients</strong></td><td>External · client-facing</td><td>Multi-tenant app + bespoke client apps (future)</td></tr>
+          </tbody>
+        </table></div>
+        <h4>What crosses the boundary — code &amp; services, never servers</h4>
+        <div class="measure"><ul>
+          <li><strong>Isolated per project:</strong> project, DB instance, buckets, service accounts, auth. OpsHub's DB is never on the same instance as Loyaltybase's money path or the internet-exposed client apps.</li>
+          <li><strong>Reused as versioned code:</strong> Terraform modules, CI/CD template, auth/RBAC/audit libraries, log conventions.</li>
+          <li><strong>Reused as an authed API:</strong> the Document Intelligence service (cross-project OIDC).</li>
+        </ul></div>
+        <div class="note"><span class="k">Cross-service hardening (from review)</span><p>Where services or stacks meet: <strong>service-to-service auth</strong> (GCP OIDC) · a <strong>versioned extraction API</strong> (OpenAPI/protobuf, generated clients) · <strong>W3C trace propagation</strong> across the boundary · <strong>GCS bucket/IAM isolation</strong> · idempotent extraction ingest · <strong>conformance test-vectors</strong> so the hash-chained audit + FY-numbering behave byte-identically across the Python and Node stacks.</p></div>
+        <div class="note seal"><span class="k">The rule</span><p>Audience / risk class = a project boundary. Know-how crosses it as <em>libraries</em>; capabilities cross it as <em>authed API calls</em>. Databases and servers don't cross it.</p></div>
+      </section>
+
+      <section id="cost">
+        <div class="sec-head"><span class="num">·</span><h3>Cost &amp; scaling</h3></div>
+        <div class="measure"><ul>
+          <li><strong>Separate GCP project</strong>, same billing account → consolidated invoice + a <strong>per-project budget alert</strong> that catches any spike (runaway OCR/LLM, storage) immediately.</li>
+          <li><strong>Cloud Run scales to zero</strong> (~15s cold start; fine for internal background work). API + OCR worker.</li>
+          <li><strong>Database — Option B:</strong> Cloud SQL can't scale to zero, so OpsHub runs <strong>one</strong> small instance (smallest tier, single-zone, no HA) hosting <strong>separate prod + non-prod databases</strong>. Backups + point-in-time recovery kept. Never co-located with Loyaltybase or the client apps.</li>
+          <li><strong>Extraction:</strong> self-built OCR ≈ ₹0/page; Vision within free tier; fallback trivial at ~100 invoices/mo. The real cost is build engineering, not cloud spend.</li>
+        </ul></div>
+        <div class="tbl"><table>
+          <thead><tr><th>Component</th><th>Config</th><th>Monthly</th></tr></thead>
+          <tbody>
+            <tr><td>Cloud SQL (Postgres)</td><td>1 instance · smallest tier · single-zone · prod + non-prod DBs</td><td class="mono-col">~₹1,000</td></tr>
+            <tr><td>Cloud Run (API + worker)</td><td>scale-to-zero</td><td class="mono-col">~₹200–500</td></tr>
+            <tr><td>Cloud Storage</td><td>originals + PDFs</td><td class="mono-col">~₹100–200</td></tr>
+            <tr><td>Extraction (self-built + fallback)</td><td>Vision free tier; fallback trivial</td><td class="mono-col">~₹0–150</td></tr>
+            <tr><td>Logging · Secrets · Registry</td><td>—</td><td class="mono-col">~₹300–500</td></tr>
+            <tr><td>Firebase Auth · error tracking</td><td>free tier</td><td class="mono-col">₹0</td></tr>
+            <tr><td>Networking (Direct VPC egress)</td><td>—</td><td class="mono-col">~₹50–100</td></tr>
+            <tr><td><strong>Total</strong></td><td>≈ ₹2,000/mo typical</td><td class="mono-col"><strong>~₹1,700–2,500</strong></td></tr>
+          </tbody>
+        </table></div>
+        <div class="measure"><p>Run cost only — excludes the one-time engineering to build the extraction engine, which dwarfs the cloud bill. The DB is ~half the bill (the one always-on resource); everything else scales to zero or is free-tier.</p></div>
+      </section>
+
+      <section id="dec">
+        <div class="sec-head"><span class="num">·</span><h3>Open items</h3></div>
+        <div class="measure"><p><strong>Architecture — finalised:</strong> stack = Python/FastAPI + React · auth = Firebase Auth (email/password) + Postgres RBAC · access scope = designed-for-later, default open · rendering = HTML→PDF (dev-owned template) · extraction = <strong>your own engine primary</strong>, Document AI backup · <strong>separate GCP project</strong> (same billing account) · <strong>DB Option B</strong> (one small instance, prod + non-prod DBs) · Cloud Run scale-to-zero · ~₹2,000/mo.</p></div>
+        <div class="measure"><p><strong>Inputs still needed to start building</strong> (facts only you have — not architecture decisions):</p><ol>
+          <li><strong>Second use case</strong> for the extraction capability — doc types + rough timeline, so the canonical schema/contract is designed general enough.</li>
+          <li><strong>Challan seed</strong> — current last number for the <code>L</code> series in FY 26-27.</li>
+          <li><strong>Master data</strong> — consignor entities (name/warehouse/GSTIN/phone) + the brand → state-GSTIN/address registry.</li>
+          <li><strong>GST retention period</strong> you're required to keep documents for.</li>
+        </ol></div>
+      </section>
+
+      <section id="scope">
+        <div class="sec-head"><span class="num">·</span><h3>Out of scope</h3></div>
+        <div class="chips">
+          <span class="chip out">schema-per-module</span><span class="chip out">Cloud Tasks queue (v1)</span>
+          <span class="chip out">signed URLs</span><span class="chip out">read-from-Excel numbering (v1)</span>
+          <span class="chip out">per-action permission matrix</span><span class="chip out">plugin-loader / registries-as-frameworks</span>
+          <span class="chip out">micro-frontends</span><span class="chip out">template branching</span>
+          <span class="chip out">e-way portal integration</span><span class="chip out">30-module framework</span>
+        </div>
+        <div class="measure"><p>e-way integration is possible later via a GSP + NIC API, but needs GSP onboarding and transport data (vehicle / distance) we don't capture today. v1 flags only.</p></div>
+      </section>
+
+      <section id="phase">
+        <div class="sec-head"><span class="num">·</span><h3>Phasing</h3></div>
+        <div class="tbl"><table>
+          <thead><tr><th>Phase</th><th>Contents</th></tr></thead>
+          <tbody>
+            <tr><td><span class="pill p1">Phase 1 · MVP</span></td><td>Firebase auth + RBAC · master data · upload → validate (error report, inline-fix, dup-dispatch + amount-sanity + HSN warnings) → preview → reserve → generate → ZIP + merged PDF (streamed) → history · <strong>hardened numbering</strong> (modes 1–2, FY-IST, unique index, idempotency, reconcile, seed) · void · Challan Register + Job History + e-way + Void + Audit reports · dashboard · append-only audit</td></tr>
+            <tr><td><span class="pill p2">Phase 2</span></td><td>Read-from-Excel numbering (mode 3) · Copies toggle · State/Brand + Item/HSN + override reports · template rollback UI · maker-checker on void</td></tr>
+            <tr><td><span class="pill later">Later</span></td><td>e-way GSP integration · additional document types (Invoice, Packing Slip…) via new template + mapping · additional modules</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<footer class="foot">
+  <div class="wrap">Gifsy OpsHub · Delivery Challan Module · Design v2.0 · 29 Jul 2026 · revised after independent 3-lens review · for sign-off</div>
+</footer>

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.db
+.env
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Secrets / creds
+firebase-sa.json
+*-sa.json
+*.pem
+
+# OS
+.DS_Store
+Thumbs.db
