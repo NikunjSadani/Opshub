@@ -45,6 +45,8 @@ def test_rbac_axes():
     # admin-only action
     assert can(admin, "challan.void") is True
     assert can(ops, "challan.void") is False
+    # default-deny: an unregistered/typo'd action authorizes NO ONE, not even admin
+    assert can(admin, "settings.typo") is False
     # explicit per-user module access (admin sees all)
     assert can_access_module(admin, "expense_invoice") is True
     assert can_access_module(ops, "document_automation") is True

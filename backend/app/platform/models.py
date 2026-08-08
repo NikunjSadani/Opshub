@@ -65,7 +65,9 @@ class AuditLog(Base):
     entity_id: Mapped[str | None] = mapped_column(String(120))
     detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     ip: Mapped[str | None] = mapped_column(String(64))
-    prev_hash: Mapped[str] = mapped_column(String(64), default="")
+    # UNIQUE forces the chain to stay linear: a concurrent second append with the
+    # same prev_hash fails the constraint and retries against the new head.
+    prev_hash: Mapped[str] = mapped_column(String(64), default="", unique=True)
     row_hash: Mapped[str] = mapped_column(String(64), index=True)
 
 

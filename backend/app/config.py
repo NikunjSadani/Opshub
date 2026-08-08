@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     firebase_credentials_file: str | None = None
     firebase_project_id: str | None = None
 
+    # --- uploads ---
+    max_upload_bytes: int = 50 * 1024 * 1024  # 50 MB cap (DoS guard)
+
     # --- misc ---
     cors_allow_origins: list[str] = []  # SPA is served same-origin; empty by design
 

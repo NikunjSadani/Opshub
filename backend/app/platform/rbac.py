@@ -26,15 +26,22 @@ ADMIN_ONLY: frozenset[str] = frozenset(
     }
 )
 
+# Non-admin actions any ACTIVE user may perform (empty for now — module access is the
+# real gate for module use). Keeping this explicit makes `can()` DEFAULT-DENY.
+NON_ADMIN_ACTIONS: frozenset[str] = frozenset()
+
 
 def can(user: User, action: str, resource: Any | None = None) -> bool:
-    """True if `user` may perform `action`. `resource` reserved for future scoping."""
+    """True if `user` may perform `action`. `resource` reserved for future scoping.
+
+    DEFAULT-DENY: an unknown/unregistered action returns False, so a typo (e.g.
+    `setting.edit` vs `settings.edit`) can never silently authorize everyone.
+    """
     if not user.active:
         return False
     if action in ADMIN_ONLY:
         return user.role == Role.ADMIN
-    # Non-admin-gated actions: any active role may perform (module access is the gate).
-    return True
+    return action in NON_ADMIN_ACTIONS
 
 
 def can_access_module(user: User, module_key: str) -> bool:

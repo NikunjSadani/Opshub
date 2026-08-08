@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.platform.models import AuditLog
@@ -38,9 +39,12 @@ def log(
     detail: dict[str, Any] | None = None,
     ip: str | None = None,
 ) -> AuditLog:
-    """Append one audit row, chained to the previous row's hash."""
-    last = db.execute(select(AuditLog).order_by(AuditLog.id.desc()).limit(1)).scalar_one_or_none()
-    prev_hash = last.row_hash if last else ""
+    """Append one audit row, chained to the previous row's hash.
+
+    Concurrency-safe: `prev_hash` is UNIQUE, so if another append lands first the
+    insert fails and we retry against the new head — the chain can't fork. Each
+    attempt runs in a SAVEPOINT so the caller's other uncommitted work is kept.
+    """
     ts = datetime.now(UTC)
     payload = {
         "ts": ts.isoformat(),
@@ -51,20 +55,30 @@ def log(
         "detail": detail or {},
         "ip": ip,
     }
-    row = AuditLog(
-        ts=ts,
-        actor_uid=actor_uid,
-        action=action,
-        entity=entity,
-        entity_id=entity_id,
-        detail=detail or {},
-        ip=ip,
-        prev_hash=prev_hash,
-        row_hash=compute_row_hash(prev_hash, payload),
-    )
-    db.add(row)
-    db.flush()
-    return row
+    for _attempt in range(8):
+        last = db.execute(
+            select(AuditLog).order_by(AuditLog.id.desc()).limit(1)
+        ).scalar_one_or_none()
+        prev_hash = last.row_hash if last else ""
+        row = AuditLog(
+            ts=ts,
+            actor_uid=actor_uid,
+            action=action,
+            entity=entity,
+            entity_id=entity_id,
+            detail=detail or {},
+            ip=ip,
+            prev_hash=prev_hash,
+            row_hash=compute_row_hash(prev_hash, payload),
+        )
+        sp = db.begin_nested()
+        try:
+            db.add(row)
+            db.flush()
+            return row
+        except IntegrityError:
+            sp.rollback()  # another append grabbed this prev_hash; re-read head and retry
+    raise RuntimeError("audit chain contention: could not append after retries")
 
 
 def verify_chain(db: Session) -> bool:
