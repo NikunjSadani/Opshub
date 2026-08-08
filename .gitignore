@@ -18,6 +18,12 @@ firebase-sa.json
 *-sa.json
 *.pem
 
+# Terraform (keep .terraform.lock.hcl committed)
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+
 # OS
 .DS_Store
 Thumbs.db

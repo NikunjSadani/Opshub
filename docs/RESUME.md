@@ -57,12 +57,14 @@ cd backend && python -m venv .venv && ./.venv/Scripts/python.exe -m pip install 
 ./.venv/Scripts/python.exe -m pytest                 # all pass
 ```
 
+### Increment 3 — seed + Terraform (done + gate-green)
+- **`app/seed.py`** — guarded (fail-closed for prod), idempotent; seeds an Admin + an MIS user (explicit `document_automation` grant) + `eway_threshold` setting. *(pytest 26/26 incl. prod-refusal + idempotency.)*
+- **`infra/terraform/`** — full separate-project infra, **`terraform validate` Success** (fmt clean): project + APIs · VPC + Private Service Access · **Cloud SQL Option-B** (one small single-zone instance, prod+non-prod DBs, backups/PITR, private IP) · GCS (isolated) · least-priv SAs · Secret Manager (`@localhost/…?host=/cloudsql/…` form) · **Cloud Run scale-to-zero** + **in-VPC Alembic migrate job** · billing budget + threshold alerts. **APPLY needs owner GCP org/billing access.**
+
 ## Next (Phase 0 remaining)
 Access-independent (buildable now):
-1. **Guarded seed** (`app/seed.py`, fail-closed for prod) — seed an initial Admin + demo data.
-2. **Settings-backed config surface** for the modules that need it (e.g. e-way threshold) — thin.
-3. **Terraform** — separate GCP project, Option-B Cloud SQL, Cloud Run, GCS, budget alert (WRITE now; APPLY needs owner GCP access).
-4. **In-VPC Alembic migration Cloud Run Job** definition (runs, but applying to a real DB needs GCP).
+1. **Settings-backed config surface** for the modules that need it (e.g. e-way threshold) — thin.
+2. **CI/CD** — GitHub Actions frontend job (tsc+vitest+build) + deploy jobs (`needs: test`), staging auto-deploy + migrate `--wait`.
 
 Blocked on owner GCP/Firebase access (needed for runtime-verification):
 5. **User Management** module (Admin) — create/invite via Firebase Admin SDK, assign role + explicit module access, enable/disable; audited. *(auth path → dual audit; needs Firebase.)*

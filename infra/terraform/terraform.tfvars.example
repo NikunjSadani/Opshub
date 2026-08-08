@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and fill in. APPLY needs owner GCP org/billing access.
+project_id      = "gifsy-opshub"
+billing_account = "XXXXXX-XXXXXX-XXXXXX" # same account as Loyaltybase
+# org_id        = "123456789012"          # or folder_id, for project creation
+region          = "asia-south1"
+budget_amount   = 50 # billing-account currency; ~₹2–3.5k target
+# db_tier       = "db-f1-micro"
