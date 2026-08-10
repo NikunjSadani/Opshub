@@ -28,8 +28,8 @@ MIS = User(
 )
 OUTSIDER = User(firebase_uid="out", email="o@x.com", name="O", role=Role.OPERATIONS, active=True)
 
-GSTIN_A = "27AAAAA0000A1Z5"
-GSTIN_B = "29BBBBB0000B1Z5"
+GSTIN_A = "27AAAAA0000A1Z2"  # valid checksum, state 27 = Maharashtra
+GSTIN_B = "29AAAAA0000A1ZY"  # valid checksum, state 29 = Karnataka
 
 
 @pytest.fixture
@@ -73,7 +73,7 @@ def _as(client: TestClient, user: User) -> None:
 def test_admin_create_and_list_consignor(client: TestClient) -> None:
     r = client.post(
         "/api/v1/masterdata/consignor",
-        json={"name": "Gifsy Depot", "gstin": GSTIN_A, "state": "West Bengal"},
+        json={"name": "Gifsy Depot", "gstin": GSTIN_A, "state": "Maharashtra"},
     )
     assert r.status_code == 201, r.text
     assert r.json()["active"] is True
@@ -158,6 +158,20 @@ def test_gstin_state_code_validated(client: TestClient) -> None:
     # State code "00" is not a real GST state code.
     r = client.post("/api/v1/masterdata/consignor",
                     json={"name": "X", "gstin": "00AAAAA0000A1Z5", "state": "WB"})
+    assert r.status_code == 422
+
+
+def test_gstin_checksum_rejected(client: TestClient) -> None:
+    # 15 chars, valid state code (27), but a wrong final check digit.
+    r = client.post("/api/v1/masterdata/consignor",
+                    json={"name": "X", "gstin": "27AAAAA0000A1Z9", "state": "Maharashtra"})
+    assert r.status_code == 422
+
+
+def test_gstin_state_mismatch_rejected(client: TestClient) -> None:
+    # Valid Maharashtra (27) GSTIN paired with a recognized non-matching state.
+    r = client.post("/api/v1/masterdata/consignor",
+                    json={"name": "X", "gstin": GSTIN_A, "state": "Karnataka"})
     assert r.status_code == 422
 
 

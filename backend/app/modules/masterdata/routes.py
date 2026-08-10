@@ -16,14 +16,14 @@ from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.modules.masterdata.models import Consignee, Consignor, HsnCode, Series
-from app.modules.masterdata.normalize import collapse_ws, valid_gstin_state
+from app.modules.masterdata.normalize import collapse_ws, gstin_matches_state, valid_gstin
 from app.platform import audit
 from app.platform.auth import current_user
 from app.platform.models import User
@@ -40,8 +40,8 @@ def _clean_text(v: str) -> str:
 
 
 def _check_gstin(v: str) -> str:
-    if not valid_gstin_state(v):
-        raise ValueError("GSTIN state code is not a valid GST state code")
+    if not valid_gstin(v):
+        raise ValueError("GSTIN is invalid (bad state code or check digit)")
     return v
 
 
@@ -100,6 +100,13 @@ class ConsignorIn(BaseModel):
     _norm = field_validator("name", "state", mode="after")(_clean_text)
     _gstin = field_validator("gstin", mode="after")(_check_gstin)
 
+    @model_validator(mode="after")
+    def _gstin_state_match(self) -> ConsignorIn:
+        if not gstin_matches_state(self.gstin, self.state):
+            raise ValueError(
+                f"GSTIN state code {self.gstin[:2]} does not match state '{self.state}'")
+        return self
+
 
 class ConsignorOut(ConsignorIn):
     model_config = ConfigDict(from_attributes=True)
@@ -116,6 +123,14 @@ class ConsigneeIn(BaseModel):
 
     _norm = field_validator("brand", "state", "name", mode="after")(_clean_text)
     _gstin = field_validator("gstin", mode="after")(_check_gstin)
+
+    @model_validator(mode="after")
+    def _gstin_state_match(self) -> ConsigneeIn:
+        # The consignee's GSTIN must belong to its (ship-to) state.
+        if not gstin_matches_state(self.gstin, self.state):
+            raise ValueError(
+                f"GSTIN state code {self.gstin[:2]} does not match state '{self.state}'")
+        return self
 
 
 class ConsigneeOut(ConsigneeIn):
