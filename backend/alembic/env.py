@@ -1,7 +1,8 @@
 """Alembic environment. URL + target metadata come from the app so migrations
 match the models. Import EVERY module that defines models here so autogenerate
 sees all tables. The partial-unique index for challan numbering (WHERE status <>
-'VOID') must be HAND-ADDED to its migration — the ORM won't model it.
+'VOID') is modelled on `NumberingAllocation.__table_args__` and applied by hand
+in its migration; `alembic check` confirms the two agree (no drift).
 """
 from logging.config import fileConfig
 
@@ -13,6 +14,7 @@ from app.db import Base
 
 # --- populate Base.metadata: import all model-defining modules ---
 import app.modules.files.models  # noqa: E402,F401
+import app.modules.numbering.models  # noqa: E402,F401
 import app.platform.jobs  # noqa: E402,F401
 import app.platform.models  # noqa: E402,F401
 # NOTE: import every model-defining module here before autogenerate.

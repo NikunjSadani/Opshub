@@ -20,6 +20,20 @@ from sqlalchemy.orm import Session
 from app.platform.models import AuditLog
 
 
+def _iso_utc(ts: datetime) -> str:
+    """Canonical UTC isoformat for hashing.
+
+    The hash MUST be reproducible on read-back, but sqlite drops tzinfo on a
+    DateTime(timezone=True) round-trip and Postgres renders timestamptz in the
+    session TZ — so a naive `ts.isoformat()` differs write-vs-verify and the
+    chain falsely reports tampering. Normalizing to explicit UTC on BOTH sides
+    (treating a naive value as UTC) makes the serialized timestamp identical.
+    """
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC).isoformat()
+
+
 def _canonical(payload: dict[str, Any]) -> str:
     # Deterministic serialization so the hash is reproducible/verifiable.
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
@@ -47,7 +61,7 @@ def log(
     """
     ts = datetime.now(UTC)
     payload = {
-        "ts": ts.isoformat(),
+        "ts": _iso_utc(ts),
         "actor_uid": actor_uid,
         "action": action,
         "entity": entity,
@@ -86,7 +100,7 @@ def verify_chain(db: Session) -> bool:
     prev_hash = ""
     for row in db.execute(select(AuditLog).order_by(AuditLog.id.asc())).scalars():
         payload = {
-            "ts": row.ts.isoformat(),
+            "ts": _iso_utc(row.ts),
             "actor_uid": row.actor_uid,
             "action": row.action,
             "entity": row.entity,

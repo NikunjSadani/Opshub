@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.modules.files.routes import router as files_router
 from app.modules.health.routes import SPEC as HEALTH
 from app.modules.jobs.routes import router as jobs_router
+from app.modules.numbering.routes import router as numbering_router
 from app.modules.settings.routes import router as settings_router
 from app.platform.module_registry import REGISTRY, register_module
 
@@ -33,6 +34,7 @@ def create_app() -> FastAPI:
     # platform primitive routers (infrastructure, not nav modules)
     app.include_router(files_router, prefix="/api/v1/files", tags=["files"])
     app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
+    app.include_router(numbering_router, prefix="/api/v1", tags=["numbering"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
     _mount_spa(app, settings.static_dir)
     return app

@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import SessionLocal
+from app.modules.numbering import service as numbering
+from app.modules.numbering.models import NumberingCounter
 from app.platform import audit
 from app.platform.models import Role, Setting, User, UserModuleAccess
 
@@ -63,7 +65,32 @@ def seed(db: Session) -> None:
     # A default config setting (config, never secrets — those go to Secret Manager).
     if db.get(Setting, "eway_threshold") is None:
         db.add(Setting(key="eway_threshold", value={"amount": 50000}, updated_by="seed"))
+    # PLACEHOLDER challan counter: series "L", current FY, high-water 0 (first issue
+    # would be L/000001). The owner sets the REAL last number before go-live via the
+    # admin mode-2 seed (POST /numbering/seed). Idempotent.
+    _seed_placeholder_counter(db, series="L")
     db.commit()
+
+
+def _seed_placeholder_counter(db: Session, *, series: str) -> None:
+    fy = numbering.current_fy()
+    exists = db.execute(
+        select(NumberingCounter).where(
+            NumberingCounter.series == series, NumberingCounter.fy == fy
+        )
+    ).scalar_one_or_none()
+    if exists is not None:
+        return
+    db.add(NumberingCounter(series=series, fy=fy, last_number=0))
+    db.flush()
+    audit.log(
+        db,
+        action="seed.numbering_counter",
+        actor_uid="seed",
+        entity="numbering_counter",
+        entity_id=f"{series}/{fy}",
+        detail={"last_number": 0, "placeholder": True},
+    )
 
 
 def main() -> None:  # pragma: no cover - container entrypoint
