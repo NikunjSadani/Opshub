@@ -66,8 +66,15 @@ cd backend && python -m venv .venv && ./.venv/Scripts/python.exe -m pip install 
 - **Root multi-stage `Dockerfile`** — builds the SPA then bakes it into the FastAPI image (`STATIC_DIR=/app/static`). One image = whole product; used by the Cloud Run service AND the migrate job. (`backend/Dockerfile` removed.)
 - **CI/CD** (all 4 workflows YAML-valid): `_test.yml` (reusable full gate — backend ruff/mypy/pytest + frontend tsc/vitest/build) · `ci.yml` (PRs/pushes) · `deploy-staging.yml` (auto on `develop`, `deploy` **needs `test`**, build→push→**in-VPC migrate `--wait`**→deploy→**verify serving SHA**) · `deploy-prod.yml` (on `main`, `environment: production` **required-reviewer gate**).
 
-## Next (Phase 0 remaining)
-Access-independent (buildable now): **Settings-backed config surface** (thin, e.g. e-way threshold) — the last non-blocked item.
+## ▶ IMMEDIATE NEXT — Phase 1: Delivery Challan (owner chose Tier 1, 2026-08-08)
+Start with the **numbering engine** (load-bearing · **dual-audit mandatory** · fully local-verifiable):
+- **Number format CONFIRMED by owner:** `GIF/DC/{FY}/{series}/{NNNNNN}` e.g. `GIF/DC/26-27/L/000189` — FY (Apr–Mar, IST) embedded, series letter `L`, 6-wide zero-pad, **resets each FY**. Modes 1–2 (continue-from-last, custom-start) in v1; read-from-Excel deferred. Build seeded with a placeholder `L`-number (owner fills the real current value later).
+- **Integrity controls (§B3):** reserve-before-generate under counter row-lock · unique **partial index on non-void `(series, fy, number)`** (HAND-ADD to the migration) · idempotency key · retry resumes the reservation · FY computed in `Asia/Kolkata` · reconcile sweeper · audited seed.
+- **Document layout = FAITHFUL REPRODUCTION** of the existing `L/433` `.docx` (consignor / consignee / ship-to blocks + line-item table + totals) as **HTML→PDF** — NOT a redesign. ⚠️ WeasyPrint native deps are fiddly on Windows → verify the PDF byte-render in the **Linux container**, not necessarily locally.
+- Then: master-data CRUD (consignor · brand→state-GSTIN registry · HSN · series) · upload→validate→downloadable English error report · HTML→PDF render · ZIP + merged PDF · challan register + reports. Owner inputs (real seed number, master data) fill values later; build + verify with samples now.
+
+## Later (Phase 0 remaining)
+Access-independent (buildable now): **Settings-backed config surface** (thin, e.g. e-way threshold).
 
 Blocked on owner GCP/Firebase access (needed for runtime-verification):
 5. **User Management** module (Admin) — create/invite via Firebase Admin SDK, assign role + explicit module access, enable/disable; audited. *(auth path → dual audit; needs Firebase.)*
