@@ -95,12 +95,12 @@ def create_job(
         result={},
         created_by=created_by,
     )
-    sp = db.begin_nested()  # SAVEPOINT: only this insert is undone on a race
     try:
-        db.add(job)
-        db.flush()
+        # `with` releases the savepoint on success (a bare begin_nested() leaks one).
+        with db.begin_nested():  # SAVEPOINT: only this insert is undone on a race
+            db.add(job)
+            db.flush()
     except IntegrityError:
-        sp.rollback()
         if idempotency_key is None:
             raise
         winner = db.execute(

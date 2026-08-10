@@ -11,9 +11,11 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
 
 from app.config import get_settings
+from app.modules.challan.routes import router as challan_router
 from app.modules.files.routes import router as files_router
 from app.modules.health.routes import SPEC as HEALTH
 from app.modules.jobs.routes import router as jobs_router
+from app.modules.masterdata.routes import router as masterdata_router
 from app.modules.numbering.routes import router as numbering_router
 from app.modules.settings.routes import router as settings_router
 from app.platform.module_registry import REGISTRY, register_module
@@ -33,7 +35,9 @@ def create_app() -> FastAPI:
         app.include_router(spec.router, prefix=f"/api/v1{prefix}", tags=[spec.key])
     # platform primitive routers (infrastructure, not nav modules)
     app.include_router(files_router, prefix="/api/v1/files", tags=["files"])
+    app.include_router(challan_router, prefix="/api/v1", tags=["challan"])
     app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
+    app.include_router(masterdata_router, prefix="/api/v1", tags=["masterdata"])
     app.include_router(numbering_router, prefix="/api/v1", tags=["numbering"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
     _mount_spa(app, settings.static_dir)

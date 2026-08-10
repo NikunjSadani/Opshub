@@ -141,13 +141,13 @@ def _lock_or_create_counter(db: Session, series: str, fy: str) -> NumberingCount
         return counter
 
     counter = NumberingCounter(series=series, fy=fy, last_number=0)
-    sp = db.begin_nested()
     try:
-        db.add(counter)
-        db.flush()
+        with db.begin_nested():  # `with` releases the savepoint on success (no leak)
+            db.add(counter)
+            db.flush()
         return counter
     except IntegrityError:
-        sp.rollback()  # someone created it first — re-select and lock the winner
+        pass  # someone created it first — re-select and lock the winner
     locked = _lock_counter(db, series, fy)
     if locked is None:  # pragma: no cover - the winning row must exist post-race
         raise NumberingError(f"counter vanished for {series}/{fy}")
@@ -242,15 +242,16 @@ def allocate(
             idempotency_key=idempotency_key,
             reserved_by=reserved_by,
         )
-        sp = db.begin_nested()
         try:
-            if to_free is not None:
-                to_free.idempotency_key = None  # free inside the same savepoint
-                db.flush()
-            db.add(alloc)
-            db.flush()  # trips the partial unique index if `number` is already active
+            # `with` releases the savepoint on success — a bare begin_nested()
+            # leaks one per allocation and a large batch overflows commit recursion.
+            with db.begin_nested():
+                if to_free is not None:
+                    to_free.idempotency_key = None  # free inside the same savepoint
+                    db.flush()
+                db.add(alloc)
+                db.flush()  # trips the partial unique index if `number` already active
         except IntegrityError as err:
-            sp.rollback()
             last_err = err
             # A concurrent replay of the same key may have won the race; if an
             # active reservation now holds our key, resume it (I3) instead of

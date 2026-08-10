@@ -238,6 +238,17 @@ def test_status_check_constraint_rejects_junk(db: Session) -> None:
     db.rollback()
 
 
+def test_bulk_allocate_in_one_transaction_does_not_leak_savepoints(db: Session) -> None:
+    """Regression: allocate used to leave an un-committed SAVEPOINT per call, so a
+    large batch (each also writing an audit row) overflowed the commit recursion.
+    Hundreds of allocations in ONE transaction must commit cleanly."""
+    _configure(db)
+    numbers = [service.allocate(db, "L", fy="26-27").number for _ in range(400)]
+    db.commit()  # would RecursionError if savepoints leaked
+    assert numbers == list(range(1, 401))
+    assert len(set(numbers)) == 400
+
+
 def test_allocate_retry_makes_progress_past_a_stolen_number(db: Session) -> None:
     _configure(db)
     service.allocate(db, "L", fy="26-27")  # -> 1, counter=1

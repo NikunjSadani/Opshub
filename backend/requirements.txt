@@ -8,6 +8,9 @@ psycopg[binary]==3.2.3          # Postgres (staging/prod)
 firebase-admin==6.6.0            # auth: token verification + user provisioning
 python-multipart==0.0.20        # file uploads
 tzdata==2024.2                   # zoneinfo Asia/Kolkata FY calc (Windows + slim containers have no system tzdb)
+openpyxl==3.1.5                  # challan Excel upload parsing
+pypdf==5.1.0                     # merged-PDF assembly
+weasyprint==63.1                 # HTML->PDF challan render (lazy-imported; needs GTK native libs, Linux container only)
 
 # Dev / gates
 ruff==0.8.4

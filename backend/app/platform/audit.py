@@ -85,13 +85,16 @@ def log(
             prev_hash=prev_hash,
             row_hash=compute_row_hash(prev_hash, payload),
         )
-        sp = db.begin_nested()
         try:
-            db.add(row)
-            db.flush()
-            return row
+            # `with` RELEASES the savepoint on success — a bare begin_nested() that
+            # only rolls back on error leaks a savepoint per call, and thousands in
+            # one transaction (e.g. a big challan batch) overflow the commit recursion.
+            with db.begin_nested():
+                db.add(row)
+                db.flush()
         except IntegrityError:
-            sp.rollback()  # another append grabbed this prev_hash; re-read head and retry
+            continue  # another append grabbed this prev_hash; re-read head and retry
+        return row
     raise RuntimeError("audit chain contention: could not append after retries")
 
 
