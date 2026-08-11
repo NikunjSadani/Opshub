@@ -14,13 +14,16 @@ mutations are Admin-only via `can()` and every mutation is audited.
 """
 from __future__ import annotations
 
+import hmac
+from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
 from app.modules.numbering import service
 from app.modules.numbering.models import (
@@ -72,6 +75,14 @@ class SeedBody(BaseModel):
 
 class VoidBody(BaseModel):
     reason: str = Field(min_length=1, max_length=300)
+
+
+class SweepBody(BaseModel):
+    older_than_hours: int = Field(default=24, ge=1, le=8760)
+
+
+class SweepOut(BaseModel):
+    swept: int
 
 
 # --------------------------------------------------------------------- seed
@@ -165,3 +176,30 @@ def void_allocation(
     db.commit()
     db.refresh(alloc)
     return alloc
+
+
+# ------------------------------------------------------------------- sweep
+
+@router.post("/numbering/sweep", response_model=SweepOut)
+def sweep_reservations(
+    db: Annotated[Session, Depends(get_db)],
+    body: SweepBody | None = None,
+    x_sweep_secret: Annotated[str | None, Header()] = None,
+) -> SweepOut:
+    """Void orphaned RESERVED allocations. Called by a scheduler, NOT a user.
+
+    Authenticated by the `X-Sweep-Secret` shared secret rather than a login, so
+    it takes no `current_user`. Fail-closed: if no secret is configured the
+    endpoint is disabled (503). The service audits each void; we just commit.
+    """
+    expected = get_settings().sweep_secret
+    if not expected:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "sweep disabled")
+    if x_sweep_secret is None or not hmac.compare_digest(x_sweep_secret, expected):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "invalid sweep secret")
+    body = body or SweepBody()
+    swept = service.sweep_orphaned_reservations(
+        db, older_than=timedelta(hours=body.older_than_hours)
+    )
+    db.commit()
+    return SweepOut(swept=len(swept))

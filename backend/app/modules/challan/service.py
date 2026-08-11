@@ -545,6 +545,7 @@ def _build_view(ch: Challan) -> ChallanView:
     show_amount = ch.total_paise is not None
     return ChallanView(
         number=ch.number,
+        invoice_number=ch.invoice_number,
         challan_date=_ordinal_date(ch.challan_date),
         consignor=ConsignorView(
             name=ch.consignor_name, warehouse_address=ch.consignor_address,

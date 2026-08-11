@@ -88,6 +88,11 @@ def build_challan_html(view: ChallanView) -> str:
     HTML-escaped, so untrusted Excel cell text renders as inert data."""
     rows = Markup("").join(_line_row(line, view.show_amount) for line in view.lines)
     total_amount = escape(view.total_amount) if view.show_amount else Markup("")
+    invoice = (
+        Markup(f"<div>Invoice No.: {escape(view.invoice_number)}</div>")
+        if view.invoice_number
+        else Markup("")
+    )
 
     document = Markup(
         """<!DOCTYPE html>
@@ -127,6 +132,7 @@ def build_challan_html(view: ChallanView) -> str:
       <tr>
         <td style="width:45%;">
           <div class="meta">
+            {invoice}
             <div>Delivery Challan No.: <span class="num">{number}</span></div>
             <div>Date of Challan: {date}</div>
           </div>
@@ -171,6 +177,7 @@ def build_challan_html(view: ChallanView) -> str:
 </html>"""
     ).format(
         number=escape(view.number),
+        invoice=invoice,
         date=escape(view.challan_date),
         consignor=_consignor_block(view.consignor),
         consignee=_consignee_block(view.consignee),

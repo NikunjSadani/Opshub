@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   BrowserRouter,
@@ -13,6 +13,8 @@ import { Dashboard } from './pages/Dashboard';
 import { Login } from './pages/Login';
 import { ModulePlaceholder } from './pages/ModulePlaceholder';
 import { NotFound } from './pages/NotFound';
+import { ChallanModule } from './pages/challan/ChallanModule';
+import { ToastProvider } from './ui';
 
 export function createQueryClient(): QueryClient {
   return new QueryClient({
@@ -48,6 +50,7 @@ export function AppRoutes() {
         }
       >
         <Route path="/" element={<Dashboard />} />
+        <Route path="/m/document_automation/*" element={<ChallanModule />} />
         <Route path="/m/:key" element={<ModulePlaceholder />} />
       </Route>
       <Route path="*" element={<NotFound />} />
@@ -60,13 +63,15 @@ export function AppRoutes() {
  * React Query, and the router. Rendering `<App />` is enough for tests.
  */
 export default function App() {
-  const queryClient = createQueryClient();
+  const [queryClient] = useState(createQueryClient);
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
-        <BrowserRouter>
-          <AppRoutes />
-        </BrowserRouter>
+        <ToastProvider>
+          <BrowserRouter>
+            <AppRoutes />
+          </BrowserRouter>
+        </ToastProvider>
       </AuthProvider>
     </QueryClientProvider>
   );

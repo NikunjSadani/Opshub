@@ -27,3 +27,9 @@ terraform.tfvars
 # OS
 .DS_Store
 Thumbs.db
+
+# Local blob storage (LocalStorage FILES_DIR) + sqlite WAL
+_files/
+backend/_files/
+*.db-wal
+*.db-shm

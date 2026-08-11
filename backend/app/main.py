@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import APIRouter, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
 
 from app.config import get_settings
@@ -18,11 +18,19 @@ from app.modules.jobs.routes import router as jobs_router
 from app.modules.masterdata.routes import router as masterdata_router
 from app.modules.numbering.routes import router as numbering_router
 from app.modules.settings.routes import router as settings_router
-from app.platform.module_registry import REGISTRY, register_module
+from app.platform.module_registry import REGISTRY, ModuleSpec, register_module
 
 # --- user-facing modules (drive nav + per-user module access) ---
 register_module(HEALTH)
-# Phase 1 will add: Delivery Challan (document_automation)
+# Delivery Challan — nav entry only; its API routes are mounted separately below
+# (challan_router at /api/v1/challan). The empty router keeps the registry's
+# mount step a no-op for this module.
+register_module(ModuleSpec(
+    key="document_automation",
+    title="Delivery Challan",
+    router=APIRouter(),
+    nav_group="Operations",
+))
 # Phase 2 will add: Expense & Invoice (expense_invoice)
 
 

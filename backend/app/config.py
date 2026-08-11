@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     firebase_credentials_file: str | None = None
     firebase_project_id: str | None = None
 
+    # --- dev auth shim (LOCAL ONLY) ---
+    # When True AND env=='local', current_user skips Firebase and resolves to the
+    # seeded user `dev_auth_uid` for any bearer token. Ignored in staging/prod
+    # (double-guarded on env below) so it can never weaken real auth. Default OFF.
+    dev_auth: bool = False
+    dev_auth_uid: str = "dev-admin"
+
     # --- uploads ---
     max_upload_bytes: int = 50 * 1024 * 1024  # 50 MB cap (DoS guard)
 
@@ -35,6 +42,11 @@ class Settings(BaseSettings):
     # Empty locally (dev uses the Vite dev server + proxy). In the container this
     # points at the built React app, which FastAPI serves same-origin.
     static_dir: str = ""
+
+    # --- reconcile sweep (scheduler) ---
+    # Shared secret gating POST /numbering/sweep. Unset/empty -> the endpoint is
+    # disabled (fail-closed 503); set via Secret Manager so only the scheduler calls it.
+    sweep_secret: str | None = None
 
     # --- misc ---
     cors_allow_origins: list[str] = []  # SPA is served same-origin; empty by design

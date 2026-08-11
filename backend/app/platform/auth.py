@@ -60,6 +60,21 @@ def current_user(
     authorization: Annotated[str | None, Header()] = None,
 ) -> User:
     """FastAPI dependency: the authenticated, ACTIVE app user (else 401)."""
+    settings = get_settings()
+
+    # LOCAL-ONLY dev shim: skip Firebase and resolve to a seeded user so the SPA
+    # (with its mock token) can drive the real backend before Firebase is wired.
+    # DOUBLE-guarded (env must be 'local' AND dev_auth on) — inert in staging/prod.
+    if settings.env == "local" and settings.dev_auth:
+        if not authorization or not authorization.lower().startswith("bearer "):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer token")
+        user = db.execute(
+            select(User).where(User.firebase_uid == settings.dev_auth_uid)
+        ).scalar_one_or_none()
+        if user is None or not user.active:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "dev_auth_uid has no active account")
+        return user
+
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer token")
     decoded = _verify_token(authorization.split(" ", 1)[1])

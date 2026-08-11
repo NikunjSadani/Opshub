@@ -17,6 +17,35 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Extract a human message from a FastAPI error body. `detail` is a plain string
+ * for our HTTPExceptions (409/403/404/413) but a LIST of `{loc,msg}` for 422
+ * validation errors — `String()`-ing that list yields "[object Object]", so we
+ * join the messages (prefixed by the offending field) instead.
+ */
+export function detailMessage(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object' || !('detail' in payload)) return undefined;
+  const detail = (payload as { detail: unknown }).detail;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((e) => {
+        if (e && typeof e === 'object' && 'msg' in e) {
+          const loc = 'loc' in e && Array.isArray((e as { loc: unknown[] }).loc)
+            ? (e as { loc: unknown[] }).loc
+            : [];
+          const field = loc.length ? String(loc[loc.length - 1]) : '';
+          const msg = String((e as { msg: unknown }).msg);
+          return field && field !== 'body' ? `${field}: ${msg}` : msg;
+        }
+        return undefined;
+      })
+      .filter(Boolean);
+    if (parts.length) return parts.join('; ');
+  }
+  return undefined;
+}
+
 export interface RequestOptions {
   method?: string;
   /** JSON-serializable request body. */
@@ -46,10 +75,7 @@ export async function apiFetch<T>(path: string, opts: RequestOptions = {}): Prom
   const payload: unknown = isJson ? await res.json().catch(() => undefined) : undefined;
 
   if (!res.ok) {
-    const message =
-      (payload && typeof payload === 'object' && 'detail' in payload
-        ? String((payload as { detail: unknown }).detail)
-        : undefined) ?? `Request failed: ${res.status} ${res.statusText}`;
+    const message = detailMessage(payload) ?? `Request failed: ${res.status} ${res.statusText}`;
     throw new ApiError(res.status, message, payload);
   }
 
@@ -72,6 +98,29 @@ export function useApi() {
     [getToken],
   );
 
+  const download = useCallback(
+    async (fileId: number, fallbackName = 'download') => {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE}/files/${fileId}/download`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      if (!res.ok) throw new ApiError(res.status, `Download failed: ${res.status}`);
+      const blob = await res.blob();
+      const disposition = res.headers.get('content-disposition') ?? '';
+      const match = /filename="?([^"]+)"?/.exec(disposition);
+      const name = match?.[1] ?? fallbackName;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    },
+    [getToken],
+  );
+
   return {
     request,
     get: useCallback(
@@ -79,8 +128,33 @@ export function useApi() {
       [request],
     ),
     post: useCallback(
-      <T>(path: string, body: unknown) => request<T>(path, { method: 'POST', body }),
+      <T>(path: string, body?: unknown) => request<T>(path, { method: 'POST', body }),
       [request],
+    ),
+    put: useCallback(
+      <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body }),
+      [request],
+    ),
+    del: useCallback(<T>(path: string) => request<T>(path, { method: 'DELETE' }), [request]),
+    /** Fetch an authed file and trigger a browser download. */
+    download,
+    /** POST a multipart form (e.g. the challan xlsx upload). */
+    postForm: useCallback(
+      async <T>(path: string, form: FormData): Promise<T> => {
+        const token = await getToken();
+        const res = await fetch(`${API_BASE}${path}`, {
+          method: 'POST',
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+          body: form,
+        });
+        const isJson = res.headers.get('content-type')?.includes('application/json');
+        const payload: unknown = isJson ? await res.json().catch(() => undefined) : undefined;
+        if (!res.ok) {
+          throw new ApiError(res.status, detailMessage(payload) ?? `Upload failed: ${res.status}`, payload);
+        }
+        return payload as T;
+      },
+      [getToken],
     ),
   };
 }

@@ -157,6 +157,7 @@ class LineView:
 @dataclass
 class ChallanView:
     number: str        # GIF/DC/26-27/L/000189
+    invoice_number: str  # printed just above the challan number ("" -> omitted)
     challan_date: str  # display "28th July 2026"
     consignor: ConsignorView
     consignee: ConsigneeView

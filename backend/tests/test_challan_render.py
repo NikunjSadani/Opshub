@@ -23,6 +23,7 @@ from app.modules.challan.schema import (
 def _view(show_amount: bool = True) -> ChallanView:
     return ChallanView(
         number="GIF/DC/26-27/L/000189",
+        invoice_number="INV-2026-778",
         challan_date="28th July 2026",
         consignor=ConsignorView("Tech Gifsy Solutions Limited", "Howrah warehouse",
                                 "19AAACT9811F1Z9", "+91 6289864191"),
@@ -47,6 +48,17 @@ def test_html_has_l433_structure() -> None:
                   "Amt (incl Tax)", "(Not for Sale)", "Authorized Signatory",
                   "Nihit Agarwal", "41,890"]:
         assert token in html, token
+
+
+def test_invoice_number_prints_above_challan_number() -> None:
+    html = build_challan_html(_view())
+    assert "Invoice No.: INV-2026-778" in html
+    # positioned just above the delivery challan number
+    assert html.index("Invoice No.:") < html.index("Delivery Challan No.:")
+    # omitted entirely when blank
+    view = _view()
+    view.invoice_number = ""
+    assert "Invoice No.:" not in build_challan_html(view)
 
 
 def test_html_escapes_untrusted_values() -> None:
