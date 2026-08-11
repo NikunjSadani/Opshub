@@ -87,7 +87,7 @@ class ChallanOut(BaseModel):
     consignee_name: str
     ship_to_state: str
     eway_required: bool
-    total_paise: int
+    total_paise: int | None  # None for a value-free challan
     status: str
     pdf_file_id: int | None
 

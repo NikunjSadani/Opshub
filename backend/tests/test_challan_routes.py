@@ -159,6 +159,28 @@ def test_void_requires_admin(client: TestClient) -> None:
     assert r.status_code == 200 and r.json()["status"] == "VOID"
 
 
+def test_value_free_challan_lists_without_error(client: TestClient) -> None:
+    # Regression: a value-free challan (total_paise=None) must serialize, not 500.
+    db = client.app.state.TestSession()
+    alloc = NumberingAllocation(series="L", fy="26-27", number=9,
+                                formatted="GIF/DC/26-27/L/000009", status="ISSUED")
+    db.add(alloc)
+    db.flush()
+    db.add(Challan(
+        batch_id=1, allocation_id=alloc.id, number=alloc.formatted, series="L", fy="26-27",
+        number_int=9, challan_date=__import__("datetime").date(2026, 5, 15),
+        consignor_name="Gifsy", consignor_gstin=GSTIN, consignor_state="MH",
+        consignee_brand="Deoleo", consignee_name="Deoleo MH", consignee_gstin=GSTIN,
+        consignee_state="MH", ship_to_name="S", ship_to_address="A", ship_to_state="MH",
+        total_paise=None, status=ChallanStatus.ISSUED.value,
+    ))
+    db.commit()
+    db.close()
+    r = client.get("/api/v1/challan/challans")
+    assert r.status_code == 200
+    assert any(c["total_paise"] is None for c in r.json())
+
+
 def test_register_requires_module(client: TestClient) -> None:
     _as(client, OUTSIDER)
     assert client.get("/api/v1/challan/challans").status_code == 403

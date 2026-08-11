@@ -56,6 +56,7 @@ MODULE_KEY = "document_automation"
 # sequence (numbers are never reused) or schedule unbounded rendering work.
 MAX_BATCH_ROWS = 5000
 MAX_BATCH_CHALLANS = 2000
+_AMOUNT_TOL_CAP_PAISE = 50000  # Rs 500 — absolute ceiling on the amount-sanity band
 
 
 class ChallanError(Exception):
@@ -108,10 +109,34 @@ def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
                                            f"rate {hsn.gst_rate}"))
             _amount_sanity(row, hsn, errors)
 
+    _amount_presence_consistency(rows, errors)
+
     if errors:
         errors.sort(key=lambda e: (e.row_number, e.column))
         return ValidationResult(errors=errors)
     return ValidationResult(challans=_build_challans(rows, hsns))
+
+
+def _amount_presence_consistency(rows: list[RawRow], errors: list[RowError]) -> None:
+    """Every line in a challan must be uniformly priced OR value-free — never mixed.
+
+    A mixed challan would sum a PARTIAL total (only the priced lines), which both
+    under-reports the shipment value and mis-drives the statutory e-way flag.
+    """
+    groups: dict[str, list[RawRow]] = {}
+    for row in rows:
+        key = row.cells.get("group", "").strip()
+        if key:
+            groups.setdefault(key, []).append(row)
+    for key, members in groups.items():
+        priced = [bool(r.cells.get("amount", "").strip()) for r in members]
+        if any(priced) and not all(priced):
+            for row, has_amount in zip(members, priced, strict=True):
+                if not has_amount:
+                    errors.append(RowError(
+                        row.row_number, "amount",
+                        f"challan '{key}' mixes priced and value-free lines; "
+                        "every line must have an amount or none must"))
 
 
 def _amount_sanity(row: RawRow, hsn: HsnCode, errors: list[RowError]) -> None:
@@ -129,7 +154,9 @@ def _amount_sanity(row: RawRow, hsn: HsnCode, errors: list[RowError]) -> None:
     gst = hsn.gst_rate or Decimal(0)
     gross = Decimal(rate_paise) * qty * (1 + gst / Decimal(100))
     expected = int(gross.to_integral_value(rounding=ROUND_HALF_UP))
-    tol = max(100, int(Decimal(expected) * Decimal("0.01")))
+    # 1% band (catches "forgot the GST") but capped at Rs 500 absolute, so a large
+    # line can't hide a material typo below its 1% (expected is computed exactly).
+    tol = min(max(100, int(Decimal(expected) * Decimal("0.01"))), _AMOUNT_TOL_CAP_PAISE)
     if abs(amount - expected) > tol:
         errors.append(RowError(row.row_number, "amount",
                                f"amount {amount / 100:.2f} != rate x qty +{gst}% GST "
@@ -376,7 +403,7 @@ def _persist_challan(
         ship_to_contact=pc.ship_to_contact,
         po_number=pc.po_number,
         invoice_number=pc.invoice_number,
-        eway_required=total is not None and total >= threshold_paise > 0,
+        eway_required=total is not None and threshold_paise > 0 and total > threshold_paise,
         total_paise=total,
         status=ChallanStatus.ISSUED.value,
         created_by=actor_uid,

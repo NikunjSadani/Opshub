@@ -212,6 +212,11 @@ def _numeric_errors(row: RawRow, errors: list[RowError]) -> None:
         if amount is None or amount < 0:
             errors.append(RowError(row.row_number, "amount",
                                    "amount must be a number >= 0"))
+    rate = c.get("rate", "").strip()
+    if rate:  # rate may be free text; only a PARSED-numeric-and-negative rate is wrong
+        rate_paise = parse_paise(rate)
+        if rate_paise is not None and rate_paise < 0:
+            errors.append(RowError(row.row_number, "rate", "rate must not be negative"))
     if c.get("gst_rate", "").strip():
         gst = parse_qty(c["gst_rate"])
         if gst is None or gst < 0 or gst > 100:

@@ -140,6 +140,22 @@ def test_zero_and_negative_quantity_rejected() -> None:
     assert (3, "quantity") in problems
 
 
+def test_negative_rate_rejected() -> None:
+    data = _xlsx(list(CHALLAN_COLUMNS), [_row(rate="-100.00")])
+    problems = {
+        (e.row_number, e.column)
+        for e in parsing.structural_row_errors(parsing.parse_workbook(data)[0])
+    }
+    assert (2, "rate") in problems
+
+
+def test_free_text_rate_still_allowed() -> None:
+    data = _xlsx(list(CHALLAN_COLUMNS), [_row(rate="as per contract")])
+    problems = [e for e in parsing.structural_row_errors(parsing.parse_workbook(data)[0])
+                if e.column == "rate"]
+    assert problems == []
+
+
 def test_missing_required_value_reported_per_row() -> None:
     data = _xlsx(list(CHALLAN_COLUMNS), [_row(ship_to_name="")])
     errors = parsing.structural_row_errors(parsing.parse_workbook(data)[0])

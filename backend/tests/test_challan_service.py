@@ -187,6 +187,28 @@ def test_amount_tax_inclusive_mismatch_flagged(env: tuple[Session, str]) -> None
     assert not result.ok and any(e.column == "amount" for e in result.errors)
 
 
+def test_mixed_priced_and_value_free_rejected(env: tuple[Session, str]) -> None:
+    # One priced line + one value-free line in the SAME challan -> rejected, so the
+    # total can't be a partial sum that mis-drives the e-way flag.
+    data = _workbook([
+        _row("G1", "Store A", "Priced", "10", "100.00", "1050.00"),
+        _row("G1", "Store A", "Free", "1", "", ""),
+    ])
+    batch = _upload(db := env[0], data)
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert not result.ok and any("mixes" in e.message for e in result.errors)
+
+
+def test_amount_sanity_absolute_cap_catches_large_typo(env: tuple[Session, str]) -> None:
+    # expected = 1000 x 1000 x 1.05 = 10,50,000; a Rs 10,000 typo is < 1% but the
+    # Rs 500 absolute cap still flags it.
+    db = env[0]
+    data = _workbook([_row("G1", "Store A", "Bulk", "1000", "1000.00", "1040000.00")])
+    batch = _upload(db, data)
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert not result.ok and any(e.column == "amount" for e in result.errors)
+
+
 def test_gst_rate_mismatch_flagged(env: tuple[Session, str]) -> None:
     db, _ = env
     rows = [_row("G1", "Store A", "Item", "10", "100.00", "1050.00")]
