@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePosixPath
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -29,7 +29,8 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import case, func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -92,6 +93,23 @@ class ChallanOut(BaseModel):
     pdf_file_id: int | None
 
 
+class SeriesBreakdownOut(BaseModel):
+    series: str
+    fy: str
+    issued: int
+    void: int
+    total_value_paise: int
+
+
+class ChallanSummaryOut(BaseModel):
+    issued_count: int
+    void_count: int
+    eway_count: int
+    valued_count: int
+    total_value_paise: int
+    by_series: list[SeriesBreakdownOut]
+
+
 class VoidBody(BaseModel):
     reason: str = Field(min_length=1, max_length=300)
 
@@ -108,10 +126,10 @@ def upload_batch(
     _require_module(user)
     max_bytes = get_settings().max_upload_bytes
     data = bytearray()
-    while chunk := file.file.read(_UPLOAD_CHUNK):  # cap BEFORE buffering the whole body
-        data.extend(chunk)
-        if len(data) > max_bytes:
+    while chunk := file.file.read(_UPLOAD_CHUNK):  # cap BEFORE appending, so peak
+        if len(data) + len(chunk) > max_bytes:      # buffered bytes never exceed the cap
             raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "file too large")
+        data.extend(chunk)
 
     filename = _sanitize_filename(file.filename or "upload.xlsx")
     # Storage key is a fresh uuid — the client filename never enters the path.
@@ -164,12 +182,30 @@ def generate_batch(
     batch = db.get(ChallanBatch, batch_id)
     if batch is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "batch not found")
-    if batch.status not in (BatchStatus.VALIDATED.value, BatchStatus.FAILED.value):
-        raise HTTPException(status.HTTP_409_CONFLICT,
-                            f"batch is {batch.status}, expected VALIDATED or FAILED (retry)")
-    batch.status = BatchStatus.GENERATING.value
+    # Atomically claim the batch: only a VALIDATED/FAILED row flips to GENERATING,
+    # and only ONE of two overlapping requests wins the UPDATE — so we never
+    # schedule two workers that race the batch's final status. The loser gets 409.
+    claimed = cast(
+        "CursorResult[Any]",
+        db.execute(
+            update(ChallanBatch)
+            .where(
+                ChallanBatch.id == batch_id,
+                ChallanBatch.status.in_(
+                    [BatchStatus.VALIDATED.value, BatchStatus.FAILED.value]
+                ),
+            )
+            .values(status=BatchStatus.GENERATING.value)
+            .execution_options(synchronize_session=False)
+        ),
+    ).rowcount
     db.commit()
     db.refresh(batch)
+    if not claimed:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"batch is {batch.status}, expected VALIDATED or FAILED (retry)",
+        )
     background.add_task(_generate_worker, batch.id, body.series, user.firebase_uid)
     return batch
 
@@ -221,6 +257,81 @@ def list_challans(
         stmt = stmt.where(Challan.status == status_filter.value)
     stmt = stmt.order_by(Challan.id.desc()).limit(limit).offset(offset)
     return list(db.execute(stmt).scalars())
+
+
+@router.get("/challan/summary", response_model=ChallanSummaryOut)
+def challan_summary(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    fy: Annotated[str | None, Query(max_length=7)] = None,
+    series: Annotated[str | None, Query(max_length=8)] = None,
+) -> ChallanSummaryOut:
+    """Aggregate counts + value over the challan register (module-gated, read-only).
+
+    Value (`total_value_paise`) sums ISSUED rows only, ignoring VOID rows and
+    value-free (NULL `total_paise`) rows; an empty scope yields 0, never NULL.
+    """
+    _require_module(user)
+    issued = ChallanStatus.ISSUED.value
+    void = ChallanStatus.VOID.value
+
+    conds = []
+    if series:
+        conds.append(Challan.series == series.strip().upper())
+    if fy:
+        conds.append(Challan.fy == fy)
+
+    issued_hit = case((Challan.status == issued, 1), else_=0)
+    void_hit = case((Challan.status == void, 1), else_=0)
+    eway_hit = case(
+        ((Challan.status == issued) & (Challan.eway_required.is_(True)), 1), else_=0
+    )
+    valued_hit = case(
+        ((Challan.status == issued) & (Challan.total_paise.is_not(None)), 1), else_=0
+    )
+    issued_value = case((Challan.status == issued, Challan.total_paise), else_=None)
+
+    agg = db.execute(
+        select(
+            func.coalesce(func.sum(issued_hit), 0).label("issued_count"),
+            func.coalesce(func.sum(void_hit), 0).label("void_count"),
+            func.coalesce(func.sum(eway_hit), 0).label("eway_count"),
+            func.coalesce(func.sum(valued_hit), 0).label("valued_count"),
+            func.coalesce(func.sum(issued_value), 0).label("total_value_paise"),
+        ).where(*conds)
+    ).one()
+
+    grp_stmt = (
+        select(
+            Challan.series.label("series"),
+            Challan.fy.label("fy"),
+            func.coalesce(func.sum(issued_hit), 0).label("issued"),
+            func.coalesce(func.sum(void_hit), 0).label("void"),
+            func.coalesce(func.sum(issued_value), 0).label("total_value_paise"),
+        )
+        .where(*conds)
+        .group_by(Challan.series, Challan.fy)
+        .order_by(Challan.fy.desc(), Challan.series.asc())
+    )
+    by_series = [
+        SeriesBreakdownOut(
+            series=row.series,
+            fy=row.fy,
+            issued=int(row.issued or 0),
+            void=int(row.void or 0),
+            total_value_paise=int(row.total_value_paise or 0),
+        )
+        for row in db.execute(grp_stmt)
+    ]
+
+    return ChallanSummaryOut(
+        issued_count=int(agg.issued_count or 0),
+        void_count=int(agg.void_count or 0),
+        eway_count=int(agg.eway_count or 0),
+        valued_count=int(agg.valued_count or 0),
+        total_value_paise=int(agg.total_value_paise or 0),
+        by_series=by_series,
+    )
 
 
 # --------------------------------------------------------------------- void

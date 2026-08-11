@@ -33,6 +33,9 @@ from app.modules.challan.schema import (
 
 # Excel's day-zero for the 1900 date system, offset by its fictional 1900-02-29.
 _EXCEL_EPOCH = date(1899, 12, 30)
+# Excel's own serial ceiling: 2958465 == 9999-12-31. Anything larger overflows a
+# Python `date`, so we reject it as "not a date" rather than let it raise.
+_MAX_EXCEL_SERIAL = Decimal(2_958_465)
 _DATE_FORMATS = ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y")
 
 
@@ -96,9 +99,15 @@ def parse_date(text: str) -> date | None:
     except ValueError:
         pass
     serial = _to_decimal(s)
-    if serial is None or serial <= 0:
+    # Bound the serial to Excel's own date range (1..2958465 == 9999-12-31); a junk
+    # numeric like "9999999" would otherwise overflow `date` and raise, escaping the
+    # row-error path as a 500. Out-of-range -> a normal "not a date" row error.
+    if serial is None or serial <= 0 or serial > _MAX_EXCEL_SERIAL:
         return None
-    return _EXCEL_EPOCH + timedelta(days=int(serial))
+    try:
+        return _EXCEL_EPOCH + timedelta(days=int(serial))
+    except (OverflowError, ValueError):  # pragma: no cover - bound above already guards
+        return None
 
 
 def _to_str(value: object) -> str:

@@ -19,7 +19,7 @@ import {
 import { useAuth } from '../../auth/AuthProvider';
 import { useApi } from '../../api/client';
 import {
-  useChallansQuery,
+  useChallansInfiniteQuery,
   useVoidChallan,
   type ChallanFilters,
   type ChallanOut,
@@ -45,7 +45,9 @@ export function Register() {
   const [status, setStatus] = useState<ChallanStatus | ''>('');
 
   const filters: ChallanFilters = { series, fy, status };
-  const query = useChallansQuery(filters);
+  // Changing any filter changes the query key, so paging naturally resets to page 0.
+  const query = useChallansInfiniteQuery(filters);
+  const rows = query.data?.pages.flat() ?? [];
 
   const voidMutation = useVoidChallan();
   const [voidTarget, setVoidTarget] = useState<ChallanOut | null>(null);
@@ -126,65 +128,81 @@ export function Register() {
         <Loading label="Loading register…" />
       ) : query.isError ? (
         <ErrorState error={query.error} onRetry={() => void query.refetch()} />
-      ) : query.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <StatePanel title="No challans found">
           No {status ? status.toLowerCase() : ''} challans match these filters.
         </StatePanel>
       ) : (
-        <Table>
-          <THead>
-            <Tr>
-              <Th>Number</Th>
-              <Th>Date</Th>
-              <Th>Consignee</Th>
-              <Th>Ship-to state</Th>
-              <Th>E-way</Th>
-              <Th className="text-right">Total</Th>
-              <Th>Status</Th>
-              <Th className="text-right">Actions</Th>
-            </Tr>
-          </THead>
-          <tbody>
-            {query.data.map((c) => (
-              <Tr key={c.id}>
-                <Td className="font-medium text-slate-900">{c.number}</Td>
-                <Td className="whitespace-nowrap">{formatDate(c.challan_date)}</Td>
-                <Td>
-                  <span className="text-slate-900">{c.consignee_brand}</span>
-                  <span className="text-slate-400"> — </span>
-                  <span className="text-slate-600">{c.consignee_name}</span>
-                </Td>
-                <Td>{c.ship_to_state}</Td>
-                <Td>
-                  <Badge tone={c.eway_required ? 'amber' : 'slate'}>
-                    {c.eway_required ? 'Yes' : 'No'}
-                  </Badge>
-                </Td>
-                <Td className="text-right tabular-nums">{formatPaise(c.total_paise)}</Td>
-                <Td>
-                  <Badge tone={CHALLAN_STATUS_TONE[c.status]}>{c.status}</Badge>
-                </Td>
-                <Td>
-                  <div className="flex justify-end gap-1.5">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => onDownloadPdf(c)}
-                      disabled={c.pdf_file_id == null}
-                    >
-                      PDF
-                    </Button>
-                    {isAdmin && c.status === 'ISSUED' && (
-                      <Button variant="danger" size="sm" onClick={() => openVoid(c)}>
-                        Void
-                      </Button>
-                    )}
-                  </div>
-                </Td>
+        <>
+          <Table>
+            <THead>
+              <Tr>
+                <Th>Number</Th>
+                <Th>Date</Th>
+                <Th>Consignee</Th>
+                <Th>Ship-to state</Th>
+                <Th>E-way</Th>
+                <Th className="text-right">Total</Th>
+                <Th>Status</Th>
+                <Th className="text-right">Actions</Th>
               </Tr>
-            ))}
-          </tbody>
-        </Table>
+            </THead>
+            <tbody>
+              {rows.map((c) => (
+                <Tr key={c.id}>
+                  <Td className="font-medium text-slate-900">{c.number}</Td>
+                  <Td className="whitespace-nowrap">{formatDate(c.challan_date)}</Td>
+                  <Td>
+                    <span className="text-slate-900">{c.consignee_brand}</span>
+                    <span className="text-slate-400"> — </span>
+                    <span className="text-slate-600">{c.consignee_name}</span>
+                  </Td>
+                  <Td>{c.ship_to_state}</Td>
+                  <Td>
+                    <Badge tone={c.eway_required ? 'amber' : 'slate'}>
+                      {c.eway_required ? 'Yes' : 'No'}
+                    </Badge>
+                  </Td>
+                  <Td className="text-right tabular-nums">{formatPaise(c.total_paise)}</Td>
+                  <Td>
+                    <Badge tone={CHALLAN_STATUS_TONE[c.status]}>{c.status}</Badge>
+                  </Td>
+                  <Td>
+                    <div className="flex justify-end gap-1.5">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => onDownloadPdf(c)}
+                        disabled={c.pdf_file_id == null}
+                      >
+                        PDF
+                      </Button>
+                      {isAdmin && c.status === 'ISSUED' && (
+                        <Button variant="danger" size="sm" onClick={() => openVoid(c)}>
+                          Void
+                        </Button>
+                      )}
+                    </div>
+                  </Td>
+                </Tr>
+              ))}
+            </tbody>
+          </Table>
+
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <p className="text-sm text-slate-500">Showing {rows.length}</p>
+            {query.hasNextPage && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void query.fetchNextPage()}
+                loading={query.isFetchingNextPage}
+              >
+                Load more
+              </Button>
+            )}
+          </div>
+        </>
       )}
 
       <ConfirmDialog

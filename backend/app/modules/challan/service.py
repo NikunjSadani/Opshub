@@ -256,7 +256,33 @@ def generate(
     On validation failure: writes an English error report and marks the batch
     FAILED_VALIDATION — no numbers are reserved. On success: every challan is
     ISSUED with a bound number and a stored PDF, plus a ZIP and a merged PDF.
+
+    The whole body is wrapped so ANY unexpected error (missing source file, audit
+    contention, a DB blip in the parse/reserve phase) marks the batch FAILED and
+    voids any orphaned reservations, instead of leaving it wedged in the committed
+    GENERATING state that `generate_batch` refuses to retry.
     """
+    reservations: list[tuple[ParsedChallan, int]] = []
+    try:
+        return _generate_inner(
+            db, batch, renderer, series=series, actor_uid=actor_uid,
+            reservations=reservations,
+        )
+    except Exception as err:  # noqa: BLE001 - no failure may leave the batch GENERATING
+        return _fail_generation(db, batch, reservations, actor_uid, err)
+
+
+def _generate_inner(
+    db: Session,
+    batch: ChallanBatch,
+    renderer: render.Renderer,
+    *,
+    series: str,
+    actor_uid: str | None,
+    reservations: list[tuple[ParsedChallan, int]],
+) -> ChallanBatch:
+    """The generate body (see `generate`). Appends each reservation to the passed
+    `reservations` list so the wrapper can void orphans if an early phase throws."""
     storage = get_storage()
     rows, structural = parsing.parse_workbook(_source_bytes(db, batch, storage))
     result = ValidationResult(errors=structural) if structural else validate(db, rows)
@@ -278,7 +304,6 @@ def generate(
     db.flush()
 
     # --- RESERVE phase: one short transaction, COMMITTED before any render. ---
-    reservations: list[tuple[ParsedChallan, int]] = []
     try:
         for pc in result.challans:
             fy = numbering.fy_for(datetime.combine(pc.challan_date, time(12, 0), tzinfo=IST))
@@ -403,7 +428,7 @@ def _persist_challan(
         ship_to_contact=pc.ship_to_contact,
         po_number=pc.po_number,
         invoice_number=pc.invoice_number,
-        eway_required=total is not None and threshold_paise > 0 and total > threshold_paise,
+        eway_required=total is not None and total > threshold_paise,
         total_paise=total,
         status=ChallanStatus.ISSUED.value,
         created_by=actor_uid,
@@ -485,16 +510,19 @@ _DEFAULT_EWAY_RUPEES = 50000  # statutory default if the setting is missing/inva
 
 
 def _eway_threshold_paise(db: Session) -> int:
-    """E-way threshold in paise. Tolerates "50,000"/float; defaults if unusable,
-    so a bad/missing setting never crashes generation nor silently disables e-way."""
+    """E-way threshold in paise. Tolerates "50,000"/float; falls back to the
+    statutory default for a missing, unparseable, OR non-positive setting — a
+    threshold of 0/negative would otherwise disable e-way for every challan, the
+    opposite of the safe (fail-open) direction. Never returns <= 0."""
     rupees = Decimal(_DEFAULT_EWAY_RUPEES)
     setting = db.get(Setting, "eway_threshold")
     if setting is not None and isinstance(setting.value, dict):
         raw = str(setting.value.get("amount", _DEFAULT_EWAY_RUPEES)).replace(",", "")
         try:
-            rupees = Decimal(raw)
+            parsed = Decimal(raw)
         except (InvalidOperation, ValueError):
-            rupees = Decimal(_DEFAULT_EWAY_RUPEES)
+            parsed = Decimal(_DEFAULT_EWAY_RUPEES)
+        rupees = parsed if parsed > 0 else Decimal(_DEFAULT_EWAY_RUPEES)
     return int(rupees * 100)
 
 

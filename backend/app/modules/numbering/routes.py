@@ -169,6 +169,16 @@ def void_allocation(
     alloc = db.get(NumberingAllocation, alloc_id)
     if alloc is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "allocation not found")
+    # An ISSUED number bound to a challan must be cancelled via the challan-void
+    # surface, which voids the number AND the challan together. Voiding the number
+    # here alone would orphan a live challan (still ISSUED, still counted, still
+    # downloadable) and permanently 409 its proper void. Direct the caller there.
+    if alloc.status == AllocationStatus.ISSUED.value and alloc.entity == "challan":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this number is bound to an issued challan — void the challan instead, "
+            "which cancels the number and the challan together",
+        )
     try:
         service.void(db, alloc, reason=body.reason, actor_uid=user.firebase_uid)
     except service.NumberingError as err:

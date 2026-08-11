@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from '../../auth/AuthProvider';
 import { Tabs, type TabDef } from '../../ui';
+import { Overview } from './Overview';
 import { NewChallan } from './NewChallan';
 import { Batches } from './Batches';
 import { Register } from './Register';
@@ -18,7 +19,8 @@ export function ChallanModule() {
   const isAdmin = user?.role === 'ADMIN';
 
   const tabs: TabDef[] = [
-    { to: BASE, label: 'New Challan', end: true },
+    { to: BASE, label: 'Overview', end: true },
+    { to: `${BASE}/new`, label: 'New Challan' },
     { to: `${BASE}/batches`, label: 'Batches' },
     { to: `${BASE}/register`, label: 'Register' },
     ...(isAdmin ? [{ to: `${BASE}/master-data`, label: 'Master Data' }] : []),
@@ -28,7 +30,8 @@ export function ChallanModule() {
     <div>
       <Tabs tabs={tabs} />
       <Routes>
-        <Route index element={<NewChallan />} />
+        <Route index element={<Overview />} />
+        <Route path="new" element={<NewChallan />} />
         <Route path="batches" element={<Batches />} />
         <Route path="register" element={<Register />} />
         <Route

@@ -1,7 +1,10 @@
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
+  type InfiniteData,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
@@ -67,11 +70,70 @@ export interface ChallanFilters {
   status?: ChallanStatus | '';
 }
 
+/** Filters for the aggregate summary (no status — it splits ISSUED vs VOID itself). */
+export interface ChallanSummaryFilters {
+  series?: string;
+  fy?: string;
+}
+
+/** One row of the summary's per-series/fy breakdown (backend SeriesBreakdownOut). */
+export interface SeriesBreakdown {
+  series: string;
+  fy: string;
+  issued: number;
+  void: number;
+  /** PAISE; sum over ISSUED rows only (value-free rows excluded). */
+  total_value_paise: number;
+}
+
+/** Aggregate counts + value over the register (backend ChallanSummaryOut). */
+export interface ChallanSummary {
+  issued_count: number;
+  void_count: number;
+  /** ISSUED with eway_required. */
+  eway_count: number;
+  /** ISSUED with a value (total_paise not null). */
+  valued_count: number;
+  /** PAISE; sum over ISSUED, value-free rows excluded. */
+  total_value_paise: number;
+  by_series: SeriesBreakdown[];
+}
+
+/** Register page size for the "Load more" pager. */
+export const CHALLAN_PAGE_SIZE = 100;
+
+/**
+ * Build a `?series=&fy=` query string, appending only non-empty (trimmed) params.
+ * Exported + pure so it can be unit-tested without a hook.
+ */
+export function buildChallanSummaryQuery(filters: ChallanSummaryFilters): string {
+  const params = new URLSearchParams();
+  if (filters.series?.trim()) params.set('series', filters.series.trim());
+  if (filters.fy?.trim()) params.set('fy', filters.fy.trim());
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
+/**
+ * Build a `?series=&fy=&status=&limit=&offset=` query string for the register.
+ * Filter params are appended only when non-empty (trimmed); limit/offset always.
+ */
+export function buildChallanListQuery(filters: ChallanFilters, offset: number): string {
+  const params = new URLSearchParams();
+  if (filters.series?.trim()) params.set('series', filters.series.trim());
+  if (filters.fy?.trim()) params.set('fy', filters.fy.trim());
+  if (filters.status) params.set('status', filters.status);
+  params.set('limit', String(CHALLAN_PAGE_SIZE));
+  params.set('offset', String(offset));
+  return `?${params.toString()}`;
+}
+
 // --------------------------------------------------------------- query keys
 export const challanKeys = {
   batches: (limit: number) => ['challan', 'batches', limit] as const,
   batch: (id: number) => ['challan', 'batch', id] as const,
   challans: (filters: ChallanFilters) => ['challan', 'challans', filters] as const,
+  summary: (filters: ChallanSummaryFilters) => ['challan', 'summary', filters] as const,
 };
 
 // ------------------------------------------------------------------ queries
@@ -104,19 +166,43 @@ export function useBatchQuery(
   });
 }
 
-/** The challan register, filtered by series / fy / status. */
-export function useChallansQuery(filters: ChallanFilters): UseQueryResult<ChallanOut[], Error> {
+/**
+ * The challan register, filtered by series / fy / status, with offset-based
+ * "Load more" paging. Each page fetches up to `CHALLAN_PAGE_SIZE` rows; there is
+ * another page only when the last one came back exactly full (a short page means
+ * the end). The offset for the next page is the running total already loaded.
+ */
+export function useChallansInfiniteQuery(
+  filters: ChallanFilters,
+): UseInfiniteQueryResult<InfiniteData<ChallanOut[], number>, Error> {
   const { get } = useApi();
-  return useQuery<ChallanOut[], Error>({
+  return useInfiniteQuery<
+    ChallanOut[],
+    Error,
+    InfiniteData<ChallanOut[], number>,
+    readonly unknown[],
+    number
+  >({
     queryKey: challanKeys.challans(filters),
-    queryFn: ({ signal }) => {
-      const params = new URLSearchParams();
-      if (filters.series?.trim()) params.set('series', filters.series.trim());
-      if (filters.fy?.trim()) params.set('fy', filters.fy.trim());
-      if (filters.status) params.set('status', filters.status);
-      const qs = params.toString();
-      return get<ChallanOut[]>(`/challan/challans${qs ? `?${qs}` : ''}`, signal);
-    },
+    initialPageParam: 0,
+    queryFn: ({ pageParam, signal }) =>
+      get<ChallanOut[]>(`/challan/challans${buildChallanListQuery(filters, pageParam)}`, signal),
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length === CHALLAN_PAGE_SIZE
+        ? allPages.reduce((total, page) => total + page.length, 0)
+        : undefined,
+  });
+}
+
+/** Aggregate register summary (counts + value + per-series breakdown). */
+export function useChallanSummaryQuery(
+  filters: ChallanSummaryFilters,
+): UseQueryResult<ChallanSummary, Error> {
+  const { get } = useApi();
+  return useQuery<ChallanSummary, Error>({
+    queryKey: challanKeys.summary(filters),
+    queryFn: ({ signal }) =>
+      get<ChallanSummary>(`/challan/summary${buildChallanSummaryQuery(filters)}`, signal),
   });
 }
 
