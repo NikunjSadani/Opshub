@@ -2,7 +2,7 @@
 Read this first to continue the build cold. Design: `DESIGN.md` / `design-doc.html`. Plan + governance: `BUILD-PLAN.md`.
 
 ## Where we are
-**Phase 0 — Foundation & platform spine · IN PROGRESS.** Increments 1–2 landed + gate-green.
+**Phase 1 — Delivery Challan · CODE-COMPLETE end-to-end.** `develop` @ `6bd6fe3` (UNPUSHED). Increments 1–8 landed + gate-green (BE ruff 0 · mypy --strict 38 · pytest 143 · alembic no-drift · FE tsc + vite build + vitest 8). Numbering engine → master data → generator → faithful L/433 layout → **React frontend**, each dual/UI-UX-audited + runtime-verified. Real Firebase auth + deploy + container PDF render remain (owner GCP/Firebase). **Newest work first below; increments 5–8 are the current build, 1–4 are Phase 0.** ▶ see the **IMMEDIATE NEXT** section further down.
 
 ### Increment 2 — platform primitives + frontend shell (orchestrated: 4 agents → I integrated/gated/audited)
 - **Backend primitives (gate-green: ruff 0 · mypy --strict 0 · pytest 23/23):**
