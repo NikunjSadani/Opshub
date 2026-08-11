@@ -96,6 +96,7 @@ class ConsignorIn(BaseModel):
     gstin: str = Field(pattern=_GSTIN)
     state: str = Field(min_length=1, max_length=60)
     address: str = Field(default="", max_length=600)
+    phone: str = Field(default="", max_length=40)
 
     _norm = field_validator("name", "state", mode="after")(_clean_text)
     _gstin = field_validator("gstin", mode="after")(_check_gstin)
@@ -120,6 +121,7 @@ class ConsigneeIn(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     gstin: str = Field(pattern=_GSTIN)
     address: str = Field(default="", max_length=600)
+    phone: str = Field(default="", max_length=40)
 
     _norm = field_validator("brand", "state", "name", mode="after")(_clean_text)
     _gstin = field_validator("gstin", mode="after")(_check_gstin)

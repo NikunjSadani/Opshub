@@ -23,57 +23,71 @@ from typing import Protocol
 
 from markupsafe import Markup, escape
 
-from app.modules.challan.schema import ChallanView, LineView, PartyView
+from app.modules.challan.schema import (
+    ChallanView,
+    ConsigneeView,
+    ConsignorView,
+    LineView,
+    ShipToView,
+)
 
 
-def _party_block(party: PartyView) -> Markup:
-    """Escaped multi-line block for a consignor/consignee party."""
-    parts = [f"<div class='party-name'>{escape(party.name)}</div>"]
-    if party.address:
-        parts.append(f"<div>{escape(party.address)}</div>")
-    if party.state:
-        parts.append(f"<div>State: {escape(party.state)}</div>")
-    if party.gstin:
-        parts.append(f"<div>GSTIN: {escape(party.gstin)}</div>")
-    return Markup("").join(Markup(p) for p in parts)
+def _kv(label: str, value: str) -> Markup:
+    """One escaped `<div>label: value</div>`, or empty when the value is blank."""
+    if not value:
+        return Markup("")
+    return Markup(f"<div><span class='k'>{escape(label)}</span> {escape(value)}</div>")
 
 
-def _line_row(line: LineView) -> Markup:
-    """One escaped `<tr>` for the line-item table (columns in statutory order)."""
+def _consignor_block(c: ConsignorView) -> Markup:
+    return Markup("").join([
+        Markup(f"<div class='party-name'>{escape(c.name)}</div>"),
+        _kv("Ware House :", c.warehouse_address),
+        _kv("GST No. :", c.gstin),
+        _kv("Phone :", c.phone),
+    ])
+
+
+def _consignee_block(c: ConsigneeView) -> Markup:
+    return Markup("").join([
+        Markup(f"<div class='party-name'>{escape(c.name)}</div>"),
+        _kv("Address :", c.address),
+        _kv("GST No. :", c.gstin),
+        _kv("State :", c.state_label),
+        _kv("Phone No. :", c.phone),
+    ])
+
+
+def _ship_to_block(s: ShipToView) -> Markup:
+    return Markup("").join([
+        _kv("Name -", s.name),
+        _kv("Address -", s.address),
+        _kv("Enterprise Name -", s.enterprise),
+        _kv("Number -", s.number),
+        _kv("Contact Person Name -", s.contact_person),
+    ])
+
+
+def _line_row(line: LineView, show_amount: bool) -> Markup:
+    """One escaped `<tr>`: Sl.No | Product | HSN | Qty | Rate | Amt (incl Tax)."""
     cells = [
         str(line.line_no),
         line.description,
         line.hsn,
         line.quantity,
-        line.uom,
-        line.rate,
-        line.amount,
-        line.gst_rate,
+        line.rate if show_amount else "",
+        line.amount if show_amount else "",
     ]
     tds = Markup("").join(Markup(f"<td>{escape(c)}</td>") for c in cells)
     return Markup(f"<tr>{tds}</tr>")
 
 
 def build_challan_html(view: ChallanView) -> str:
-    """Build a complete standalone A4 HTML document for one challan.
-
-    Pure function, no I/O. Every interpolated value is HTML-escaped, so untrusted
-    Excel cell text is rendered as inert data and cannot inject markup.
-    """
-    rows = Markup("").join(_line_row(line) for line in view.lines)
-
-    meta_bits: list[Markup] = []
-    if view.po_number:
-        meta_bits.append(Markup(f"<div>PO No: {escape(view.po_number)}</div>"))
-    if view.invoice_number:
-        meta_bits.append(Markup(f"<div>Invoice No: {escape(view.invoice_number)}</div>"))
-    meta = Markup("").join(meta_bits)
-
-    eway = (
-        Markup("<div class='eway'>E-Way Bill Required</div>")
-        if view.eway_required
-        else Markup("")
-    )
+    """Build a complete standalone A4 HTML document for one challan (faithful to
+    the `L/433` layout). Pure function, no I/O; every interpolated value is
+    HTML-escaped, so untrusted Excel cell text renders as inert data."""
+    rows = Markup("").join(_line_row(line, view.show_amount) for line in view.lines)
+    total_amount = escape(view.total_amount) if view.show_amount else Markup("")
 
     document = Markup(
         """<!DOCTYPE html>
@@ -82,103 +96,88 @@ def build_challan_html(view: ChallanView) -> str:
 <meta charset="utf-8">
 <title>Delivery Challan {number}</title>
 <style>
-  @page {{ size: A4; margin: 14mm; }}
+  @page {{ size: A4; margin: 12mm; }}
   * {{ box-sizing: border-box; }}
   body {{ font-family: Arial, "Helvetica Neue", sans-serif; font-size: 11px;
          color: #111; margin: 0; }}
-  .doc {{ width: 100%; }}
-  .header {{ display: flex; justify-content: space-between;
-            border-bottom: 2px solid #111; padding-bottom: 8px; }}
-  .consignor {{ max-width: 55%; }}
-  .party-name {{ font-weight: bold; font-size: 13px; }}
-  .title-box {{ text-align: right; }}
-  .doc-title {{ font-size: 20px; font-weight: bold; letter-spacing: 1px; }}
-  .doc-meta {{ margin-top: 4px; }}
-  .doc-meta .num {{ font-weight: bold; }}
-  .parties {{ display: flex; gap: 12px; margin-top: 10px; }}
-  .parties .box {{ flex: 1; border: 1px solid #999; padding: 6px; }}
-  .box-label {{ font-weight: bold; text-transform: uppercase; font-size: 9px;
-               color: #555; margin-bottom: 3px; }}
-  table.lines {{ width: 100%; border-collapse: collapse; margin-top: 12px; }}
-  table.lines th, table.lines td {{ border: 1px solid #999; padding: 4px 5px;
+  .title {{ text-align: center; font-size: 16px; font-weight: bold; margin-bottom: 6px; }}
+  table.frame {{ width: 100%; border-collapse: collapse; }}
+  table.frame > tbody > tr > td {{ border: 1px solid #333; padding: 6px 8px;
+                                   vertical-align: top; }}
+  .label {{ font-weight: bold; text-transform: none; }}
+  .party-name {{ font-weight: bold; }}
+  .k {{ color: #333; }}
+  .meta div {{ margin-bottom: 2px; }}
+  .meta .num {{ font-weight: bold; }}
+  table.lines {{ width: 100%; border-collapse: collapse; margin-top: 8px; }}
+  table.lines th, table.lines td {{ border: 1px solid #333; padding: 4px 6px;
                                     text-align: left; vertical-align: top; }}
-  table.lines th {{ background: #f0f0f0; font-size: 10px; text-transform: uppercase; }}
-  table.lines td:nth-child(4), table.lines td:nth-child(6),
-  table.lines td:nth-child(7), table.lines td:nth-child(8) {{ text-align: right; }}
+  table.lines th {{ background: #f0f0f0; }}
+  table.lines td:nth-child(4), table.lines td:nth-child(5),
+  table.lines td:nth-child(6) {{ text-align: right; }}
   .total-row td {{ font-weight: bold; background: #f6f6f6; }}
-  .footer {{ margin-top: 14px; display: flex; justify-content: space-between;
-            align-items: flex-end; }}
-  .eway {{ display: inline-block; margin-top: 8px; padding: 4px 8px;
-          border: 2px solid #b00; color: #b00; font-weight: bold; }}
-  .sign {{ text-align: right; }}
-  .sign .line {{ margin-top: 40px; border-top: 1px solid #111; width: 160px;
-                display: inline-block; text-align: center; padding-top: 3px; }}
+  .notsale {{ font-style: italic; }}
+  .sign {{ margin-top: 40px; text-align: right; padding-right: 6px; }}
 </style>
 </head>
 <body>
-<div class="doc">
-  <div class="header">
-    <div class="consignor">{consignor}</div>
-    <div class="title-box">
-      <div class="doc-title">DELIVERY CHALLAN</div>
-      <div class="doc-meta">
-        <div>Challan No: <span class="num">{number}</span></div>
-        <div>Date: {date}</div>
-        {meta}
-      </div>
-    </div>
-  </div>
-  <div class="parties">
-    <div class="box">
-      <div class="box-label">Bill To</div>
-      {consignee}
-    </div>
-    <div class="box">
-      <div class="box-label">Ship To</div>
-      <div class="party-name">{ship_to_name}</div>
-      <div>{ship_to_address}</div>
-      <div>State: {ship_to_state}</div>
-    </div>
-  </div>
+  <div class="title">Delivery Challan</div>
+  <table class="frame">
+    <tbody>
+      <tr>
+        <td style="width:45%;">
+          <div class="meta">
+            <div>Delivery Challan No.: <span class="num">{number}</span></div>
+            <div>Date of Challan: {date}</div>
+          </div>
+        </td>
+        <td>
+          <div class="label">Detail of Consignor</div>
+          {consignor}
+        </td>
+      </tr>
+      <tr>
+        <td>
+          <div class="label">Detail of Consignee</div>
+          {consignee}
+        </td>
+        <td>
+          <div class="label">Detail of Shipment to</div>
+          {ship_to}
+        </td>
+      </tr>
+    </tbody>
+  </table>
   <table class="lines">
     <thead>
       <tr>
-        <th>No.</th><th>Description</th><th>HSN</th><th>Qty</th><th>UOM</th>
-        <th>Rate</th><th>Amount</th><th>GST%</th>
+        <th>Sl. No.</th><th>Product Descriptions</th><th>HSN Code</th>
+        <th>Qty.</th><th>Rate</th><th>Amt (incl Tax)</th>
       </tr>
     </thead>
     <tbody>
       {rows}
       <tr class="total-row">
-        <td colspan="6" style="text-align:right;">Total</td>
-        <td>{total}</td>
+        <td colspan="2" class="notsale">(Not for Sale)</td>
+        <td style="text-align:right;">Total</td>
+        <td>{total_qty}</td>
         <td></td>
+        <td>{total_amount}</td>
       </tr>
     </tbody>
   </table>
-  <div class="footer">
-    <div>{eway}</div>
-    <div class="sign">
-      {consignor_name}
-      <div class="line">Authorised Signatory</div>
-    </div>
-  </div>
-</div>
+  <div class="sign">Authorized Signatory</div>
 </body>
 </html>"""
     ).format(
         number=escape(view.number),
         date=escape(view.challan_date),
-        consignor=_party_block(view.consignor),
-        consignee=_party_block(view.consignee),
-        ship_to_name=escape(view.ship_to_name),
-        ship_to_address=escape(view.ship_to_address),
-        ship_to_state=escape(view.ship_to_state),
-        meta=meta,
+        consignor=_consignor_block(view.consignor),
+        consignee=_consignee_block(view.consignee),
+        ship_to=_ship_to_block(view.ship_to),
         rows=rows,
-        total=escape(view.total_amount),
-        eway=eway,
-        consignor_name=escape(view.consignor.name),
+        total_qty=escape(view.total_qty),
+        total_amount=total_amount,
     )
     return str(document)
 

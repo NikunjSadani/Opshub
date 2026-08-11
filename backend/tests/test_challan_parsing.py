@@ -17,16 +17,17 @@ from app.modules.challan.schema import CHALLAN_COLUMNS
 
 _DEFAULTS: dict[str, object] = {
     "group": "G1",
-    "consignor": "Gifsy Foods",
     "brand": "Bertolli",
+    "ship_to_state": "Karnataka",
     "ship_to_name": "Retail Mart",
     "ship_to_address": "12 MG Road",
-    "ship_to_state": "Karnataka",
+    "ship_to_enterprise": "Mart Enterprises",
+    "ship_to_number": "9000000000",
+    "ship_to_contact": "Ravi",
     "challan_date": "10-08-2026",
     "description": "Olive Oil 1L",
     "hsn": "1509",
     "quantity": "10",
-    "uom": "NOS",
     "rate": "500.00",
     "amount": "5000.00",
     "gst_rate": "5",
@@ -74,17 +75,17 @@ def test_headers_match_case_insensitively_and_trimmed() -> None:
     rows, errors = parsing.parse_workbook(data)
     assert errors == []
     assert len(rows) == 1
-    assert rows[0].cells["consignor"] == "Gifsy Foods"
+    assert rows[0].cells["brand"] == "Bertolli"
 
 
 def test_missing_required_column_is_reported() -> None:
-    headers = [c for c in CHALLAN_COLUMNS if c != "consignor"]
+    headers = [c for c in CHALLAN_COLUMNS if c != "brand"]
     data = _xlsx(list(headers), [])
     rows, errors = parsing.parse_workbook(data)
     assert rows == []
     assert len(errors) == 1
     assert errors[0].row_number == 1
-    assert errors[0].column == "consignor"
+    assert errors[0].column == "brand"
 
 
 def test_unopenable_file_is_reported_not_raised() -> None:

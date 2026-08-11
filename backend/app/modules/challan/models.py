@@ -86,11 +86,12 @@ class Challan(Base):
     number_int: Mapped[int] = mapped_column(Integer)
     challan_date: Mapped[date] = mapped_column(Date)
 
-    # consignor snapshot
+    # consignor snapshot (the single fixed dispatching entity)
     consignor_name: Mapped[str] = mapped_column(String(200))
     consignor_gstin: Mapped[str] = mapped_column(String(15))
     consignor_state: Mapped[str] = mapped_column(String(60))
     consignor_address: Mapped[str] = mapped_column(String(600), default="")
+    consignor_phone: Mapped[str] = mapped_column(String(40), default="")
 
     # consignee snapshot (resolved from Brand -> ship-to State registry)
     consignee_brand: Mapped[str] = mapped_column(String(120))
@@ -98,16 +99,20 @@ class Challan(Base):
     consignee_gstin: Mapped[str] = mapped_column(String(15))
     consignee_state: Mapped[str] = mapped_column(String(60))
     consignee_address: Mapped[str] = mapped_column(String(600), default="")
+    consignee_phone: Mapped[str] = mapped_column(String(40), default="")
 
-    # ship-to (from the upload; may differ from the consignee's registry address)
+    # ship-to ("Detail of Shipment to" — 5 fields from the upload)
     ship_to_name: Mapped[str] = mapped_column(String(200))
     ship_to_address: Mapped[str] = mapped_column(String(600))
     ship_to_state: Mapped[str] = mapped_column(String(60))
+    ship_to_enterprise: Mapped[str] = mapped_column(String(200), default="")
+    ship_to_number: Mapped[str] = mapped_column(String(40), default="")
+    ship_to_contact: Mapped[str] = mapped_column(String(200), default="")
 
     po_number: Mapped[str] = mapped_column(String(60), default="")
     invoice_number: Mapped[str] = mapped_column(String(60), default="")
     eway_required: Mapped[bool] = mapped_column(Boolean, default=False)
-    total_paise: Mapped[int] = mapped_column(BigInteger, default=0)
+    total_paise: Mapped[int | None] = mapped_column(BigInteger)  # None = value-free challan
 
     status: Mapped[str] = mapped_column(String(16), default=ChallanStatus.ISSUED.value, index=True)
     void_reason: Mapped[str | None] = mapped_column(String(300))
@@ -132,10 +137,9 @@ class ChallanLineItem(Base):
     description: Mapped[str] = mapped_column(String(600))
     hsn: Mapped[str] = mapped_column(String(12))
     quantity: Mapped[Decimal] = mapped_column(Numeric(14, 3), default=Decimal("0"))
-    uom: Mapped[str] = mapped_column(String(20), default="NOS")
     rate_text: Mapped[str] = mapped_column(String(60), default="")
     rate_paise: Mapped[int | None] = mapped_column(BigInteger)
-    amount_paise: Mapped[int] = mapped_column(BigInteger, default=0)
+    amount_paise: Mapped[int | None] = mapped_column(BigInteger)  # None = value-free line
     gst_rate: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
 
     challan: Mapped[Challan] = relationship(back_populates="lines")

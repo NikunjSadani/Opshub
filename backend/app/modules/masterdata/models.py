@@ -52,6 +52,7 @@ class Consignor(Base):
     gstin: Mapped[str] = mapped_column(String(15), index=True)
     state: Mapped[str] = mapped_column(String(60))
     address: Mapped[str] = mapped_column(String(600), default="")
+    phone: Mapped[str] = mapped_column(String(40), default="")
     active: Mapped[bool] = mapped_column(default=True)
     updated_by: Mapped[str | None] = mapped_column(String(128))
     updated_at: Mapped[datetime] = mapped_column(
@@ -81,6 +82,7 @@ class Consignee(Base):
     name: Mapped[str] = mapped_column(String(200))  # legal name for this brand+state
     gstin: Mapped[str] = mapped_column(String(15))
     address: Mapped[str] = mapped_column(String(600), default="")
+    phone: Mapped[str] = mapped_column(String(40), default="")
     active: Mapped[bool] = mapped_column(default=True)
     updated_by: Mapped[str | None] = mapped_column(String(128))
     updated_at: Mapped[datetime] = mapped_column(

@@ -14,7 +14,7 @@ Untrusted cell values are escaped by the renderer (bind-as-data).
 """
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import date, datetime, time
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
 
@@ -31,12 +31,14 @@ from app.modules.challan.models import (
 )
 from app.modules.challan.schema import (
     ChallanView,
+    ConsigneeView,
+    ConsignorView,
     LineView,
     ParsedChallan,
     ParsedLine,
-    PartyView,
     RawRow,
     RowError,
+    ShipToView,
     ValidationResult,
 )
 from app.modules.files.models import StoredFile
@@ -78,7 +80,10 @@ def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
     errors: list[RowError] = list(parsing.structural_row_errors(rows))
     bad = {e.row_number for e in errors}
 
-    consignors: dict[str, Consignor | None] = {}
+    if _active_consignor(db) is None:
+        errors.append(RowError(
+            0, "", "exactly one active consignor must be configured in master data"))
+
     consignees: dict[tuple[str, str], Consignee | None] = {}
     hsns: dict[str, HsnCode | None] = {}
 
@@ -86,9 +91,6 @@ def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
         if row.row_number in bad:
             continue  # can't semantically check a structurally-broken row
         c = row.cells
-        if _consignor(db, c["consignor"], consignors) is None:
-            errors.append(RowError(row.row_number, "consignor",
-                                   f"no active consignor named '{c['consignor']}'"))
         if _consignee(db, c["brand"], c["ship_to_state"], consignees) is None:
             errors.append(RowError(row.row_number, "brand",
                                    f"no active consignee for brand '{c['brand']}' "
@@ -97,48 +99,50 @@ def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
         if hsn is None:
             errors.append(RowError(row.row_number, "hsn",
                                    f"unknown or inactive HSN '{c['hsn']}'"))
-        elif c.get("gst_rate"):
-            rate = parsing.parse_qty(c["gst_rate"])
-            if rate is not None and hsn.gst_rate is not None and rate != hsn.gst_rate:
-                errors.append(RowError(row.row_number, "gst_rate",
-                                       f"gst_rate {rate} does not match HSN {hsn.hsn} "
-                                       f"rate {hsn.gst_rate}"))
-        _amount_sanity(row, errors)
+        else:
+            if c.get("gst_rate"):
+                supplied = parsing.parse_qty(c["gst_rate"])
+                if supplied is not None and hsn.gst_rate is not None and supplied != hsn.gst_rate:
+                    errors.append(RowError(row.row_number, "gst_rate",
+                                           f"gst_rate {supplied} does not match HSN {hsn.hsn} "
+                                           f"rate {hsn.gst_rate}"))
+            _amount_sanity(row, hsn, errors)
 
     if errors:
         errors.sort(key=lambda e: (e.row_number, e.column))
         return ValidationResult(errors=errors)
-    return ValidationResult(challans=_build_challans(rows))
+    return ValidationResult(challans=_build_challans(rows, hsns))
 
 
-def _amount_sanity(row: RawRow, errors: list[RowError]) -> None:
-    """If rate is numeric, amount should be ~ rate*qty (skipped for text rates)."""
+def _amount_sanity(row: RawRow, hsn: HsnCode, errors: list[RowError]) -> None:
+    """If an amount is given with a numeric rate, it must equal the tax-INCLUSIVE
+    figure rate*qty*(1+gst). Skipped when the amount is blank (value-free line) or
+    the rate is free text. The HSN's GST rate is authoritative here."""
     c = row.cells
+    if not c.get("amount", "").strip():
+        return  # value-free line — nothing to check
     _, rate_paise = parsing.parse_rate(c.get("rate", ""))
     qty = parsing.parse_qty(c["quantity"])
     amount = parsing.parse_paise(c["amount"])
     if rate_paise is None or qty is None or amount is None or qty <= 0:
         return
-    expected = int((Decimal(rate_paise) * qty).to_integral_value(rounding=ROUND_HALF_UP))
+    gst = hsn.gst_rate or Decimal(0)
+    gross = Decimal(rate_paise) * qty * (1 + gst / Decimal(100))
+    expected = int(gross.to_integral_value(rounding=ROUND_HALF_UP))
     tol = max(100, int(Decimal(expected) * Decimal("0.01")))
     if abs(amount - expected) > tol:
         errors.append(RowError(row.row_number, "amount",
-                               f"amount {amount / 100:.2f} != rate x qty "
-                               f"{expected / 100:.2f}"))
+                               f"amount {amount / 100:.2f} != rate x qty +{gst}% GST "
+                               f"({expected / 100:.2f})"))
 
 
-def _consignor(db: Session, name: str, cache: dict[str, Consignor | None]) -> Consignor | None:
-    # Match case-insensitively (mirrors how master data normalizes on write) so a
-    # spreadsheet's "gifsy depot" resolves the "Gifsy Depot" entity.
-    key = collapse_ws(name).lower()
-    if key not in cache:
-        cache[key] = db.execute(
-            select(Consignor).where(
-                func.lower(func.trim(Consignor.name)) == key,
-                Consignor.active.is_(True),
-            )
-        ).scalar_one_or_none()
-    return cache[key]
+def _active_consignor(db: Session) -> Consignor | None:
+    """The single active consignor (the fixed dispatching entity), or None if the
+    count isn't exactly one (0 = unconfigured, >1 = ambiguous)."""
+    rows = db.execute(
+        select(Consignor).where(Consignor.active.is_(True)).limit(2)
+    ).scalars().all()
+    return rows[0] if len(rows) == 1 else None
 
 
 def _consignee(
@@ -164,8 +168,14 @@ def _hsn(db: Session, hsn: str, cache: dict[str, HsnCode | None]) -> HsnCode | N
     return cache[hsn]
 
 
-def _build_challans(rows: list[RawRow]) -> list[ParsedChallan]:
-    """Group clean rows by `group` (first-seen order) into ParsedChallans."""
+def _build_challans(
+    rows: list[RawRow], hsns: dict[str, HsnCode | None]
+) -> list[ParsedChallan]:
+    """Group clean rows by `group` (first-seen order) into ParsedChallans.
+
+    Amount is OPTIONAL (None -> value-free line). GST is taken from the HSN (the
+    authoritative rate, already cross-checked against any supplied gst_rate).
+    """
     groups: dict[str, ParsedChallan] = {}
     order: list[str] = []
     for row in rows:
@@ -177,11 +187,13 @@ def _build_challans(rows: list[RawRow]) -> list[ParsedChallan]:
                 raise ChallanError(f"unparseable challan_date on row {row.row_number}")
             groups[key] = ParsedChallan(
                 group_key=key,
-                consignor_name=c["consignor"],
                 brand=c["brand"],
+                ship_to_state=c["ship_to_state"],
                 ship_to_name=c["ship_to_name"],
                 ship_to_address=c["ship_to_address"],
-                ship_to_state=c["ship_to_state"],
+                ship_to_enterprise=c.get("ship_to_enterprise", ""),
+                ship_to_number=c.get("ship_to_number", ""),
+                ship_to_contact=c.get("ship_to_contact", ""),
                 challan_date=challan_date,
                 po_number=c.get("po_number", ""),
                 invoice_number=c.get("invoice_number", ""),
@@ -189,16 +201,15 @@ def _build_challans(rows: list[RawRow]) -> list[ParsedChallan]:
             order.append(key)
         pc = groups[key]
         rate_text, rate_paise = parsing.parse_rate(c.get("rate", ""))
-        gst_rate = parsing.parse_qty(c["gst_rate"]) if c.get("gst_rate") else None
+        hsn = hsns.get(c["hsn"])
         pc.lines.append(ParsedLine(
             description=c["description"],
             hsn=c["hsn"],
             quantity=parsing.parse_qty(c["quantity"]) or Decimal(0),
-            uom=c.get("uom") or "NOS",
             rate_text=rate_text,
             rate_paise=rate_paise,
-            amount_paise=parsing.parse_paise(c["amount"]) or 0,
-            gst_rate=gst_rate,
+            amount_paise=parsing.parse_paise(c["amount"]) if c.get("amount", "").strip() else None,
+            gst_rate=hsn.gst_rate if hsn is not None else None,
         ))
     return [groups[k] for k in order]
 
@@ -332,11 +343,12 @@ def _persist_challan(
     actor_uid: str | None,
 ) -> Challan:
     """Build the Challan + line items with fresh master-data snapshots."""
-    consignor = _consignor(db, pc.consignor_name, {})
+    consignor = _active_consignor(db)
     consignee = _consignee(db, pc.brand, pc.ship_to_state, {})
     if consignor is None or consignee is None:  # pragma: no cover - pre-validated
         raise ChallanError("master data changed after validation")
     alloc = _allocation(db, alloc_id)
+    total = pc.total_paise  # int | None (None => value-free challan)
     challan = Challan(
         batch_id=batch.id,
         allocation_id=alloc.id,
@@ -349,18 +361,23 @@ def _persist_challan(
         consignor_gstin=consignor.gstin,
         consignor_state=consignor.state,
         consignor_address=consignor.address,
+        consignor_phone=consignor.phone,
         consignee_brand=consignee.brand,
         consignee_name=consignee.name,
         consignee_gstin=consignee.gstin,
         consignee_state=consignee.state,
         consignee_address=consignee.address,
+        consignee_phone=consignee.phone,
         ship_to_name=pc.ship_to_name,
         ship_to_address=pc.ship_to_address,
         ship_to_state=pc.ship_to_state,
+        ship_to_enterprise=pc.ship_to_enterprise,
+        ship_to_number=pc.ship_to_number,
+        ship_to_contact=pc.ship_to_contact,
         po_number=pc.po_number,
         invoice_number=pc.invoice_number,
-        eway_required=pc.total_paise >= threshold_paise > 0,
-        total_paise=pc.total_paise,
+        eway_required=total is not None and total >= threshold_paise > 0,
+        total_paise=total,
         status=ChallanStatus.ISSUED.value,
         created_by=actor_uid,
     )
@@ -370,7 +387,6 @@ def _persist_challan(
             description=line.description,
             hsn=line.hsn,
             quantity=line.quantity,
-            uom=line.uom,
             rate_text=line.rate_text,
             rate_paise=line.rate_paise,
             amount_paise=line.amount_paise,
@@ -499,44 +515,72 @@ def _error_report_bytes(errors: list[RowError]) -> bytes:
 
 
 def _build_view(ch: Challan) -> ChallanView:
+    show_amount = ch.total_paise is not None
     return ChallanView(
         number=ch.number,
-        challan_date=ch.challan_date.strftime("%d-%m-%Y"),
-        consignor=PartyView(ch.consignor_name, ch.consignor_gstin,
-                            ch.consignor_state, ch.consignor_address),
-        consignee=PartyView(ch.consignee_name, ch.consignee_gstin,
-                            ch.consignee_state, ch.consignee_address),
-        ship_to_name=ch.ship_to_name,
-        ship_to_address=ch.ship_to_address,
-        ship_to_state=ch.ship_to_state,
-        po_number=ch.po_number,
-        invoice_number=ch.invoice_number,
-        eway_required=ch.eway_required,
+        challan_date=_ordinal_date(ch.challan_date),
+        consignor=ConsignorView(
+            name=ch.consignor_name, warehouse_address=ch.consignor_address,
+            gstin=ch.consignor_gstin, phone=ch.consignor_phone),
+        consignee=ConsigneeView(
+            name=ch.consignee_name, address=ch.consignee_address, gstin=ch.consignee_gstin,
+            state_label=f"{ch.consignee_state} ({ch.consignee_gstin[:2]})",
+            phone=ch.consignee_phone),
+        ship_to=ShipToView(
+            name=ch.ship_to_name, address=ch.ship_to_address, enterprise=ch.ship_to_enterprise,
+            number=ch.ship_to_number, contact_person=ch.ship_to_contact),
         lines=[
             LineView(
                 line_no=line.line_no,
                 description=line.description,
                 hsn=line.hsn,
                 quantity=_qty(line.quantity),
-                uom=line.uom,
-                rate=line.rate_text or _rupees(line.rate_paise),
-                amount=_rupees(line.amount_paise),
-                gst_rate=("" if line.gst_rate is None else f"{line.gst_rate}"),
+                rate=line.rate_text,
+                amount="" if line.amount_paise is None else _rupees(line.amount_paise),
             )
             for line in ch.lines
         ],
-        total_amount=_rupees(ch.total_paise),
+        total_qty=_qty(sum((line.quantity for line in ch.lines), Decimal(0))),
+        total_amount=_rupees(ch.total_paise) if show_amount else "",
+        show_amount=show_amount,
     )
+
+
+def _ordinal_date(d: date) -> str:
+    """`date(2026,7,28)` -> "28th July 2026" (matches the L/433 challan style)."""
+    n = d.day
+    suffix = "th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix} {d.strftime('%B %Y')}"
 
 
 def _qty(q: Decimal) -> str:
     return f"{q.normalize():f}"
 
 
+def _indian_grouping(digits: str) -> str:
+    """Group an integer string in the Indian system: 163620 -> '1,63,620'."""
+    if len(digits) <= 3:
+        return digits
+    head, tail = digits[:-3], digits[-3:]
+    parts: list[str] = []
+    while len(head) > 2:
+        parts.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        parts.insert(0, head)
+    return ",".join(parts) + "," + tail
+
+
 def _rupees(paise: int | None) -> str:
+    """Indian-grouped rupees; drops a trailing .00 (matches L/433: '41,890')."""
     if paise is None:
         return ""
-    return f"{Decimal(paise) / 100:,.2f}"  # Decimal, not float — statutory money display
+    sign = "-" if paise < 0 else ""
+    value = (Decimal(abs(paise)) / 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    whole = int(value)
+    frac = value - whole
+    grouped = _indian_grouping(str(whole))
+    return sign + grouped if frac == 0 else f"{sign}{grouped}.{f'{frac:.2f}'[2:]}"
 
 
 def _safe(number: str) -> str:

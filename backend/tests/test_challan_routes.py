@@ -83,9 +83,10 @@ def _xlsx(rows: list[list[str]]) -> bytes:
     return buf.getvalue()
 
 
-def _row(group: str, hsn: str = "1509", amount: str = "100.00") -> list[str]:
-    return [group, "Gifsy Depot", "Deoleo", "Store A", "Addr A", "Maharashtra",
-            "15-05-2026", "Item", hsn, "1", "NOS", "100.00", amount, "5", "", ""]
+def _row(group: str, hsn: str = "1509", amount: str = "105.00") -> list[str]:
+    # Column order must match schema.CHALLAN_COLUMNS; amount is tax-inclusive (100x1x1.05).
+    return [group, "Deoleo", "Maharashtra", "Store A", "Addr A", "", "", "",
+            "15-05-2026", "Item", hsn, "1", "100.00", amount, "5", "", ""]
 
 
 def _upload(client: TestClient, data: bytes) -> dict[str, object]:
