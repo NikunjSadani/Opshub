@@ -18,46 +18,19 @@ import {
 } from '../../api/challan';
 import { BATCH_STATUS_TONE, errorMessage } from './challanFormat';
 
-// Blank-template header row. MUST match backend schema.CHALLAN_COLUMNS
-// (backend/app/modules/challan/schema.py) — keep in sync if that list changes.
-const TEMPLATE_COLUMNS = [
-  'group',
-  'brand',
-  'ship_to_state',
-  'ship_to_name',
-  'ship_to_address',
-  'ship_to_enterprise',
-  'ship_to_number',
-  'ship_to_contact',
-  'challan_date',
-  'description',
-  'hsn',
-  'quantity',
-  'rate',
-  'amount',
-  'gst_rate',
-  'po_number',
-  'invoice_number',
-] as const;
-
 const SERIES_RE = /^[A-Za-z0-9]{1,8}$/;
-
-function downloadBlankTemplate(): void {
-  const csv = `${TEMPLATE_COLUMNS.join(',')}\n`;
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'challan-upload-template.csv';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
 
 export function NewChallan() {
   const toast = useToast();
-  const { download } = useApi();
+  const { download, downloadUrl } = useApi();
+
+  async function onDownloadTemplate(): Promise<void> {
+    try {
+      await downloadUrl('/challan/template.xlsx', 'challan-upload-template.xlsx');
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
 
   const [file, setFile] = useState<File | null>(null);
   const [uploaded, setUploaded] = useState<BatchOut | null>(null);
@@ -140,8 +113,8 @@ export function NewChallan() {
         title="New Challan"
         subtitle="Upload the filled Excel workbook, review validation, then generate the challans."
         actions={
-          <Button variant="secondary" size="sm" onClick={downloadBlankTemplate}>
-            Download blank template
+          <Button variant="secondary" size="sm" onClick={() => void onDownloadTemplate()}>
+            Download template
           </Button>
         }
       />

@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.modules.challan import render, service
+from app.modules.challan import render, service, template
 from app.modules.challan.models import BatchStatus, Challan, ChallanBatch, ChallanStatus
 from app.modules.files.models import StoredFile
 from app.platform.auth import current_user
@@ -120,6 +120,25 @@ class ChallanSummaryOut(BaseModel):
 
 class VoidBody(BaseModel):
     reason: str = Field(min_length=1, max_length=300)
+
+
+_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.get("/challan/template.xlsx")
+def download_template(
+    user: Annotated[User, Depends(current_user)],
+) -> Response:
+    """The self-documenting upload template (.xlsx): a filled 'Challans' sheet +
+    an 'Instructions' sheet (per-column reference + Dos & Don'ts)."""
+    _require_module(user)
+    return Response(
+        content=template.build_template_xlsx(),
+        media_type=_XLSX_MEDIA,
+        headers={
+            "Content-Disposition": 'attachment; filename="challan-upload-template.xlsx"'
+        },
+    )
 
 
 # ------------------------------------------------------------- upload/validate

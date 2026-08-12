@@ -43,7 +43,7 @@ describe('NewChallan upload flow', () => {
 
     // Upload action + file input are present, no network needed.
     expect(screen.getByRole('button', { name: /upload & validate/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /download blank template/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /download template/i })).toBeInTheDocument();
 
     // The upload button is disabled until a file is chosen.
     expect(screen.getByRole('button', { name: /upload & validate/i })).toBeDisabled();
