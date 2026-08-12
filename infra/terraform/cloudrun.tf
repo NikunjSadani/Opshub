@@ -36,6 +36,17 @@ resource "google_cloud_run_v2_service" "api" {
           }
         }
       }
+      # SWEEP_SECRET — gates POST /api/v1/numbering/sweep (fail-closed: 503 if unset).
+      # Cloud Scheduler (scheduler.tf) sends the same value as the X-Sweep-Secret header.
+      env {
+        name = "SWEEP_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.sweep_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
       volume_mounts {
         name       = "cloudsql"
         mount_path = "/cloudsql"

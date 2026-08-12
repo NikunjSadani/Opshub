@@ -18,6 +18,7 @@ locals {
     "iam.googleapis.com",
     "artifactregistry.googleapis.com",
     "billingbudgets.googleapis.com",
+    "cloudscheduler.googleapis.com",
   ]
 }
 

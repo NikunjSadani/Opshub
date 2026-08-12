@@ -19,6 +19,7 @@ import {
 import { useAuth } from '../../auth/AuthProvider';
 import { useApi } from '../../api/client';
 import {
+  buildChallanCsvQuery,
   useChallansInfiniteQuery,
   useVoidChallan,
   type ChallanFilters,
@@ -37,14 +38,17 @@ function formatDate(iso: string): string {
 export function Register() {
   const toast = useToast();
   const { user } = useAuth();
-  const { download } = useApi();
+  const { download, downloadUrl } = useApi();
   const isAdmin = user?.role === 'ADMIN';
 
   const [series, setSeries] = useState('');
   const [fy, setFy] = useState('');
   const [status, setStatus] = useState<ChallanStatus | ''>('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [downloading, setDownloading] = useState(false);
 
-  const filters: ChallanFilters = { series, fy, status };
+  const filters: ChallanFilters = { series, fy, status, date_from: dateFrom, date_to: dateTo };
   // Changing any filter changes the query key, so paging naturally resets to page 0.
   const query = useChallansInfiniteQuery(filters);
   const rows = query.data?.pages.flat() ?? [];
@@ -85,6 +89,17 @@ export function Register() {
     );
   }
 
+  async function onDownloadCsv() {
+    setDownloading(true);
+    try {
+      await downloadUrl(`/challan/challans.csv${buildChallanCsvQuery(filters)}`, 'challans.csv');
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setDownloading(false);
+    }
+  }
+
   async function onDownloadPdf(c: ChallanOut) {
     if (c.pdf_file_id == null) return;
     try {
@@ -96,9 +111,22 @@ export function Register() {
 
   return (
     <div>
-      <PageHeader title="Register" subtitle="Issued challans across all batches." />
+      <PageHeader
+        title="Register"
+        subtitle="Issued challans across all batches."
+        actions={
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void onDownloadCsv()}
+            loading={downloading}
+          >
+            Download CSV
+          </Button>
+        }
+      />
 
-      <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+      <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <TextField
           label="Series"
           value={series}
@@ -122,6 +150,20 @@ export function Register() {
           <option value="ISSUED">Issued</option>
           <option value="VOID">Void</option>
         </SelectField>
+        <TextField
+          label="From date"
+          type="date"
+          value={dateFrom}
+          onChange={(e) => setDateFrom(e.target.value)}
+          max={dateTo || undefined}
+        />
+        <TextField
+          label="To date"
+          type="date"
+          value={dateTo}
+          onChange={(e) => setDateTo(e.target.value)}
+          min={dateFrom || undefined}
+        />
       </div>
 
       {query.isPending ? (
@@ -130,7 +172,7 @@ export function Register() {
         <ErrorState error={query.error} onRetry={() => void query.refetch()} />
       ) : rows.length === 0 ? (
         <StatePanel title="No challans found">
-          No {status ? status.toLowerCase() : ''} challans match these filters.
+          No {status ? `${status.toLowerCase()} ` : ''}challans match these filters.
         </StatePanel>
       ) : (
         <>

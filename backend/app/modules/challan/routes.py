@@ -14,6 +14,8 @@ Admin-only (`challan.void`).
 from __future__ import annotations
 
 import re
+from datetime import date
+from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import Annotated, Any, cast
 from uuid import uuid4
@@ -28,8 +30,9 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import case, func, select, update
+from sqlalchemy import Select, case, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -48,6 +51,11 @@ router = APIRouter()
 MODULE_KEY = "document_automation"
 _UPLOAD_CHUNK = 1024 * 1024
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# Hard ceiling on a single CSV export so the response can never be unbounded.
+MAX_CSV_ROWS = 50000
+_CSV_HEADER = (
+    "Number,Date,Consignee Brand,Consignee Name,Ship-to State,E-way,Total (INR),Status"
+)
 
 
 def _sanitize_filename(name: str) -> str:
@@ -237,17 +245,14 @@ def get_batch(
     return batch
 
 
-@router.get("/challan/challans", response_model=list[ChallanOut])
-def list_challans(
-    user: Annotated[User, Depends(current_user)],
-    db: Annotated[Session, Depends(get_db)],
-    series: Annotated[str | None, Query(max_length=8)] = None,
-    fy: Annotated[str | None, Query(max_length=7)] = None,
-    status_filter: Annotated[ChallanStatus | None, Query(alias="status")] = None,
-    limit: Annotated[int, Query(ge=1, le=500)] = 100,
-    offset: Annotated[int, Query(ge=0)] = 0,
-) -> list[Challan]:
-    _require_module(user)
+def _register_query(
+    series: str | None,
+    fy: str | None,
+    status_filter: ChallanStatus | None,
+    date_from: date | None,
+    date_to: date | None,
+) -> Select[tuple[Challan]]:
+    """The filtered, newest-first register select shared by the list + CSV routes."""
     stmt = select(Challan)
     if series:
         stmt = stmt.where(Challan.series == series.strip().upper())
@@ -255,8 +260,89 @@ def list_challans(
         stmt = stmt.where(Challan.fy == fy)
     if status_filter is not None:
         stmt = stmt.where(Challan.status == status_filter.value)
-    stmt = stmt.order_by(Challan.id.desc()).limit(limit).offset(offset)
+    if date_from is not None:
+        stmt = stmt.where(Challan.challan_date >= date_from)
+    if date_to is not None:  # inclusive upper bound
+        stmt = stmt.where(Challan.challan_date <= date_to)
+    return stmt.order_by(Challan.id.desc())
+
+
+@router.get("/challan/challans", response_model=list[ChallanOut])
+def list_challans(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    series: Annotated[str | None, Query(max_length=8)] = None,
+    fy: Annotated[str | None, Query(max_length=7)] = None,
+    status_filter: Annotated[ChallanStatus | None, Query(alias="status")] = None,
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[Challan]:
+    _require_module(user)
+    stmt = _register_query(series, fy, status_filter, date_from, date_to)
+    stmt = stmt.limit(limit).offset(offset)
     return list(db.execute(stmt).scalars())
+
+
+def _csv_total(total_paise: int | None) -> str:
+    """Rupees as a plain 2dp decimal (`1425.06`) so a spreadsheet can sum it;
+    empty string for a value-free challan (`total_paise is None`)."""
+    if total_paise is None:
+        return ""
+    return f"{Decimal(total_paise) / 100:.2f}"
+
+
+@router.get("/challan/challans.csv")
+def export_challans_csv(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    series: Annotated[str | None, Query(max_length=8)] = None,
+    fy: Annotated[str | None, Query(max_length=7)] = None,
+    status_filter: Annotated[ChallanStatus | None, Query(alias="status")] = None,
+    date_from: Annotated[date | None, Query()] = None,
+    date_to: Annotated[date | None, Query()] = None,
+) -> Response:
+    """Export the filtered register (newest-first, same filters/order as the list)
+    as CSV. Text-derived fields are CSV-injection-guarded via `service._csv_field`.
+
+    Capped at MAX_CSV_ROWS: a filtered set larger than the cap returns the newest
+    MAX_CSV_ROWS rows and is NEVER silent about it — a trailing marker row and an
+    `X-Truncated: true` header both signal the cut, so the file can't be mistaken
+    for the complete register.
+    """
+    _require_module(user)
+    # Fetch one past the cap so we can DETECT (not silently swallow) an over-cap set.
+    stmt = _register_query(series, fy, status_filter, date_from, date_to).limit(MAX_CSV_ROWS + 1)
+    rows = list(db.execute(stmt).scalars())
+    truncated = len(rows) > MAX_CSV_ROWS
+    rows = rows[:MAX_CSV_ROWS]
+    lines = [_CSV_HEADER]
+    for ch in rows:
+        lines.append(",".join((
+            service._csv_field(ch.number),
+            f'"{ch.challan_date.isoformat()}"',
+            service._csv_field(ch.consignee_brand),
+            service._csv_field(ch.consignee_name),
+            service._csv_field(ch.ship_to_state),
+            f'"{"Yes" if ch.eway_required else "No"}"',
+            f'"{_csv_total(ch.total_paise)}"',
+            f'"{ch.status}"',
+        )))
+    if truncated:
+        marker = service._csv_field(
+            f"truncated at {MAX_CSV_ROWS} rows — narrow the filters for the full register"
+        )
+        lines.append(",".join([marker, *['""'] * 7]))
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+    return Response(
+        content=body,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="challan-register.csv"',
+            "X-Truncated": "true" if truncated else "false",
+        },
+    )
 
 
 @router.get("/challan/summary", response_model=ChallanSummaryOut)

@@ -1,5 +1,6 @@
 import { ApiError } from '../../api/client';
 import type { BatchStatus, ChallanStatus } from '../../api/challan';
+import type { AllocationStatus } from '../../api/numbering';
 
 /** Shared formatting + status helpers for the challan screens. */
 
@@ -41,4 +42,10 @@ export const BATCH_STATUS_TONE: Record<BatchStatus, Tone> = {
 export const CHALLAN_STATUS_TONE: Record<ChallanStatus, Tone> = {
   ISSUED: 'green',
   VOID: 'red',
+};
+
+export const ALLOCATION_STATUS_TONE: Record<AllocationStatus, Tone> = {
+  RESERVED: 'amber',
+  ISSUED: 'green',
+  VOID: 'slate',
 };

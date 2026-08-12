@@ -555,8 +555,10 @@ def _csv_field(value: str) -> str:
 
     A field derived from an untrusted cell that begins with = + - @ (or a control
     char) is prefixed with `'` so Excel/Sheets treats it as text, not a formula.
+    An embedded double-quote is escaped by DOUBLING it (RFC 4180) rather than
+    altering it, so the exported value stays faithful to the record.
     """
-    value = value.replace('"', "'")
+    value = value.replace('"', '""')
     if value[:1] in ("=", "+", "-", "@", "\t", "\r"):
         value = "'" + value
     return f'"{value}"'

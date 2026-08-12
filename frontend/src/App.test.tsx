@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import App from './App';
 import type { ModuleDescriptor } from './types/modules';
 
@@ -47,8 +47,10 @@ describe('OpsHub app shell', () => {
     // A coming-soon module still renders, badged as such (tile-only text).
     expect(await screen.findByText('Coming Soon')).toBeInTheDocument();
 
-    // The signed-in user's identity shows in the top bar.
-    expect(screen.getByText('ADMIN')).toBeInTheDocument();
+    // The signed-in user's identity shows in the top bar. (Scoped to the
+    // header: the dev role switcher also renders an "ADMIN" <option>.)
+    const header = screen.getByRole('banner');
+    expect(within(header).getByText('ADMIN')).toBeInTheDocument();
   });
 
   it('called the modules endpoint with a bearer token', async () => {

@@ -5,6 +5,7 @@ import { Overview } from './Overview';
 import { NewChallan } from './NewChallan';
 import { Batches } from './Batches';
 import { Register } from './Register';
+import { Numbering } from './Numbering';
 import { MasterData } from './MasterData';
 
 const BASE = '/m/document_automation';
@@ -23,6 +24,7 @@ export function ChallanModule() {
     { to: `${BASE}/new`, label: 'New Challan' },
     { to: `${BASE}/batches`, label: 'Batches' },
     { to: `${BASE}/register`, label: 'Register' },
+    { to: `${BASE}/numbering`, label: 'Numbering' },
     ...(isAdmin ? [{ to: `${BASE}/master-data`, label: 'Master Data' }] : []),
   ];
 
@@ -34,6 +36,7 @@ export function ChallanModule() {
         <Route path="new" element={<NewChallan />} />
         <Route path="batches" element={<Batches />} />
         <Route path="register" element={<Register />} />
+        <Route path="numbering" element={<Numbering />} />
         <Route
           path="master-data/*"
           element={isAdmin ? <MasterData /> : <Navigate to={BASE} replace />}

@@ -46,6 +46,19 @@ export function detailMessage(payload: unknown): string | undefined {
   return undefined;
 }
 
+/** Build an ApiError from a failed download Response, preferring the FastAPI detail. */
+async function downloadError(res: Response): Promise<ApiError> {
+  let message = `Download failed: ${res.status}`;
+  if (res.headers.get('content-type')?.includes('application/json')) {
+    try {
+      message = detailMessage(await res.json()) ?? message;
+    } catch {
+      /* keep the fallback message */
+    }
+  }
+  return new ApiError(res.status, message);
+}
+
 export interface RequestOptions {
   method?: string;
   /** JSON-serializable request body. */
@@ -104,7 +117,30 @@ export function useApi() {
       const res = await fetch(`${API_BASE}/files/${fileId}/download`, {
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       });
-      if (!res.ok) throw new ApiError(res.status, `Download failed: ${res.status}`);
+      if (!res.ok) throw await downloadError(res);
+      const blob = await res.blob();
+      const disposition = res.headers.get('content-disposition') ?? '';
+      const match = /filename="?([^"]+)"?/.exec(disposition);
+      const name = match?.[1] ?? fallbackName;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    },
+    [getToken],
+  );
+
+  const downloadUrl = useCallback(
+    async (path: string, fallbackName = 'download') => {
+      const token = await getToken();
+      const res = await fetch(`${API_BASE}${path}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
+      if (!res.ok) throw await downloadError(res);
       const blob = await res.blob();
       const disposition = res.headers.get('content-disposition') ?? '';
       const match = /filename="?([^"]+)"?/.exec(disposition);
@@ -136,8 +172,10 @@ export function useApi() {
       [request],
     ),
     del: useCallback(<T>(path: string) => request<T>(path, { method: 'DELETE' }), [request]),
-    /** Fetch an authed file and trigger a browser download. */
+    /** Fetch an authed file (by id) and trigger a browser download. */
     download,
+    /** Fetch an authed URL (relative to /api/v1) as a blob and trigger a download. */
+    downloadUrl,
     /** POST a multipart form (e.g. the challan xlsx upload). */
     postForm: useCallback(
       async <T>(path: string, form: FormData): Promise<T> => {

@@ -17,3 +17,7 @@ output "files_bucket" {
 output "api_service_account" {
   value = google_service_account.api.email
 }
+
+output "numbering_sweep_job" {
+  value = google_cloud_scheduler_job.numbering_sweep.name
+}

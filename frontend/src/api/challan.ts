@@ -68,6 +68,10 @@ export interface ChallanFilters {
   series?: string;
   fy?: string;
   status?: ChallanStatus | '';
+  /** Inclusive lower bound on challan_date (YYYY-MM-DD). */
+  date_from?: string;
+  /** Inclusive upper bound on challan_date (YYYY-MM-DD). */
+  date_to?: string;
 }
 
 /** Filters for the aggregate summary (no status — it splits ISSUED vs VOID itself). */
@@ -115,17 +119,41 @@ export function buildChallanSummaryQuery(filters: ChallanSummaryFilters): string
 }
 
 /**
- * Build a `?series=&fy=&status=&limit=&offset=` query string for the register.
- * Filter params are appended only when non-empty (trimmed); limit/offset always.
+ * Append the shared register filters (series / fy / status / date_from / date_to)
+ * to a params bag, each only when non-empty (trimmed). Used by both the paged list
+ * query and the CSV export so their filter semantics stay identical.
  */
-export function buildChallanListQuery(filters: ChallanFilters, offset: number): string {
-  const params = new URLSearchParams();
+function appendChallanFilters(params: URLSearchParams, filters: ChallanFilters): void {
   if (filters.series?.trim()) params.set('series', filters.series.trim());
   if (filters.fy?.trim()) params.set('fy', filters.fy.trim());
   if (filters.status) params.set('status', filters.status);
+  if (filters.date_from?.trim()) params.set('date_from', filters.date_from.trim());
+  if (filters.date_to?.trim()) params.set('date_to', filters.date_to.trim());
+}
+
+/**
+ * Build a `?series=&fy=&status=&date_from=&date_to=&limit=&offset=` query string
+ * for the register. Filter params are appended only when non-empty (trimmed);
+ * limit/offset always.
+ */
+export function buildChallanListQuery(filters: ChallanFilters, offset: number): string {
+  const params = new URLSearchParams();
+  appendChallanFilters(params, filters);
   params.set('limit', String(CHALLAN_PAGE_SIZE));
   params.set('offset', String(offset));
   return `?${params.toString()}`;
+}
+
+/**
+ * Build the query string for the CSV export — the same filters as the register
+ * list (series / fy / status / date_from / date_to) but no limit/offset paging.
+ * Returns '' when no filters are set.
+ */
+export function buildChallanCsvQuery(filters: ChallanFilters): string {
+  const params = new URLSearchParams();
+  appendChallanFilters(params, filters);
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
 }
 
 // --------------------------------------------------------------- query keys

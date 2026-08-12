@@ -43,3 +43,23 @@ resource "google_secret_manager_secret_iam_member" "migrate_db_prod" {
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.migrate.email}"
 }
+
+resource "google_secret_manager_secret_iam_member" "api_sweep_secret" {
+  project   = google_project.opshub.project_id
+  secret_id = google_secret_manager_secret.sweep_secret.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.api.email}"
+}
+
+# The API serves a PUBLIC web app that does its OWN auth (Firebase in-app + the
+# backend's per-request checks), so the Cloud Run service must be publicly
+# invokable at the IAM layer. Without this the SPA can't load AND Cloud Scheduler's
+# secret-gated sweep call (scheduler.tf) would 403 before the app's X-Sweep-Secret
+# check ever runs. In-app auth — not Cloud Run IAM — is the gate here.
+resource "google_cloud_run_v2_service_iam_member" "api_public" {
+  project  = google_project.opshub.project_id
+  location = google_cloud_run_v2_service.api.location
+  name     = google_cloud_run_v2_service.api.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}

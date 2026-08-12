@@ -50,6 +50,14 @@ export function AppRoutes() {
         }
       >
         <Route path="/" element={<Dashboard />} />
+        {/*
+          Access to a module is governed by the backend's PER-USER module-access
+          list (surfaced via GET /modules and used to build the nav), NOT by role
+          — so no role allowlist is gated here. The backend enforces every call;
+          a future RequireModule guard (reading the modules list) is the correct
+          FE affordance for direct-URL hits. RequireRole (see its file) is for
+          genuinely role-scoped surfaces; the dev role switcher exercises it.
+        */}
         <Route path="/m/document_automation/*" element={<ChallanModule />} />
         <Route path="/m/:key" element={<ModulePlaceholder />} />
       </Route>
