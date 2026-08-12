@@ -29,10 +29,14 @@ export function Button({
   children,
   ...rest
 }: ButtonProps) {
+  // A loading button is always non-interactive (prevents double-submit), and an
+  // explicit `disabled` still wins. `disabled ?? loading` was wrong: an explicit
+  // `disabled={false}` short-circuited and ignored `loading`.
+  const isDisabled = (disabled ?? false) || loading;
   return (
     <button
       {...rest}
-      disabled={disabled ?? loading}
+      disabled={isDisabled}
       className={`inline-flex items-center justify-center gap-1.5 rounded-md font-medium transition disabled:cursor-not-allowed ${VARIANTS[variant]} ${SIZES[size]} ${className}`}
     >
       {loading && <Spinner className="h-3.5 w-3.5" />}

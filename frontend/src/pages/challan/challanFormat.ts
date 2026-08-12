@@ -1,5 +1,5 @@
 import { ApiError } from '../../api/client';
-import type { BatchStatus, ChallanStatus } from '../../api/challan';
+import type { BatchOut, BatchStatus, ChallanStatus } from '../../api/challan';
 import type { AllocationStatus } from '../../api/numbering';
 
 /** Shared formatting + status helpers for the challan screens. */
@@ -28,6 +28,25 @@ export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === 'string') return err;
   return 'Something went wrong.';
+}
+
+/** Download descriptors for whatever artifacts a batch has produced (shared by
+ *  the Batches tab and the New Challan recent-batches list). */
+export function batchArtifacts(
+  b: BatchOut,
+): Array<{ label: string; fileId: number; name: string }> {
+  const links: Array<{ label: string; fileId: number; name: string }> = [];
+  if (b.error_report_file_id != null)
+    links.push({
+      label: 'Error report',
+      fileId: b.error_report_file_id,
+      name: `batch-${b.id}-errors.csv`,
+    });
+  if (b.zip_file_id != null)
+    links.push({ label: 'ZIP', fileId: b.zip_file_id, name: `batch-${b.id}.zip` });
+  if (b.merged_pdf_file_id != null)
+    links.push({ label: 'Merged PDF', fileId: b.merged_pdf_file_id, name: `batch-${b.id}.pdf` });
+  return links;
 }
 
 export const BATCH_STATUS_TONE: Record<BatchStatus, Tone> = {

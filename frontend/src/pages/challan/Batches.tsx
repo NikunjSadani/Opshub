@@ -13,8 +13,8 @@ import {
   useToast,
 } from '../../ui';
 import { useApi } from '../../api/client';
-import { useBatchesQuery, type BatchOut } from '../../api/challan';
-import { BATCH_STATUS_TONE, errorMessage } from './challanFormat';
+import { useBatchesQuery } from '../../api/challan';
+import { BATCH_STATUS_TONE, batchArtifacts, errorMessage } from './challanFormat';
 
 export function Batches() {
   const toast = useToast();
@@ -28,17 +28,6 @@ export function Batches() {
     } catch (err) {
       toast.error(errorMessage(err));
     }
-  }
-
-  function artifacts(b: BatchOut) {
-    const links: Array<{ label: string; fileId: number; name: string }> = [];
-    if (b.error_report_file_id != null)
-      links.push({ label: 'Error report', fileId: b.error_report_file_id, name: `batch-${b.id}-errors.csv` });
-    if (b.zip_file_id != null)
-      links.push({ label: 'ZIP', fileId: b.zip_file_id, name: `batch-${b.id}.zip` });
-    if (b.merged_pdf_file_id != null)
-      links.push({ label: 'Merged PDF', fileId: b.merged_pdf_file_id, name: `batch-${b.id}.pdf` });
-    return links;
   }
 
   return (
@@ -80,7 +69,7 @@ export function Batches() {
           </THead>
           <tbody>
             {query.data.map((b) => {
-              const links = artifacts(b);
+              const links = batchArtifacts(b);
               return (
                 <Tr key={b.id}>
                   <Td className="font-medium text-slate-900">#{b.id}</Td>

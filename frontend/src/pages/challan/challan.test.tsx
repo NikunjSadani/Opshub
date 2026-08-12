@@ -23,12 +23,20 @@ function renderNewChallan() {
 
 describe('NewChallan upload flow', () => {
   beforeEach(() => {
-    // No network on initial render (batch poll is disabled until a batch id
-    // exists); mock fetch so any accidental call fails loudly instead of hanging.
+    // The screen now legitimately fetches the recent-batches list on mount
+    // (useBatchesQuery). Return an empty list for that call so "Recent batches"
+    // renders its empty state; any OTHER call fails loudly instead of hanging.
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
-        throw new Error(`Unexpected fetch: ${String(input)}`);
+        const url = String(input);
+        if (url.includes('/challan/batches')) {
+          return new Response('[]', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
   });
@@ -38,17 +46,17 @@ describe('NewChallan upload flow', () => {
     vi.restoreAllMocks();
   });
 
-  it('renders the upload form and the blank-template control', () => {
+  it('renders the upload form and the blank-template control', async () => {
     renderNewChallan();
 
-    // Upload action + file input are present, no network needed.
+    // Upload action + template control are present.
     expect(screen.getByRole('button', { name: /upload & validate/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /download template/i })).toBeInTheDocument();
 
     // The upload button is disabled until a file is chosen.
     expect(screen.getByRole('button', { name: /upload & validate/i })).toBeDisabled();
 
-    // Never called the network just to render the form.
-    expect(fetch).not.toHaveBeenCalled();
+    // Recent batches resolves to its empty state (the one mount-time fetch).
+    expect(await screen.findByText(/no batches yet/i)).toBeInTheDocument();
   });
 });
