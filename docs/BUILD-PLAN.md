@@ -44,7 +44,7 @@ This plan carries the Loyaltybase build learnings forward. **Principles retained
 - **DoD:** each role logs in, RBAC gates correctly, audit writes, download streams — all runtime-verified; harness green. *Dual audit on auth/RBAC + the audit chain.*
 
 ### Phase 1 — Module 1: Delivery Challan  ·  *needs the challan seed + master data*
-- Master-data CRUD (consignor · brand→state-GSTIN registry · HSN rates · series · settings).
+- Master-data CRUD (consignor · brand→state-GSTIN registry [→ superseded by a GSTIN-keyed consignee master, inc 14–15; see RESUME.md] · HSN rates · series · settings). *(Also added during build: a **Projects** module — client-code project IDs quoted on challans.)*
 - **Numbering engine** — reserve-before-generate, FY-reset (IST), unique partial index, idempotency key, counter lock, reconcile sweeper, audited seed. **Dual audit MANDATORY.**
 - Upload → validate (+ downloadable error report, inline-fix, dup-dispatch/amount-sanity/HSN warnings) → preview → reserve → **HTML→PDF generate** → ZIP + merged PDF → register.
 - Void (admin, audited) · Challan Register / Job History / e-way / Void / Audit reports · dashboard.

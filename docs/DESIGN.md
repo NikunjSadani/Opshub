@@ -33,7 +33,7 @@ Platform spine + first modules. Build shared **conventions and services**, not a
 ## 5. Module 1 — Delivery Challan
 - Excel upload → validate → **reserve numbers** → generate multi-line challan PDFs → ZIP + merged PDF → register.
 - **Numbering (platform service):** `GIF/DC/{FY}/{series}/{NNNNNN}`; FY reset in **Asia/Kolkata**; reserve-before-generate under a counter row-lock; **unique partial index on non-void `(series, fy, number)`**; **idempotency key** on batch; retry resumes the reservation; reconcile sweeper for orphaned RESERVED; audited seed. Modes 1–2 in v1; **read-from-Excel (mode 3) deferred**.
-- Consignee derived from a **Brand → State → {GSTIN, address}** registry keyed by ship-to state; snapshotted onto each document.
+- Consignee derived from a **Brand → State → {GSTIN, address}** registry keyed by ship-to state; snapshotted onto each document. *(Evolving — see §14: superseded by a GSTIN-keyed consignee master + inline consignee in the 26-column template, inc 14–15.)*
 
 ## 6. Jobs / async
 - Module 1: in-process background + status polling.
@@ -105,3 +105,10 @@ schema-per-module · Cloud Tasks queue for Module 1 · signed URLs · read-from-
 - **DB Option B (one instance, prod+non-prod DBs)** — data isolated in separate databases; saves the second instance; low-stakes internal tool accepts shared performance.
 - **Never co-locate OpsHub DB with Loyaltybase (money path) or client apps (internet-exposed)** — isolate by risk class, not by data sensitivity; the neighbours are what's being protected.
 - **Cost levers** — scale-to-zero compute, smallest single-zone DB, Direct VPC egress; keep backups/PITR and the eval/review quality scaffolding.
+
+---
+### 14. Evolutions since v4 (recorded during the build — `RESUME.md` is the live source of truth)
+The v4 design above is the baseline; a few things evolved as the build progressed (owner-driven, from the real challan template). Authoritative current state lives in `RESUME.md` / `RESUME-PROMPT.md`.
+- **Projects module (NEW, inc 13):** a top-level module — an admin registers a **Client** (unique 3-letter code) and users create **Projects** with a system-assigned `<CLIENT_CODE>-<per-client running no.>` id (e.g. `BRI-001`), reusing the numbering engine's discipline (not the statutory challan counter). Challans (inc 15) quote an existing, Active Project ID and print it; the future Expense module can share it for per-project rollups.
+- **Consignee model change (inc 14–15):** the **Brand→State registry** (§5) is superseded by a **GSTIN-keyed golden-record master** (`ConsigneeParty`). Consignee details are typed inline in the upload; a new GSTIN **auto-creates** the record (no admin verify), and a known GSTIN with different details is **flagged as a deviation** (never silently overwritten). GSTIN↔state consistency enforced on create.
+- **Upload template (inc 15):** a wider, **structured** template — split ship-to address (line1/line2/city/pincode, stored split & printed joined), inline consignee columns, and the Project ID. The self-documenting `.xlsx` template + downloadable English validation error report already ship.
