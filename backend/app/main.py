@@ -17,6 +17,7 @@ from app.modules.health.routes import SPEC as HEALTH
 from app.modules.jobs.routes import router as jobs_router
 from app.modules.masterdata.routes import router as masterdata_router
 from app.modules.numbering.routes import router as numbering_router
+from app.modules.projects.routes import router as projects_router
 from app.modules.settings.routes import router as settings_router
 from app.platform.module_registry import REGISTRY, ModuleSpec, register_module
 
@@ -28,6 +29,15 @@ register_module(HEALTH)
 register_module(ModuleSpec(
     key="document_automation",
     title="Delivery Challan",
+    router=APIRouter(),
+    nav_group="Operations",
+))
+# Projects — nav entry only; its API routes are mounted separately below
+# (projects_router at /api/v1). The empty router keeps the registry's mount step
+# a no-op for this module (same pattern as Delivery Challan above).
+register_module(ModuleSpec(
+    key="projects",
+    title="Projects",
     router=APIRouter(),
     nav_group="Operations",
 ))
@@ -47,6 +57,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
     app.include_router(masterdata_router, prefix="/api/v1", tags=["masterdata"])
     app.include_router(numbering_router, prefix="/api/v1", tags=["numbering"])
+    app.include_router(projects_router, prefix="/api/v1", tags=["projects"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
     _mount_spa(app, settings.static_dir)
     return app

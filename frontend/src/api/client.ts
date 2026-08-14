@@ -171,6 +171,10 @@ export function useApi() {
       <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body }),
       [request],
     ),
+    patch: useCallback(
+      <T>(path: string, body: unknown) => request<T>(path, { method: 'PATCH', body }),
+      [request],
+    ),
     del: useCallback(<T>(path: string) => request<T>(path, { method: 'DELETE' }), [request]),
     /** Fetch an authed file (by id) and trigger a browser download. */
     download,

@@ -23,6 +23,7 @@ ADMIN_ONLY: frozenset[str] = frozenset(
         "masterdata.edit",
         "settings.edit",
         "series.seed",
+        "project.manage",       # register clients + change project status
     }
 )
 

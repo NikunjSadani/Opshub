@@ -14,6 +14,7 @@ import { Login } from './pages/Login';
 import { ModulePlaceholder } from './pages/ModulePlaceholder';
 import { NotFound } from './pages/NotFound';
 import { ChallanModule } from './pages/challan/ChallanModule';
+import { ProjectsModule } from './pages/projects/ProjectsModule';
 import { ToastProvider } from './ui';
 
 export function createQueryClient(): QueryClient {
@@ -59,6 +60,7 @@ export function AppRoutes() {
           genuinely role-scoped surfaces; the dev role switcher exercises it.
         */}
         <Route path="/m/document_automation/*" element={<ChallanModule />} />
+        <Route path="/m/projects/*" element={<ProjectsModule />} />
         <Route path="/m/:key" element={<ModulePlaceholder />} />
       </Route>
       <Route path="*" element={<NotFound />} />
