@@ -8,7 +8,7 @@ Continue building **Gifsy OpsHub** (internal ops platform). Repo: `C:\Users\niku
 
 **First, read (in order):** `docs/RESUME.md` (live build state — authoritative) → `docs/DESIGN.md` (v4 architecture) → `docs/BUILD-PLAN.md` (governance + phases). Also load the `opshub-platform` memory and the WAYS-OF-WORKING standing agreements.
 
-**State — `develop` @ `291855e`, UNPUSHED, gate-green** (BE: ruff 0 · mypy --strict 39 files · pytest 172 · `alembic check` no drift · FE: `tsc --noEmit` · `vite build` · vitest 24 · `terraform validate` clean). Stack: Python/FastAPI + React SPA (same-origin) · Firebase Auth (email/pw, not yet wired) · Postgres (sqlite local) · separate GCP project · DB Option-B · Cloud Run scale-to-zero · ~₹2k/mo.
+**State — `develop` @ `deb9c4f`, UNPUSHED, gate-green** (BE: ruff 0 · mypy --strict 39 files · pytest 172 · `alembic check` no drift · FE: `tsc --noEmit` · `vite build` · vitest 28 · `terraform validate` clean). Stack: Python/FastAPI + React SPA (same-origin) · Firebase Auth (email/pw, not yet wired) · Postgres (sqlite local) · separate GCP project · DB Option-B · Cloud Run scale-to-zero · ~₹2k/mo.
 
 **Phase 1 (Delivery Challan) is essentially CODE-COMPLETE end-to-end** (inc 5–8, each dual/UI-UX-audited + runtime-verified):
 - **Numbering engine** (`app/modules/numbering`): reserve→issue→void, FY in Asia/Kolkata, `GIF/DC/26-27/L/000189`, unique partial index on non-void `(series,fy,number)` + status CHECK, idempotency-resume scoped to series/fy, configured-series guard, in-txn audit, reconcile sweeper + secret-gated `POST /numbering/sweep`.
