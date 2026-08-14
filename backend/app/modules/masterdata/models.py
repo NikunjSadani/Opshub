@@ -90,6 +90,36 @@ class Consignee(Base):
     )
 
 
+class ConsigneeParty(Base):
+    """A consignee party golden record, keyed on GSTIN (the golden key).
+
+    Distinct from `Consignee` (the brand->state challan-lookup registry): this is
+    a party repository resolved by GSTIN. Uploads auto-create a new GSTIN and, for
+    an existing GSTIN with differing details, return the STORED record plus a
+    deviation report — never a silent overwrite. Admins may also create/edit rows.
+    """
+
+    __tablename__ = "md_consignee_party"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gstin: Mapped[str] = mapped_column(String(15), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    address_line1: Mapped[str] = mapped_column(String(300), default="")
+    address_line2: Mapped[str] = mapped_column(String(300), default="")
+    pincode: Mapped[str] = mapped_column(String(10), default="")
+    state: Mapped[str] = mapped_column(String(60), default="")
+    phone: Mapped[str] = mapped_column(String(40), default="")
+    source: Mapped[str] = mapped_column(String(16), default="MANUAL")  # MANUAL | UPLOAD
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(128))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
 class HsnCode(Base):
     """HSN/SAC code + GST rate (percent) used to validate uploaded line items."""
 

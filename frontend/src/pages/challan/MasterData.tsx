@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { Tabs, type TabDef } from '../../ui';
 import { ConsignorScreen } from './masterdata/ConsignorScreen';
 import { ConsigneeScreen } from './masterdata/ConsigneeScreen';
+import { ConsigneePartiesScreen } from './masterdata/ConsigneePartiesScreen';
 import { HsnScreen } from './masterdata/HsnScreen';
 import { SeriesScreen } from './masterdata/SeriesScreen';
 
@@ -17,6 +18,7 @@ export function MasterData() {
   const tabs: TabDef[] = [
     { to: BASE, label: 'Consignor', end: true },
     { to: `${BASE}/consignee`, label: 'Consignee' },
+    { to: `${BASE}/consignee-parties`, label: 'Consignees (GSTIN)' },
     { to: `${BASE}/hsn`, label: 'HSN Codes' },
     { to: `${BASE}/series`, label: 'Series' },
   ];
@@ -27,6 +29,7 @@ export function MasterData() {
       <Routes>
         <Route index element={<ConsignorScreen />} />
         <Route path="consignee" element={<ConsigneeScreen />} />
+        <Route path="consignee-parties" element={<ConsigneePartiesScreen />} />
         <Route path="hsn" element={<HsnScreen />} />
         <Route path="series" element={<SeriesScreen />} />
         <Route path="*" element={<Navigate to={BASE} replace />} />
