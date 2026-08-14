@@ -25,6 +25,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -38,10 +39,20 @@ def _utcnow() -> datetime:
 class BatchStatus(str, enum.Enum):
     PENDING = "PENDING"
     FAILED_VALIDATION = "FAILED_VALIDATION"
+    NEEDS_REVIEW = "NEEDS_REVIEW"  # valid, but has consignee contradictions to decide
     VALIDATED = "VALIDATED"      # parsed + validated OK; ready to generate
     GENERATING = "GENERATING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+
+class DecisionChoice(str, enum.Enum):
+    """How the operator resolves one consignee-field contradiction vs the golden record."""
+
+    PENDING = "PENDING"              # not yet decided (blocks generation)
+    UPDATE_MASTER = "UPDATE_MASTER"  # golden record takes the uploaded value + prints it
+    THIS_UPLOAD = "THIS_UPLOAD"      # print the uploaded value on this batch; master unchanged
+    REJECT = "REJECT"               # keep + print the stored golden-record value
 
 
 class ChallanStatus(str, enum.Enum):
@@ -68,6 +79,42 @@ class ChallanBatch(Base):
     )
 
     challans: Mapped[list["Challan"]] = relationship(back_populates="batch")
+    decisions: Mapped[list["ChallanBatchDecision"]] = relationship(
+        back_populates="batch", cascade="all, delete-orphan"
+    )
+
+
+class ChallanBatchDecision(Base):
+    """One consignee-field contradiction (uploaded value vs the stored golden
+    record) that the operator must resolve before a NEEDS_REVIEW batch can
+    generate. One row per (batch, gstin, field); `choice` starts PENDING.
+
+    `stored_value`/`uploaded_value` are snapshotted at detection so the review UI +
+    the downloadable Excel report show exactly what was compared, and generation
+    applies the recorded choice without re-deriving it."""
+
+    __tablename__ = "challan_batch_decision"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "gstin", "field", name="uq_challan_decision"),
+        CheckConstraint(
+            "choice in ('PENDING', 'UPDATE_MASTER', 'THIS_UPLOAD', 'REJECT')",
+            name="ck_challan_decision_choice",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("challan_batch.id", ondelete="CASCADE"), index=True
+    )
+    gstin: Mapped[str] = mapped_column(String(15), index=True)
+    consignee_name: Mapped[str] = mapped_column(String(200), default="")  # uploaded, for display
+    field: Mapped[str] = mapped_column(String(40))       # name/address_line1/.../phone
+    stored_value: Mapped[str] = mapped_column(String(600), default="")
+    uploaded_value: Mapped[str] = mapped_column(String(600), default="")
+    choice: Mapped[str] = mapped_column(String(16), default=DecisionChoice.PENDING.value)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    batch: Mapped[ChallanBatch] = relationship(back_populates="decisions")
 
 
 class Challan(Base):

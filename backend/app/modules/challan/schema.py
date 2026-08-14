@@ -236,15 +236,32 @@ class ParsedChallan:
 
 
 @dataclass
-class ValidationResult:
-    """Errors (block generation) + non-blocking warnings + the parsed challans.
+class Contradiction:
+    """One consignee field whose uploaded value differs from the stored golden
+    record (a KNOWN GSTIN). The operator must resolve each of these before a batch
+    can generate — see `models.ChallanBatchDecision` / `DecisionChoice`."""
 
-    `ok` is driven by ERRORS only — a batch validates (and can generate) with
-    warnings present. `challans` is populated only when there are no errors.
+    gstin: str
+    consignee_name: str  # the uploaded consignee name, for a human-readable report
+    field: str           # name / address_line1 / address_line2 / pincode / state / phone
+    stored: str
+    uploaded: str
+
+
+@dataclass
+class ValidationResult:
+    """Errors (block generation) + non-blocking warnings + consignee contradictions
+    + the parsed challans.
+
+    `ok` is driven by ERRORS only. A batch with no errors but with `contradictions`
+    is valid-but-needs-review (blocked from generation until each is decided); a
+    batch with neither is ready to generate. `challans` is populated only when there
+    are no errors.
     """
 
     errors: list[RowError] = field(default_factory=list)
     warnings: list[RowError] = field(default_factory=list)
+    contradictions: list[Contradiction] = field(default_factory=list)
     challans: list[ParsedChallan] = field(default_factory=list)
 
     @property

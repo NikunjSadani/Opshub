@@ -198,3 +198,77 @@ def test_register_requires_module(client: TestClient) -> None:
     assert client.get("/api/v1/challan/challans").status_code == 403
     _as(client, MIS)
     assert client.get("/api/v1/challan/challans").status_code == 200
+
+
+def test_needs_review_decisions_flow(client: TestClient) -> None:
+    # Pre-seed a golden record so an upload with different details contradicts it.
+    from app.modules.masterdata.models import ConsigneeParty
+    db = client.app.state.TestSession()
+    db.add(ConsigneeParty(gstin=CONSIGNEE_GSTIN, name="Stored Name Ltd",
+                          state="Maharashtra", source="MANUAL"))
+    db.commit()
+    db.close()
+
+    body = _upload(client, _xlsx([_row("G1")]))  # consignee name "Deoleo MH" -> contradicts
+    assert body["status"] == "NEEDS_REVIEW", body
+    bid = body["id"]
+
+    decisions = client.get(f"/api/v1/challan/batches/{bid}/decisions").json()
+    assert decisions and any(d["field"] == "name" for d in decisions)
+
+    # Generation is blocked while NEEDS_REVIEW.
+    blocked = client.post(f"/api/v1/challan/batches/{bid}/generate", json={"series": "L"})
+    assert blocked.status_code == 409
+
+    # Resolve every contradiction -> VALIDATED.
+    r = client.patch(
+        f"/api/v1/challan/batches/{bid}/decisions",
+        json={"decisions": [{"id": d["id"], "choice": "REJECT"} for d in decisions]},
+    )
+    assert r.status_code == 200 and r.json()["status"] == "VALIDATED"
+
+
+def test_decisions_require_module(client: TestClient) -> None:
+    _as(client, OUTSIDER)
+    assert client.get("/api/v1/challan/batches/1/decisions").status_code == 403
+
+
+def _needs_review_batch(client: TestClient) -> tuple[int, list[dict[str, object]]]:
+    from app.modules.masterdata.models import ConsigneeParty
+    db = client.app.state.TestSession()
+    db.add(ConsigneeParty(gstin=CONSIGNEE_GSTIN, name="Stored Name Ltd",
+                          state="Maharashtra", source="MANUAL"))
+    db.commit()
+    db.close()
+    body = _upload(client, _xlsx([_row("G1")]))
+    assert body["status"] == "NEEDS_REVIEW"
+    decisions = client.get(f"/api/v1/challan/batches/{body['id']}/decisions").json()
+    return body["id"], decisions
+
+
+def test_update_master_requires_admin(client: TestClient) -> None:
+    _as(client, MIS)  # module grant, but NOT admin
+    bid, decisions = _needs_review_batch(client)
+    # A non-admin module user cannot rewrite the shared golden record.
+    r = client.patch(
+        f"/api/v1/challan/batches/{bid}/decisions",
+        json={"decisions": [{"id": decisions[0]["id"], "choice": "UPDATE_MASTER"}]},
+    )
+    assert r.status_code == 403
+    # But THIS_UPLOAD / REJECT (which never mutate the master) are allowed.
+    r2 = client.patch(
+        f"/api/v1/challan/batches/{bid}/decisions",
+        json={"decisions": [{"id": d["id"], "choice": "REJECT"} for d in decisions]},
+    )
+    assert r2.status_code == 200 and r2.json()["status"] == "VALIDATED"
+
+
+def test_duplicate_decision_ids_422(client: TestClient) -> None:
+    bid, decisions = _needs_review_batch(client)
+    did = decisions[0]["id"]
+    r = client.patch(
+        f"/api/v1/challan/batches/{bid}/decisions",
+        json={"decisions": [{"id": did, "choice": "REJECT"},
+                            {"id": did, "choice": "THIS_UPLOAD"}]},
+    )
+    assert r.status_code == 422

@@ -293,3 +293,10 @@ def test_structural_amount_too_large_is_row_error() -> None:
     row = parsing.RawRow(row_number=2, cells=_min_cells(amount="20000000000000"))
     errors = parsing.structural_row_errors([row])
     assert any(e.column == "amount" and "too large" in e.message for e in errors)
+
+
+def test_to_str_strips_illegal_control_chars() -> None:
+    # XML-illegal control chars in a cell must be stripped at coercion, so the
+    # downstream Excel review report can't raise IllegalCharacterError (a 500).
+    assert parsing._to_str("Deoleo\x01\x1fLtd") == "DeoleoLtd"
+    assert parsing._to_str("keep\ttab\nnl") == "keep\ttab\nnl"  # tab/newline are legal

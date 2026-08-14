@@ -26,6 +26,7 @@ optional parsed paise value.
 from __future__ import annotations
 
 import io
+import re
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
@@ -124,8 +125,15 @@ def parse_date(text: str) -> date | None:
         return None
 
 
+# XML-illegal control characters (all C0 except tab/newline/carriage-return). openpyxl
+# raises IllegalCharacterError writing these, so a cell carrying one would 500 the
+# downstream Excel review report — strip them at coercion so every path stays clean.
+_ILLEGAL_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 def _to_str(value: object) -> str:
-    """Coerce a raw cell value to a trimmed string ("" for blank)."""
+    """Coerce a raw cell value to a trimmed string ("" for blank), stripping
+    XML-illegal control characters from free text."""
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -141,7 +149,7 @@ def _to_str(value: object) -> str:
         return str(int(value)) if value.is_integer() else str(value)
     if isinstance(value, int):
         return str(value)
-    return str(value).strip()
+    return _ILLEGAL_CTRL.sub("", str(value)).strip()
 
 
 # ------------------------------------------------------------------- parse

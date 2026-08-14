@@ -15,13 +15,15 @@ import {
 } from '../../ui';
 import { useApi } from '../../api/client';
 import {
+  useBatchDecisions,
   useBatchesQuery,
   useBatchQuery,
   useGenerateBatch,
   useUploadBatch,
   type BatchOut,
 } from '../../api/challan';
-import { BATCH_STATUS_TONE, batchArtifacts, errorMessage } from './challanFormat';
+import { BATCH_STATUS_LABEL, BATCH_STATUS_TONE, batchArtifacts, errorMessage } from './challanFormat';
+import { ReviewPanel } from './ReviewPanel';
 
 const SERIES_RE = /^[A-Za-z0-9]{1,8}$/;
 const BATCHES_TAB = '/m/document_automation/batches';
@@ -87,6 +89,11 @@ export function NewChallan() {
 
   const seriesValid = SERIES_RE.test(series);
   const validated = uploaded?.status === 'VALIDATED';
+  const needsReview = uploaded?.status === 'NEEDS_REVIEW';
+  // Contradictions for the review panel — owned here so the live region can
+  // announce the count. Enabled only while a batch is actually in review.
+  const reviewDecisions = useBatchDecisions(needsReview ? uploaded!.id : null);
+  const reviewCount = reviewDecisions.data?.length;
 
   // Surface a "taking longer than expected" hint if generation stays in flight,
   // so a wedged/slow batch never traps the user on a bare spinner.
@@ -166,7 +173,9 @@ export function NewChallan() {
   const step3Reason =
     uploaded?.status === 'FAILED_VALIDATION'
       ? 'Fix the errors and upload a valid file first.'
-      : 'Upload and validate a file first.';
+      : needsReview
+        ? 'Resolve the review items above first.'
+        : 'Upload and validate a file first.';
 
   // A single stable polite live region announces each phase to screen readers
   // (the element the user acted on unmounts on transition, so focus alone won't).
@@ -177,13 +186,17 @@ export function NewChallan() {
         ? 'Generation failed.'
         : generating
           ? 'Generating challans…'
-          : uploaded?.status === 'VALIDATED'
-            ? uploaded.error_report_file_id != null
-              ? `Validated with warnings: ${uploaded.message ?? 'review the warnings report'}. These are non-blocking — you can still generate.`
-              : `Validated: ${uploaded.challan_count} challans, ${uploaded.line_count} lines.`
-            : uploaded?.status === 'FAILED_VALIDATION'
-              ? 'Validation failed. Download the error report for details.'
-              : '';
+          : needsReview
+            ? reviewCount != null
+              ? `Needs review: ${reviewCount} item${reviewCount === 1 ? '' : 's'}. Resolve them before generating.`
+              : 'Needs review before generating.'
+            : uploaded?.status === 'VALIDATED'
+              ? uploaded.error_report_file_id != null
+                ? `Validated with warnings: ${uploaded.message ?? 'review the warnings report'}. These are non-blocking — you can still generate.`
+                : `Validated: ${uploaded.challan_count} challans, ${uploaded.line_count} lines.`
+              : uploaded?.status === 'FAILED_VALIDATION'
+                ? 'Validation failed. Download the error report for details.'
+                : '';
 
   return (
     <div>
@@ -316,10 +329,15 @@ export function NewChallan() {
             </>
           )}
 
+          {needsReview && uploaded != null && (
+            <ReviewPanel batch={uploaded} onDownload={onDownload} onResolved={setUploaded} />
+          )}
+
           {/* Safety net: never leave an unexpected status as a blank dead-end. */}
           {uploaded != null &&
             uploaded.status !== 'VALIDATED' &&
-            uploaded.status !== 'FAILED_VALIDATION' && (
+            uploaded.status !== 'FAILED_VALIDATION' &&
+            uploaded.status !== 'NEEDS_REVIEW' && (
               <div>
                 <p className="text-sm text-slate-600">
                   Unexpected batch status ({uploaded.status}).
@@ -367,7 +385,7 @@ export function NewChallan() {
             <>
               <div className="mb-3 flex items-center gap-2">
                 <Badge tone={batch ? BATCH_STATUS_TONE[batch.status] : 'amber'}>
-                  {batch?.status ?? 'GENERATING'}
+                  {batch ? BATCH_STATUS_LABEL[batch.status] : BATCH_STATUS_LABEL.GENERATING}
                 </Badge>
                 <span className="text-sm text-slate-500">Batch #{activeBatchId}</span>
               </div>
@@ -490,7 +508,7 @@ export function NewChallan() {
                   className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5"
                 >
                   <span className="font-medium text-slate-900">#{b.id}</span>
-                  <Badge tone={BATCH_STATUS_TONE[b.status]}>{b.status}</Badge>
+                  <Badge tone={BATCH_STATUS_TONE[b.status]}>{BATCH_STATUS_LABEL[b.status]}</Badge>
                   <span className="text-xs tabular-nums text-slate-500">
                     {b.challan_count} challan{b.challan_count === 1 ? '' : 's'} / {b.line_count} line
                     {b.line_count === 1 ? '' : 's'}

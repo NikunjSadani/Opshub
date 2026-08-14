@@ -287,35 +287,106 @@ def test_inactive_project_is_blocking_error(env: tuple[Session, str]) -> None:
     assert not result.ok and any(e.column == "project_id" for e in result.errors)
 
 
-def test_unknown_gstin_autocreated_and_deviation_is_warning(env: tuple[Session, str]) -> None:
+def _seed_party(db: Session, db_url: str, gstin: str, state: str = "Gujarat") -> None:
+    """Create the golden record for `gstin` (name "Deoleo MH") via a clean generate."""
+    data = _workbook([_row("S1", "Seed Store", "Item", "1", "100.00", "105.00",
+                           gstin=gstin, state=state)])
+    batch = _upload(db, data)
+    assert service.validate_batch(db, batch, actor_uid="tester").ok
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+
+
+def test_unknown_gstin_autocreated_no_contradiction(env: tuple[Session, str]) -> None:
     db, db_url = env
-    fresh = "24AAACB2894G1ZT"  # Gujarat (24), valid
+    fresh = "24AAACB2894G1ZT"  # Gujarat (24), valid — new to the master
     data = _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00",
                            gstin=fresh, state="Gujarat")])
     batch = _upload(db, data)
-    # No golden record is written during validation of a batch (dry-run resolve).
-    assert service.validate_batch(db, batch, actor_uid="tester").ok
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    # A brand-new GSTIN has nothing to contradict -> straight to VALIDATED, no review.
+    assert result.ok and not result.contradictions
+    assert batch.status == BatchStatus.VALIDATED.value
+    # No golden record is written during validation; generation auto-creates it.
     assert db.execute(
         select(func.count()).select_from(ConsigneeParty).where(ConsigneeParty.gstin == fresh)
     ).scalar() == 0
-    # Generation auto-creates the golden record from the typed values.
     service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
     party = db.execute(select(ConsigneeParty).where(ConsigneeParty.gstin == fresh)).scalar_one()
     assert party.name == "Deoleo MH" and party.source == "UPLOAD"
 
-    # Same GSTIN, DIFFERENT typed name -> non-blocking WARNING; the STORED name is
-    # snapshotted onto the challan, never the typed one.
-    data2 = _workbook([_row("G9", "Store B", "Item", "1", "100.00", "105.00",
-                            gstin=fresh, state="Gujarat", consignee_name="Different Name Ltd")])
-    batch2 = _upload(db, data2)
-    result2 = service.validate_batch(db, batch2, actor_uid="tester")
-    assert result2.ok  # warnings do not block
-    assert any(w.severity == "WARNING" and w.column == "consignee_name"
-               for w in result2.warnings)
-    assert batch2.error_report_file_id is not None  # warnings report attached on VALIDATED
-    service.generate(db, batch2, FakeRenderer(db_url), series="L", actor_uid="tester")
-    ch2 = db.execute(select(Challan).where(Challan.batch_id == batch2.id)).scalar_one()
-    assert ch2.consignee_name == "Deoleo MH"  # stored golden record wins
+
+def test_known_gstin_difference_needs_review_this_upload(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    fresh = "24AAACB2894G1ZT"
+    _seed_party(db, db_url, fresh)
+
+    # Same GSTIN, different name -> NEEDS_REVIEW (blocked), one PENDING decision.
+    data = _workbook([_row("G2", "Store B", "Item", "1", "100.00", "105.00",
+                           gstin=fresh, state="Gujarat", consignee_name="Deoleo India Ltd")])
+    batch = _upload(db, data)
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert result.ok and len(result.contradictions) == 1
+    assert batch.status == BatchStatus.NEEDS_REVIEW.value
+    assert batch.error_report_file_id is not None  # Excel review report attached
+    decisions = service.list_decisions(db, batch)
+    assert len(decisions) == 1 and decisions[0].field == "name"
+
+    # Decide THIS_UPLOAD -> VALIDATED; the uploaded name prints, the master is untouched.
+    service.submit_decisions(db, batch, {decisions[0].id: "THIS_UPLOAD"}, actor_uid="tester")
+    assert batch.status == BatchStatus.VALIDATED.value
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    ch = db.execute(select(Challan).where(Challan.batch_id == batch.id)).scalar_one()
+    assert ch.consignee_name == "Deoleo India Ltd"          # this-upload value printed
+    party = db.execute(select(ConsigneeParty).where(ConsigneeParty.gstin == fresh)).scalar_one()
+    assert party.name == "Deoleo MH"                        # master UNCHANGED
+
+
+def test_decision_update_master_writes_record(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    fresh = "24AAACB2894G1ZT"
+    _seed_party(db, db_url, fresh)
+    data = _workbook([_row("G2", "Store B", "Item", "1", "100.00", "105.00",
+                           gstin=fresh, state="Gujarat", consignee_name="Deoleo India Ltd")])
+    batch = _upload(db, data)
+    service.validate_batch(db, batch, actor_uid="tester")
+    decision = service.list_decisions(db, batch)[0]
+    service.submit_decisions(db, batch, {decision.id: "UPDATE_MASTER"}, actor_uid="tester")
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    party = db.execute(select(ConsigneeParty).where(ConsigneeParty.gstin == fresh)).scalar_one()
+    ch = db.execute(select(Challan).where(Challan.batch_id == batch.id)).scalar_one()
+    assert party.name == "Deoleo India Ltd" and ch.consignee_name == "Deoleo India Ltd"
+
+
+def test_decision_reject_keeps_stored(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    fresh = "24AAACB2894G1ZT"
+    _seed_party(db, db_url, fresh)
+    data = _workbook([_row("G2", "Store B", "Item", "1", "100.00", "105.00",
+                           gstin=fresh, state="Gujarat", consignee_name="Deoleo India Ltd")])
+    batch = _upload(db, data)
+    service.validate_batch(db, batch, actor_uid="tester")
+    decision = service.list_decisions(db, batch)[0]
+    service.submit_decisions(db, batch, {decision.id: "REJECT"}, actor_uid="tester")
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    party = db.execute(select(ConsigneeParty).where(ConsigneeParty.gstin == fresh)).scalar_one()
+    ch = db.execute(select(Challan).where(Challan.batch_id == batch.id)).scalar_one()
+    assert party.name == "Deoleo MH" and ch.consignee_name == "Deoleo MH"
+
+
+def test_partial_review_stays_needs_review(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    fresh = "24AAACB2894G1ZT"
+    _seed_party(db, db_url, fresh)
+    # Two differing fields -> two contradictions; deciding one leaves the batch blocked.
+    data = _workbook([_row("G2", "Store B", "Item", "1", "100.00", "105.00",
+                           gstin=fresh, state="Gujarat", consignee_name="Deoleo India Ltd",
+                           consignee_phone="9820000000")])
+    batch = _upload(db, data)
+    service.validate_batch(db, batch, actor_uid="tester")
+    decisions = service.list_decisions(db, batch)
+    assert len(decisions) == 2
+    service.submit_decisions(db, batch, {decisions[0].id: "REJECT"}, actor_uid="tester")
+    assert batch.status == BatchStatus.NEEDS_REVIEW.value  # still one PENDING
 
 
 def test_invalid_gstin_is_blocking_error(env: tuple[Session, str]) -> None:
@@ -406,11 +477,12 @@ def test_challan_date_drives_fy(env: tuple[Session, str]) -> None:
     assert challan.fy == "25-26" and challan.number == "GIF/DC/25-26/L/000001"
 
 
-def test_intrabatch_new_gstin_conflict_warns(env: tuple[Session, str]) -> None:
+def test_same_gstin_inconsistent_details_is_error(env: tuple[Session, str]) -> None:
     db = env[0]
-    fresh = "24AAACB2894G1ZT"  # Gujarat, new to the master
-    # Two groups, same NEW GSTIN, different typed consignee name. The golden record
-    # is created from G1's values; G2 would be snapshotted with G1's name -> WARN.
+    fresh = "24AAACB2894G1ZT"  # Gujarat
+    # The SAME GSTIN with two different consignee names in one upload is a blocking
+    # error (it is one legal party) — this is what guarantees each contradiction has a
+    # single 'your value' to decide on.
     data = _workbook([
         _row("G1", "Store A", "Item", "1", "100.00", "105.00", gstin=fresh, state="Gujarat"),
         _row("G2", "Store B", "Item", "1", "100.00", "105.00", gstin=fresh, state="Gujarat",
@@ -418,9 +490,8 @@ def test_intrabatch_new_gstin_conflict_warns(env: tuple[Session, str]) -> None:
     ])
     batch = _upload(db, data)
     result = service.validate_batch(db, batch, actor_uid="tester")
-    assert result.ok  # non-blocking
-    assert any(w.severity == "WARNING" and w.column == "consignee_name"
-               for w in result.warnings)
+    assert not result.ok and any(e.column == "consignee_name" for e in result.errors)
+    assert batch.status == BatchStatus.FAILED_VALIDATION.value
 
 
 def test_collision_warns_across_mixed_date_formats(env: tuple[Session, str]) -> None:
@@ -464,3 +535,43 @@ def test_retry_after_partial_generation_and_project_hold_preserves_issued(
     assert batch.status == BatchStatus.FAILED.value
     assert "already" in (batch.message or "")
     assert len(list(db.execute(select(Challan)).scalars())) == 1
+
+
+def test_update_master_not_applied_on_generation_failure(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    fresh = "24AAACB2894G1ZT"
+    _seed_party(db, db_url, fresh)  # golden record name "Deoleo MH"
+    data = _workbook([_row("G2", "Store B", "Item", "1", "100.00", "105.00",
+                           gstin=fresh, state="Gujarat", consignee_name="Deoleo India Ltd")])
+    batch = _upload(db, data)
+    service.validate_batch(db, batch, actor_uid="tester")
+    decision = service.list_decisions(db, batch)[0]
+    service.submit_decisions(db, batch, {decision.id: "UPDATE_MASTER"}, actor_uid="tester")
+    # Generation fails on the first render -> the master must NOT be mutated (the write
+    # is deferred to batch success), so a failed batch never rewrites the shared record.
+    service.generate(db, batch, RaisingRenderer(fail_on=1), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.FAILED.value
+    party = db.execute(select(ConsigneeParty).where(ConsigneeParty.gstin == fresh)).scalar_one()
+    assert party.name == "Deoleo MH"  # unchanged despite UPDATE_MASTER
+
+
+def test_new_gstin_merged_superset_across_groups(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    fresh = "24AAACB2894G1ZT"  # new to the master
+    # Complementary blanks for one NEW GSTIN across two groups (NOT a conflict): the
+    # party must be created from the MERGED superset, so no filled value is lost.
+    data = _workbook([
+        _row("G1", "Store A", "Item", "1", "100.00", "105.00", gstin=fresh, state="Gujarat",
+             consignee_phone="", consignee_address_line1="A Street"),
+        _row("G2", "Store B", "Item", "1", "100.00", "105.00", gstin=fresh, state="Gujarat",
+             consignee_phone="9820000000", consignee_address_line1=""),
+    ])
+    batch = _upload(db, data)
+    assert service.validate_batch(db, batch, actor_uid="tester").ok
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    party = db.execute(select(ConsigneeParty).where(ConsigneeParty.gstin == fresh)).scalar_one()
+    assert party.phone == "9820000000"        # from G2 (G1 left it blank)
+    assert "A Street" in party.address_line1   # from G1 (G2 left it blank)
+    # Both challans print the merged phone, not one group's blank.
+    for ch in db.execute(select(Challan).where(Challan.batch_id == batch.id)).scalars():
+        assert "9820000000" in (ch.consignee_phone or "")

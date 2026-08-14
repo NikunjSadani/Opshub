@@ -37,17 +37,27 @@ export function batchArtifacts(
 ): Array<{ label: string; fileId: number; name: string }> {
   const links: Array<{ label: string; fileId: number; name: string }> = [];
   if (b.error_report_file_id != null) {
-    // The same file id holds ERRORS on a failed-validation batch but non-blocking
-    // WARNINGS on any batch that validated (VALIDATED/GENERATING/COMPLETED). Label
-    // it by status so a succeeded batch never shows a misleading "Error report"
-    // that an operator would skip — the deviations/possible-splits matter on a
-    // statutory document. Terminology matches the report's own Severity column.
-    const isErrors = b.status === 'FAILED_VALIDATION';
-    links.push({
-      label: isErrors ? 'Error report' : 'Warnings',
-      fileId: b.error_report_file_id,
-      name: `batch-${b.id}-${isErrors ? 'errors' : 'warnings'}.csv`,
-    });
+    // The same file id holds different reports by status: ERRORS (CSV) on a
+    // failed-validation batch, the blocking consignee-contradiction REVIEW report
+    // (Excel) on a needs-review batch, and non-blocking WARNINGS (CSV) on any
+    // batch that validated (VALIDATED/GENERATING/COMPLETED). Label it by status
+    // so a succeeded batch never shows a misleading "Error report" an operator
+    // would skip — the deviations/possible-splits matter on a statutory document.
+    // Terminology matches the report's own Severity column.
+    if (b.status === 'NEEDS_REVIEW') {
+      links.push({
+        label: 'Review (Excel)',
+        fileId: b.error_report_file_id,
+        name: `batch-${b.id}-review.xlsx`,
+      });
+    } else {
+      const isErrors = b.status === 'FAILED_VALIDATION';
+      links.push({
+        label: isErrors ? 'Error report' : 'Warnings',
+        fileId: b.error_report_file_id,
+        name: `batch-${b.id}-${isErrors ? 'errors' : 'warnings'}.csv`,
+      });
+    }
   }
   if (b.zip_file_id != null)
     links.push({ label: 'ZIP', fileId: b.zip_file_id, name: `batch-${b.id}.zip` });
@@ -56,10 +66,26 @@ export function batchArtifacts(
   return links;
 }
 
+/**
+ * Friendly, sentence-case labels for each batch status, so the same state always
+ * reads the same way wherever it is rendered as a Badge (Batches tab, the New
+ * Challan recent-batches list, the review panel).
+ */
+export const BATCH_STATUS_LABEL: Record<BatchStatus, string> = {
+  PENDING: 'Pending',
+  FAILED_VALIDATION: 'Validation failed',
+  VALIDATED: 'Validated',
+  NEEDS_REVIEW: 'Needs review',
+  GENERATING: 'Generating',
+  COMPLETED: 'Completed',
+  FAILED: 'Failed',
+};
+
 export const BATCH_STATUS_TONE: Record<BatchStatus, Tone> = {
   PENDING: 'slate',
   FAILED_VALIDATION: 'red',
   VALIDATED: 'blue',
+  NEEDS_REVIEW: 'amber',
   GENERATING: 'amber',
   COMPLETED: 'green',
   FAILED: 'red',

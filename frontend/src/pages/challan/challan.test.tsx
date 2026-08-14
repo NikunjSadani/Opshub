@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { AuthProvider } from '../../auth/AuthProvider';
 import { ToastProvider } from '../../ui';
 import { NewChallan } from './NewChallan';
+import { Batches } from './Batches';
 
 function renderNewChallan() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -14,6 +15,21 @@ function renderNewChallan() {
         <AuthProvider>
           <ToastProvider>
             <NewChallan />
+          </ToastProvider>
+        </AuthProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+function renderBatches() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={qc}>
+      <MemoryRouter>
+        <AuthProvider>
+          <ToastProvider>
+            <Batches />
           </ToastProvider>
         </AuthProvider>
       </MemoryRouter>
@@ -114,5 +130,252 @@ describe('NewChallan upload flow', () => {
     // Warnings do NOT block: Step 3's Generate button is enabled.
     const generate = screen.getByRole('button', { name: /generate 3 challans/i });
     expect(generate).toBeEnabled();
+  });
+
+  it('renders the review panel for a NEEDS_REVIEW batch and blocks generation until every field is decided', async () => {
+    const NEEDS_REVIEW_BATCH = {
+      id: 55,
+      status: 'NEEDS_REVIEW',
+      challan_count: 2,
+      line_count: 4,
+      message: '2 consignee contradiction(s) to review before generating',
+      error_report_file_id: 77,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+    const DECISIONS = [
+      {
+        id: 1,
+        gstin: '27ABCDE1234F1Z5',
+        consignee_name: 'Acme Foods',
+        field: 'name',
+        stored_value: 'Acme Foods Pvt Ltd',
+        uploaded_value: 'Acme Foods',
+        choice: 'PENDING',
+      },
+      {
+        id: 2,
+        gstin: '27ABCDE1234F1Z5',
+        consignee_name: 'Acme Foods',
+        field: 'pincode',
+        stored_value: '400001',
+        uploaded_value: '400002',
+        choice: 'PENDING',
+      },
+    ];
+    let patchBody: unknown = null;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const json = (data: unknown) =>
+          new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+
+        if (url.includes('/decisions')) {
+          if (method === 'PATCH') {
+            patchBody = JSON.parse(String(init?.body));
+            // Nothing left PENDING -> batch flips to VALIDATED.
+            return json({ ...NEEDS_REVIEW_BATCH, status: 'VALIDATED', error_report_file_id: null });
+          }
+          return json(DECISIONS);
+        }
+        if (url.includes('/challan/batches') && method === 'POST') {
+          return json(NEEDS_REVIEW_BATCH);
+        }
+        if (url.includes('/challan/batches')) {
+          return json([]);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderNewChallan();
+
+    const fileInput = document.getElementById('challan-file') as HTMLInputElement;
+    const file = new File(['data'], 'challans.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole('button', { name: /upload & validate/i }));
+
+    // Review panel + both contradicted fields + the Excel download appear.
+    expect(
+      await screen.findByText(/this upload disagrees with your saved records/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /download review report \(excel\)/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Consignee name')).toBeInTheDocument();
+    expect(screen.getByText('Pincode')).toBeInTheDocument();
+
+    // Step 3's Generate is not available while the batch needs review.
+    expect(screen.queryByRole('button', { name: /generate/i })).not.toBeInTheDocument();
+
+    // Save is disabled until every field has a choice.
+    const save = screen.getByRole('button', { name: /save decisions & continue/i });
+    expect(save).toBeDisabled();
+
+    // The undecided fields carry a text marker (not colour only).
+    expect(screen.getAllByText(/not decided/i).length).toBe(2);
+
+    // Choose one field, still disabled; choose the second, now enabled.
+    fireEvent.click(document.getElementById('decision-1-THIS_UPLOAD') as HTMLInputElement);
+    expect(save).toBeDisabled();
+    // Progress affordance updates as fields are decided.
+    expect(screen.getByText(/1 of 2 decided/i)).toBeInTheDocument();
+    fireEvent.click(document.getElementById('decision-2-REJECT') as HTMLInputElement);
+    expect(save).toBeEnabled();
+    expect(screen.getByText(/2 of 2 decided/i)).toBeInTheDocument();
+
+    // No UPDATE_MASTER selected -> Save submits directly (no confirm dialog);
+    // the batch then flips to VALIDATED.
+    fireEvent.click(save);
+    await waitFor(() => expect(patchBody).not.toBeNull());
+    expect(patchBody).toEqual({
+      decisions: [
+        { id: 1, choice: 'THIS_UPLOAD' },
+        { id: 2, choice: 'REJECT' },
+      ],
+    });
+    expect(await screen.findByRole('button', { name: /generate 2 challans/i })).toBeInTheDocument();
+  });
+
+  it('confirms before a permanent shared-master change, then PATCHes on confirm', async () => {
+    const NEEDS_REVIEW_BATCH = {
+      id: 55,
+      status: 'NEEDS_REVIEW',
+      challan_count: 2,
+      line_count: 4,
+      message: '1 consignee contradiction(s) to review before generating',
+      error_report_file_id: 77,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+    const DECISIONS = [
+      {
+        id: 1,
+        gstin: '27ABCDE1234F1Z5',
+        consignee_name: 'Acme Foods',
+        field: 'name',
+        stored_value: 'Acme Foods Pvt Ltd',
+        uploaded_value: 'Acme Foods',
+        choice: 'PENDING',
+      },
+    ];
+    let patchBody: unknown = null;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const json = (data: unknown) =>
+          new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        if (url.includes('/decisions')) {
+          if (method === 'PATCH') {
+            patchBody = JSON.parse(String(init?.body));
+            return json({ ...NEEDS_REVIEW_BATCH, status: 'VALIDATED', error_report_file_id: null });
+          }
+          return json(DECISIONS);
+        }
+        if (url.includes('/challan/batches') && method === 'POST') {
+          return json(NEEDS_REVIEW_BATCH);
+        }
+        if (url.includes('/challan/batches')) {
+          return json([]);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderNewChallan();
+
+    const fileInput = document.getElementById('challan-file') as HTMLInputElement;
+    const file = new File(['data'], 'challans.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    fireEvent.click(screen.getByRole('button', { name: /upload & validate/i }));
+
+    // Pick "Update master" and click Save — a confirm dialog appears, no PATCH yet.
+    fireEvent.click(await screen.findByLabelText(/update master/i));
+    fireEvent.click(screen.getByRole('button', { name: /save decisions & continue/i }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(
+      screen.getByText(/permanently update 1 saved consignee record/i),
+    ).toBeInTheDocument();
+    expect(patchBody).toBeNull();
+
+    // Confirming sends the PATCH with the UPDATE_MASTER choice.
+    fireEvent.click(screen.getByRole('button', { name: /update saved records/i }));
+    await waitFor(() => expect(patchBody).not.toBeNull());
+    expect(patchBody).toEqual({ decisions: [{ id: 1, choice: 'UPDATE_MASTER' }] });
+  });
+});
+
+describe('Batches review affordance', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('exposes a Review action on a NEEDS_REVIEW row that opens the review panel', async () => {
+    const NEEDS_REVIEW_BATCH = {
+      id: 88,
+      status: 'NEEDS_REVIEW',
+      challan_count: 1,
+      line_count: 2,
+      message: '1 consignee contradiction(s) to review before generating',
+      error_report_file_id: 77,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+    const DECISIONS = [
+      {
+        id: 9,
+        gstin: '27ABCDE1234F1Z5',
+        consignee_name: 'Acme Foods',
+        field: 'pincode',
+        stored_value: '400001',
+        uploaded_value: '400002',
+        choice: 'PENDING',
+      },
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const json = (data: unknown) =>
+          new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        if (url.includes('/decisions')) return json(DECISIONS);
+        if (url.includes('/challan/batches')) return json([NEEDS_REVIEW_BATCH]);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderBatches();
+
+    // The NEEDS_REVIEW row surfaces a "Review" affordance.
+    const review = await screen.findByRole('button', { name: /^review$/i });
+    expect(review).toBeInTheDocument();
+
+    // Opening it renders the same review panel with its contradictions.
+    fireEvent.click(review);
+    expect(
+      await screen.findByText(/this upload disagrees with your saved records/i),
+    ).toBeInTheDocument();
+    expect(await screen.findByText('Pincode')).toBeInTheDocument();
   });
 });

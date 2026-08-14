@@ -122,6 +122,26 @@ class VoidBody(BaseModel):
     reason: str = Field(min_length=1, max_length=300)
 
 
+class DecisionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    gstin: str
+    consignee_name: str
+    field: str
+    stored_value: str
+    uploaded_value: str
+    choice: str
+
+
+class DecisionItem(BaseModel):
+    id: int
+    choice: str = Field(pattern=r"^(UPDATE_MASTER|THIS_UPLOAD|REJECT)$")
+
+
+class DecisionsBody(BaseModel):
+    decisions: list[DecisionItem] = Field(min_length=1, max_length=5000)
+
+
 _XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -238,6 +258,55 @@ def generate_batch(
 
 
 # --------------------------------------------------------------------- reads
+
+@router.get("/challan/batches/{batch_id}/decisions", response_model=list[DecisionOut])
+def list_batch_decisions(
+    batch_id: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[Any]:
+    """The consignee contradictions to resolve for a NEEDS_REVIEW batch."""
+    _require_module(user)
+    batch = db.get(ChallanBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "batch not found")
+    return list(service.list_decisions(db, batch))
+
+
+@router.patch("/challan/batches/{batch_id}/decisions", response_model=BatchOut)
+def submit_batch_decisions(
+    batch_id: int,
+    body: DecisionsBody,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ChallanBatch:
+    """Record per-field review choices. When none remain PENDING the batch becomes
+    VALIDATED (ready to generate)."""
+    _require_module(user)
+    batch = db.get(ChallanBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "batch not found")
+    ids = [item.id for item in body.decisions]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "duplicate decision id")
+    # UPDATE_MASTER permanently rewrites the SHARED consignee golden record, so it is
+    # held to the same ADMIN gate as the direct master-edit route; THIS_UPLOAD / REJECT
+    # (which never mutate the master) stay open to any module user.
+    if any(item.choice == "UPDATE_MASTER" for item in body.decisions) and not can(
+        user, "masterdata.edit"
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "updating the saved consignee record requires admin; choose 'This upload "
+            "only' or 'Reject', or ask an admin to update the master")
+    choices = {item.id: item.choice for item in body.decisions}
+    try:
+        service.submit_decisions(db, batch, choices, actor_uid=user.firebase_uid)
+    except service.ChallanError as err:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(err)) from err
+    db.refresh(batch)
+    return batch
+
 
 @router.get("/challan/batches", response_model=list[BatchOut])
 def list_batches(

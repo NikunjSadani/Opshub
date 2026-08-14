@@ -26,22 +26,25 @@ from datetime import date, datetime, time
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.modules.challan import parsing, render
+from app.modules.challan import parsing, render, review_report
 from app.modules.challan.models import (
     BatchStatus,
     Challan,
     ChallanBatch,
+    ChallanBatchDecision,
     ChallanLineItem,
     ChallanStatus,
+    DecisionChoice,
 )
 from app.modules.challan.schema import (
     COLLISION_FIELDS,
     ChallanView,
     ConsigneeView,
     ConsignorView,
+    Contradiction,
     LineView,
     ParsedChallan,
     ParsedLine,
@@ -54,7 +57,7 @@ from app.modules.files.models import StoredFile
 from app.modules.masterdata import consignee_master
 from app.modules.masterdata.consignee_master import ConsigneeMasterError
 from app.modules.masterdata.models import ConsigneeParty, Consignor, HsnCode
-from app.modules.masterdata.normalize import match_key, valid_gstin
+from app.modules.masterdata.normalize import gstin_matches_state, match_key
 from app.modules.numbering import service as numbering
 from app.modules.numbering.models import AllocationStatus, NumberingAllocation
 from app.modules.numbering.service import IST
@@ -65,9 +68,12 @@ from app.platform.models import Setting
 from app.platform.storage import Storage, get_storage
 
 MODULE_KEY = "document_automation"
-# Per-batch caps: one upload can't burn an unbounded slice of the statutory
-# sequence (numbers are never reused) or schedule unbounded rendering work.
-MAX_BATCH_ROWS = 5000
+# Per-batch caps. MAX_BATCH_CHALLANS is the meaningful seatbelt (one upload can't
+# burn an unbounded slice of the never-reused statutory sequence). MAX_BATCH_ROWS is
+# only a high pathological backstop (a "one challan, a million lines" file) sized so
+# the challan cap always binds first — a 2000-challan batch of multi-line challans is
+# never falsely rejected by a row limit.
+MAX_BATCH_ROWS = 50000
 MAX_BATCH_CHALLANS = 2000
 _AMOUNT_TOL_CAP_PAISE = 50000  # Rs 500 — absolute ceiling on the amount-sanity band
 
@@ -112,7 +118,6 @@ def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
         if _project(db, c["project_id"], projects_cache) is None:
             errors.append(RowError(row.row_number, "project_id",
                                    f"project '{c['project_id']}' does not exist or is not Active"))
-        _consignee_preview(db, row, errors, warnings)
         hsn = _hsn(db, c["hsn"], hsns)
         if hsn is None:
             errors.append(RowError(row.row_number, "hsn",
@@ -128,45 +133,119 @@ def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
 
     _amount_presence_consistency(rows, errors)
     warnings.extend(_collision_warnings(rows))
-    warnings.extend(_intrabatch_new_gstin_warnings(db, rows))
+
+    # Consignee identity is checked per-GSTIN over the structurally-clean rows: the
+    # same GSTIN must carry the same details (error), and a known GSTIN whose details
+    # differ from the stored golden record yields CONTRADICTIONS to resolve.
+    clean_rows = [r for r in rows if r.row_number not in bad]
+    _consignee_consistency_errors(clean_rows, errors)
+    contradictions = _detect_contradictions(db, clean_rows, errors)
 
     warnings.sort(key=lambda e: (e.row_number, e.column))
     if errors:
         errors.sort(key=lambda e: (e.row_number, e.column))
         return ValidationResult(errors=errors, warnings=warnings)
-    return ValidationResult(warnings=warnings, challans=_build_challans(rows, hsns))
+    return ValidationResult(
+        warnings=warnings, contradictions=contradictions,
+        challans=_build_challans(rows, hsns))
 
 
-def _consignee_preview(
-    db: Session, row: RawRow, errors: list[RowError], warnings: list[RowError]
-) -> None:
-    """Read-only consignee resolution (`dry_run`): an invalid GSTIN / state mismatch
-    is a blocking error; a known GSTIN whose typed details differ from the stored
-    golden record yields one WARNING per field (the stored value is what we use)."""
-    c = row.cells
-    try:
-        result = consignee_master.resolve_or_create(
-            db,
-            gstin=c["consignee_gstin"],
-            name=c["consignee_name"],
-            address_line1=c.get("consignee_address_line1", ""),
-            address_line2=c.get("consignee_address_line2", ""),
-            pincode=c.get("consignee_pincode", ""),
-            state=c.get("consignee_state", ""),
-            phone=c.get("consignee_phone", ""),
-            source="UPLOAD",
-            dry_run=True,
-        )
-    except ConsigneeMasterError as err:
-        column = "consignee_state" if "does not match the GSTIN" in str(err) else "consignee_gstin"
-        errors.append(RowError(row.row_number, column, str(err)))
-        return
-    for dev in result.deviations:
-        warnings.append(RowError(
-            row.row_number, f"consignee_{dev.field}",
-            f"consignee {dev.field}: using the stored value '{dev.stored}' "
-            f"(you entered '{dev.incoming}')",
-            severity="WARNING"))
+def _consignee_by_gstin(rows: list[RawRow]) -> dict[str, list[RawRow]]:
+    """Group rows by normalized consignee GSTIN (blank GSTIN skipped)."""
+    groups: dict[str, list[RawRow]] = {}
+    for row in rows:
+        gstin = consignee_master.normalize_gstin(row.cells.get("consignee_gstin", ""))
+        if gstin:
+            groups.setdefault(gstin, []).append(row)
+    return groups
+
+
+def _consignee_conflicts(a: dict[str, str], b: dict[str, str]) -> list[tuple[str, str, str]]:
+    """(short_field, a_value, b_value) where a AND b both hold a non-empty value that
+    differs. A blank in either row is 'not specified', never a conflict."""
+    out: list[tuple[str, str, str]] = []
+    for short, key in _CONSIGNEE_DIFF_TEXT:
+        av, bv = a.get(key, ""), b.get(key, "")
+        if av and bv and match_key(av) != match_key(bv):
+            out.append((short, av, bv))
+    for short, key in _CONSIGNEE_DIFF_NUM:
+        av, bv = a.get(key, ""), b.get(key, "")
+        if av and bv and _digits(av) != _digits(bv):
+            out.append((short, av, bv))
+    return out
+
+
+def _consignee_consistency_errors(rows: list[RawRow], errors: list[RowError]) -> None:
+    """The SAME GSTIN must carry the SAME consignee details across the upload (it is
+    one legal party). Two rows disagreeing on a field for one GSTIN is a blocking
+    error — which also guarantees each field has a single 'your value' to decide on
+    in the contradiction review."""
+    for gstin, grp in _consignee_by_gstin(rows).items():
+        base = grp[0]
+        for row in grp[1:]:
+            for short, a, b in _consignee_conflicts(base.cells, row.cells):
+                errors.append(RowError(
+                    row.row_number, f"consignee_{short}",
+                    f"consignee {short} '{b}' differs from row {base.row_number} "
+                    f"('{a}') for the same GSTIN {gstin}; the same GSTIN must carry the "
+                    "same consignee details across the upload"))
+
+
+def _merged_consignee(grp: list[RawRow]) -> dict[str, str]:
+    """One representative consignee field-set for a GSTIN: the first non-empty value
+    per field across its rows (non-empties agree — consistency is enforced)."""
+    merged: dict[str, str] = {}
+    for _short, key in (*_CONSIGNEE_DIFF_TEXT, *_CONSIGNEE_DIFF_NUM):
+        merged[key] = ""
+        for row in grp:
+            value = row.cells.get(key, "").strip()
+            if value:
+                merged[key] = value
+                break
+    return merged
+
+
+def _detect_contradictions(
+    db: Session, rows: list[RawRow], errors: list[RowError]
+) -> list[Contradiction]:
+    """For each distinct KNOWN GSTIN whose uploaded details differ from the stored
+    golden record, one Contradiction per differing field. An invalid GSTIN / state
+    mismatch is a blocking error. Read-only (`dry_run`) — nothing is written here."""
+    contradictions: list[Contradiction] = []
+    for gstin, grp in _consignee_by_gstin(rows).items():
+        merged = _merged_consignee(grp)
+        # A state that contradicts the GSTIN's own state code is a blocking ERROR, not
+        # a decidable contradiction: it can never be stored (would be a self-contradictory
+        # golden record) nor printed on a statutory challan even "this upload only".
+        if merged["consignee_state"] and not gstin_matches_state(gstin, merged["consignee_state"]):
+            errors.append(RowError(
+                grp[0].row_number, "consignee_state",
+                f"consignee state '{merged['consignee_state']}' does not match the GSTIN "
+                f"state code {gstin[:2]}"))
+            continue
+        try:
+            result = consignee_master.resolve_or_create(
+                db,
+                gstin=gstin,
+                name=merged["consignee_name"],
+                address_line1=merged["consignee_address_line1"],
+                address_line2=merged["consignee_address_line2"],
+                pincode=merged["consignee_pincode"],
+                state=merged["consignee_state"],
+                phone=merged["consignee_phone"],
+                source="UPLOAD",
+                dry_run=True,
+            )
+        except ConsigneeMasterError as err:
+            column = ("consignee_state" if "does not match the GSTIN" in str(err)
+                      else "consignee_gstin")
+            errors.append(RowError(grp[0].row_number, column, str(err)))
+            continue
+        for dev in result.deviations:
+            contradictions.append(Contradiction(
+                gstin=gstin, consignee_name=merged["consignee_name"],
+                field=dev.field, stored=dev.stored, uploaded=dev.incoming))
+    return contradictions
 
 
 def _first_row_per_group(rows: list[RawRow]) -> tuple[dict[str, RawRow], list[str]]:
@@ -235,65 +314,6 @@ _CONSIGNEE_DIFF_NUM: tuple[tuple[str, str], ...] = (
 
 def _digits(value: str) -> str:
     return "".join(ch for ch in value if ch.isdigit())
-
-
-def _consignee_field_diffs(
-    first: dict[str, str], later: dict[str, str]
-) -> list[tuple[str, str, str]]:
-    """(short_field, first_value, later_value) for each field the later row typed
-    differently from the first row's. An empty later value is never a difference."""
-    diffs: list[tuple[str, str, str]] = []
-    for short, key in _CONSIGNEE_DIFF_TEXT:
-        a, b = first.get(key, ""), later.get(key, "")
-        if b and match_key(a) != match_key(b):
-            diffs.append((short, a, b))
-    for short, key in _CONSIGNEE_DIFF_NUM:
-        a, b = first.get(key, ""), later.get(key, "")
-        if b and _digits(a) != _digits(b):
-            diffs.append((short, a, b))
-    return diffs
-
-
-def _intrabatch_new_gstin_warnings(db: Session, rows: list[RawRow]) -> list[RowError]:
-    """Warn when a GSTIN that is NEW to the golden-record master appears in two
-    groups of the SAME upload with conflicting consignee details.
-
-    The master auto-creates that party from the FIRST group's typed values at
-    generation, then every later group snapshots those same stored values — so a
-    later group's differing typed name/address is silently dropped. During
-    validation the party doesn't exist yet, so `resolve_or_create(dry_run)` can't
-    surface this; we detect it here. (A GSTIN already IN the master is handled by
-    the per-row deviation check against the stored record.)"""
-    first_row, order = _first_row_per_group(rows)
-    all_keys = [key for _short, key in (*_CONSIGNEE_DIFF_TEXT, *_CONSIGNEE_DIFF_NUM)]
-    in_master: dict[str, bool] = {}
-    seen: dict[str, tuple[str, dict[str, str]]] = {}  # gstin -> (group, typed fields)
-    warnings: list[RowError] = []
-
-    for group in order:
-        cells = first_row[group].cells
-        gstin = consignee_master.normalize_gstin(cells.get("consignee_gstin", ""))
-        if not valid_gstin(gstin):
-            continue  # an invalid GSTIN is already a blocking error elsewhere
-        if gstin not in in_master:
-            in_master[gstin] = db.execute(
-                select(ConsigneeParty.id).where(ConsigneeParty.gstin == gstin)
-            ).scalar_one_or_none() is not None
-        if in_master[gstin]:
-            continue  # existing record -> per-row deviations already cover it
-        typed = {key: cells.get(key, "") for key in all_keys}
-        if gstin in seen:
-            first_group, first_typed = seen[gstin]
-            for short, stored, incoming in _consignee_field_diffs(first_typed, typed):
-                warnings.append(RowError(
-                    first_row[group].row_number, f"consignee_{short}",
-                    f"consignee {short}: challan '{group}' entered '{incoming}', but the "
-                    f"same GSTIN in challan '{first_group}' will create the golden record "
-                    f"as '{stored}' — that stored value is what gets printed",
-                    severity="WARNING"))
-        else:
-            seen[gstin] = (group, typed)
-    return warnings
 
 
 def _amount_presence_consistency(rows: list[RawRow], errors: list[RowError]) -> None:
@@ -500,6 +520,15 @@ def _generate_inner(
     batch.status = BatchStatus.GENERATING.value
     db.flush()
 
+    # The operator's review decisions drive both the per-field snapshot (THIS_UPLOAD
+    # and UPDATE_MASTER print the uploaded value; REJECT + undecided print stored) and
+    # the golden-record write. The master write is deferred to the SUCCESS path below,
+    # so a batch that fails to generate never leaves the shared master mutated.
+    choice_map, uploaded_map = _decision_maps(db, batch)
+    merged_by_gstin = {
+        gstin: _merged_consignee(grp) for gstin, grp in _consignee_by_gstin(rows).items()
+    }
+
     # --- RESERVE phase: one short transaction, COMMITTED before any render. ---
     try:
         for pc in result.challans:
@@ -529,7 +558,8 @@ def _generate_inner(
         for pc, alloc_id in reservations:
             challan = _existing_challan(db, alloc_id)
             if challan is None:
-                challan = _persist_challan(db, batch, pc, alloc_id, threshold_paise, actor_uid)
+                challan = _persist_challan(db, batch, pc, alloc_id, threshold_paise,
+                                           actor_uid, choice_map, uploaded_map, merged_by_gstin)
                 pdf = renderer.render_pdf(render.build_challan_html(_build_view(challan)))
                 stored = _store(db, storage, pdf, f"{_safe(challan.number)}.pdf",
                                 "challan-pdf", actor_uid, "application/pdf")
@@ -544,6 +574,10 @@ def _generate_inner(
         merged = _store(db, storage, render.merge_pdfs([p for _, p in pdfs]),
                         f"batch-{batch.id}-merged.pdf", "challan-merged", actor_uid,
                         "application/pdf")
+        # Every challan is issued — NOW write the operator's UPDATE_MASTER choices to
+        # the shared golden record (idempotent on a resumed run), so a failed batch
+        # never leaves the master mutated without a document to show for it.
+        _apply_master_updates(db, choice_map, uploaded_map, actor_uid)
         batch.zip_file_id = zip_file.id
         batch.merged_pdf_file_id = merged.id
         batch.challan_count = len(reservations)
@@ -590,31 +624,38 @@ def _persist_challan(
     alloc_id: int,
     threshold_paise: int,
     actor_uid: str | None,
+    choice_map: dict[tuple[str, str], str],
+    uploaded_map: dict[tuple[str, str], str],
+    merged_by_gstin: dict[str, dict[str, str]],
 ) -> Challan:
     """Build the Challan + line items with fresh snapshots.
 
-    The consignee is resolved against the GSTIN golden record HERE (the real
-    auto-create), and the STORED record — not the typed values — is snapshotted, so
-    an issued challan always carries the canonical party. The project is re-checked
-    Active. The ship-to address is joined for the printed block.
+    The consignee is resolved against the GSTIN golden record HERE. A brand-new GSTIN
+    is auto-created from the MERGED (first-non-empty-per-field across the whole batch)
+    values, so a value one group left blank and another filled is never lost. Each
+    snapshotted field honours the operator's review decision: THIS_UPLOAD and
+    UPDATE_MASTER print the uploaded value; REJECT and any undecided field print the
+    stored value. The project is re-checked Active; ship-to address is joined.
     """
     consignor = _active_consignor(db)
     project = projects.resolve_active_project(db, pc.project_id)
     if consignor is None or project is None:  # pragma: no cover - pre-validated
         raise ChallanError("consignor/project changed after validation")
+    merged = merged_by_gstin.get(consignee_master.normalize_gstin(pc.consignee_gstin), {})
     res = consignee_master.resolve_or_create(
         db,
         gstin=pc.consignee_gstin,
-        name=pc.consignee_name,
-        address_line1=pc.consignee_address_line1,
-        address_line2=pc.consignee_address_line2,
-        pincode=pc.consignee_pincode,
-        state=pc.consignee_state,
-        phone=pc.consignee_phone,
+        name=merged.get("consignee_name") or pc.consignee_name,
+        address_line1=merged.get("consignee_address_line1", pc.consignee_address_line1),
+        address_line2=merged.get("consignee_address_line2", pc.consignee_address_line2),
+        pincode=merged.get("consignee_pincode", pc.consignee_pincode),
+        state=merged.get("consignee_state", pc.consignee_state),
+        phone=merged.get("consignee_phone", pc.consignee_phone),
         source="UPLOAD",
         actor_uid=actor_uid,
     )
     party = res.party
+    rc = _resolved_consignee(party, choice_map, uploaded_map)
     alloc = _allocation(db, alloc_id)
     total = pc.total_paise  # int | None (None => value-free challan)
     challan = Challan(
@@ -632,11 +673,11 @@ def _persist_challan(
         consignor_address=consignor.address,
         consignor_phone=consignor.phone,
         consignee_brand="",
-        consignee_name=party.name,
+        consignee_name=rc["name"],
         consignee_gstin=party.gstin,
-        consignee_state=party.state,
-        consignee_address=_join_consignee(party),
-        consignee_phone=party.phone,
+        consignee_state=rc["state"],
+        consignee_address=_join_consignee_values(rc),
+        consignee_phone=rc["phone"],
         ship_to_name=pc.ship_to_name,
         ship_to_address=_join_ship_to(pc),
         ship_to_address_line1=pc.ship_to_address_line1,
@@ -699,9 +740,76 @@ def _join_ship_to(pc: ParsedChallan) -> str:
     return ", ".join(p.strip() for p in parts if p.strip())
 
 
-def _join_consignee(party: ConsigneeParty) -> str:
-    """Join the golden record's address lines + pincode into one printed block."""
-    parts = [party.address_line1, party.address_line2, party.pincode]
+# Consignee golden-record fields snapshotted onto a challan (attr name == decision
+# `field`). Order also drives the joined printed address (line1/line2/pincode).
+_CONSIGNEE_SNAPSHOT_FIELDS: tuple[str, ...] = (
+    "name", "address_line1", "address_line2", "pincode", "state", "phone",
+)
+
+
+def _decision_maps(
+    db: Session, batch: ChallanBatch
+) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], str]]:
+    """(choice_map, uploaded_map) keyed by (gstin, field) from the batch's review
+    decisions, so generation can honour each field-level choice."""
+    choice_map: dict[tuple[str, str], str] = {}
+    uploaded_map: dict[tuple[str, str], str] = {}
+    for d in db.execute(
+        select(ChallanBatchDecision).where(ChallanBatchDecision.batch_id == batch.id)
+    ).scalars():
+        choice_map[(d.gstin, d.field)] = d.choice
+        uploaded_map[(d.gstin, d.field)] = d.uploaded_value
+    return choice_map, uploaded_map
+
+
+def _apply_master_updates(
+    db: Session,
+    choice_map: dict[tuple[str, str], str],
+    uploaded_map: dict[tuple[str, str], str],
+    actor_uid: str | None,
+) -> None:
+    """Write every UPDATE_MASTER decision's uploaded value onto its golden record
+    (once per GSTIN). A brand-new GSTIN has no record yet — it is created from the
+    upload at persist, so there is nothing to update here."""
+    updates: dict[str, dict[str, str]] = {}
+    for (gstin, field), choice in choice_map.items():
+        if choice == DecisionChoice.UPDATE_MASTER.value:
+            updates.setdefault(gstin, {})[field] = uploaded_map[(gstin, field)]
+    for gstin, fields in updates.items():
+        party = db.execute(
+            select(ConsigneeParty).where(ConsigneeParty.gstin == gstin)
+        ).scalar_one_or_none()
+        if party is None:  # pragma: no cover - a known-GSTIN contradiction implies it exists
+            continue
+        consignee_master.apply_incoming(db, party=party, actor_uid=actor_uid, **fields)
+    db.flush()
+
+
+_PRINT_UPLOADED = frozenset({DecisionChoice.THIS_UPLOAD.value, DecisionChoice.UPDATE_MASTER.value})
+
+
+def _resolved_consignee(
+    party: ConsigneeParty,
+    choice_map: dict[tuple[str, str], str],
+    uploaded_map: dict[tuple[str, str], str],
+) -> dict[str, str]:
+    """The consignee field values to snapshot: the uploaded value when the operator
+    chose to print it (THIS_UPLOAD or UPDATE_MASTER), else the stored golden-record
+    value (REJECT and any undecided/PENDING field always fall back to STORED — never
+    an unvetted upload). The snapshot does NOT depend on the master having been
+    pre-updated, so the golden-record write can safely happen only on batch success."""
+    out: dict[str, str] = {}
+    for field in _CONSIGNEE_SNAPSHOT_FIELDS:
+        if choice_map.get((party.gstin, field)) in _PRINT_UPLOADED:
+            out[field] = uploaded_map[(party.gstin, field)]
+        else:
+            out[field] = getattr(party, field)
+    return out
+
+
+def _join_consignee_values(rc: dict[str, str]) -> str:
+    """Join the resolved address lines + pincode into one printed block."""
+    parts = [rc["address_line1"], rc["address_line2"], rc["pincode"]]
     return ", ".join(p.strip() for p in parts if p.strip())
 
 
@@ -923,36 +1031,128 @@ def new_batch(db: Session, *, source_file_id: int, actor_uid: str | None) -> Cha
     return batch
 
 
+_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _clear_decisions(db: Session, batch: ChallanBatch) -> None:
+    """Drop any prior review decisions for the batch (a fresh validation supersedes)."""
+    db.execute(
+        delete(ChallanBatchDecision).where(ChallanBatchDecision.batch_id == batch.id)
+    )
+    db.flush()
+
+
+def _persist_decisions(
+    db: Session, batch: ChallanBatch, contradictions: list[Contradiction]
+) -> None:
+    """Write one PENDING decision row per (gstin, field) contradiction."""
+    for c in contradictions:
+        db.add(ChallanBatchDecision(
+            batch_id=batch.id, gstin=c.gstin, consignee_name=c.consignee_name,
+            field=c.field, stored_value=c.stored, uploaded_value=c.uploaded,
+            choice=DecisionChoice.PENDING.value,
+        ))
+    db.flush()
+
+
 def validate_batch(db: Session, batch: ChallanBatch, *, actor_uid: str | None) -> ValidationResult:
     """Parse + validate the batch's source file synchronously (no rendering).
 
-    Sets the batch to VALIDATED or FAILED_VALIDATION (writing an issue report), and
-    returns the result. No numbers are reserved and no golden records are written.
-    A VALIDATED batch that carries WARNINGS still gets an issue report attached (the
-    warnings) so the operator can review deviations/possible-splits before generate.
+    Sets the batch to FAILED_VALIDATION (errors), NEEDS_REVIEW (no errors but the
+    upload contradicts the stored consignee golden record — one decision per
+    contradiction is written, and generation is blocked until each is resolved), or
+    VALIDATED (ready to generate). No numbers are reserved and no golden records are
+    written here. A VALIDATED batch with non-blocking WARNINGS still attaches a CSV
+    issue report; a NEEDS_REVIEW batch attaches the downloadable Excel review report.
     """
     storage = get_storage()
     rows, structural = parsing.parse_workbook(_source_bytes(db, batch, storage))
     result = ValidationResult(errors=structural) if structural else validate(db, rows)
+    _clear_decisions(db, batch)
     if not result.ok:
         report = _store(db, storage, _issue_report_bytes(result.issues),
                         f"batch-{batch.id}-errors.csv", "challan-error-report",
                         actor_uid, "text/csv")
         batch.error_report_file_id = report.id
         batch.status = BatchStatus.FAILED_VALIDATION.value
+        batch.challan_count = 0
+        batch.line_count = 0
         batch.message = _issue_message(result)
+    elif result.contradictions:
+        _persist_decisions(db, batch, result.contradictions)
+        report = _store(
+            db, storage, review_report.build_review_xlsx(rows, result.contradictions),
+            f"batch-{batch.id}-review.xlsx", "challan-review-report", actor_uid, _XLSX_MEDIA)
+        batch.error_report_file_id = report.id
+        batch.status = BatchStatus.NEEDS_REVIEW.value
+        batch.challan_count = len(result.challans)
+        batch.line_count = sum(len(pc.lines) for pc in result.challans)
+        batch.message = (f"{len(result.contradictions)} consignee contradiction(s) to "
+                         "review before generating")
     else:
         if result.warnings:
             report = _store(db, storage, _issue_report_bytes(result.warnings),
                             f"batch-{batch.id}-warnings.csv", "challan-error-report",
                             actor_uid, "text/csv")
             batch.error_report_file_id = report.id
+        else:
+            batch.error_report_file_id = None
         batch.status = BatchStatus.VALIDATED.value
         batch.challan_count = len(result.challans)
         batch.line_count = sum(len(pc.lines) for pc in result.challans)
         batch.message = _issue_message(result) if result.warnings else None
     _audit(db, "challan.batch_validated", actor_uid, batch.id,
            {"status": batch.status, "errors": len(result.errors),
-            "warnings": len(result.warnings)})
+            "warnings": len(result.warnings), "contradictions": len(result.contradictions)})
     db.commit()
     return result
+
+
+def list_decisions(db: Session, batch: ChallanBatch) -> list[ChallanBatchDecision]:
+    """The batch's consignee contradictions, oldest-first (stable review order)."""
+    return list(db.execute(
+        select(ChallanBatchDecision)
+        .where(ChallanBatchDecision.batch_id == batch.id)
+        .order_by(ChallanBatchDecision.id.asc())
+    ).scalars())
+
+
+def submit_decisions(
+    db: Session,
+    batch: ChallanBatch,
+    choices: dict[int, str],
+    *,
+    actor_uid: str | None,
+) -> ChallanBatch:
+    """Record the operator's choice for one or more contradictions. When NONE remain
+    PENDING the batch flips NEEDS_REVIEW -> VALIDATED (ready to generate); otherwise
+    it stays in review. Raises `ChallanError` (route -> 409/422) on a bad state,
+    unknown decision id, or invalid choice."""
+    if batch.status != BatchStatus.NEEDS_REVIEW.value:
+        raise ChallanError(f"batch is {batch.status}, not awaiting review")
+    # Serialize concurrent submits on this batch so two PATCHes each resolving the
+    # last-pending decision can't both read the other as PENDING and leave the batch
+    # stuck NEEDS_REVIEW with zero pending. (A no-op on SQLite; real on Postgres.)
+    db.execute(
+        select(ChallanBatch.id).where(ChallanBatch.id == batch.id).with_for_update()
+    ).scalar_one_or_none()
+    valid = {c.value for c in DecisionChoice if c is not DecisionChoice.PENDING}
+    rows = {d.id: d for d in list_decisions(db, batch)}
+    for decision_id, choice in choices.items():
+        decision = rows.get(decision_id)
+        if decision is None:
+            raise ChallanError(f"decision {decision_id} is not part of this batch")
+        if choice not in valid:
+            raise ChallanError(f"choice must be one of {sorted(valid)}")
+        decision.choice = choice
+    db.flush()
+    pending = sum(1 for d in rows.values() if d.choice == DecisionChoice.PENDING.value)
+    if pending == 0:
+        batch.status = BatchStatus.VALIDATED.value
+        batch.message = None
+    else:
+        batch.message = f"{pending} consignee contradiction(s) to review before generating"
+    _audit(db, "challan.batch_reviewed", actor_uid, batch.id,
+           {"submitted": len(choices), "pending": pending, "status": batch.status})
+    db.commit()
+    return batch

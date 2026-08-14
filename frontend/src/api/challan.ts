@@ -21,6 +21,7 @@ export type BatchStatus =
   | 'PENDING'
   | 'FAILED_VALIDATION'
   | 'VALIDATED'
+  | 'NEEDS_REVIEW'
   | 'GENERATING'
   | 'COMPLETED'
   | 'FAILED';
@@ -32,6 +33,7 @@ const TERMINAL_BATCH: readonly BatchStatus[] = [
   'PENDING',
   'FAILED_VALIDATION',
   'VALIDATED',
+  'NEEDS_REVIEW',
   'COMPLETED',
   'FAILED',
 ];
@@ -46,6 +48,25 @@ export interface BatchOut {
   zip_file_id: number | null;
   merged_pdf_file_id: number | null;
 }
+
+/**
+ * One consignee contradiction awaiting an operator decision on a NEEDS_REVIEW
+ * batch: the uploaded value for `field` disagrees with the stored golden record
+ * for `gstin`. `choice` starts "PENDING" and becomes one of DecisionChoice.
+ */
+export interface Decision {
+  id: number;
+  gstin: string;
+  consignee_name: string;
+  /** One of name|address_line1|address_line2|pincode|state|phone. */
+  field: string;
+  stored_value: string;
+  uploaded_value: string;
+  choice: string;
+}
+
+/** How the operator resolves a single consignee contradiction. */
+export type DecisionChoice = 'UPDATE_MASTER' | 'THIS_UPLOAD' | 'REJECT';
 
 export interface ChallanOut {
   id: number;
@@ -161,6 +182,7 @@ export function buildChallanCsvQuery(filters: ChallanFilters): string {
 export const challanKeys = {
   batches: (limit: number) => ['challan', 'batches', limit] as const,
   batch: (id: number) => ['challan', 'batch', id] as const,
+  decisions: (id: number) => ['challan', 'decisions', id] as const,
   challans: (filters: ChallanFilters) => ['challan', 'challans', filters] as const,
   summary: (filters: ChallanSummaryFilters) => ['challan', 'summary', filters] as const,
 };
@@ -192,6 +214,23 @@ export function useBatchQuery(
     queryFn: ({ signal }) => get<BatchOut>(`/challan/batches/${batchId}`, signal),
     refetchInterval: (query) =>
       query.state.data && !TERMINAL_BATCH.includes(query.state.data.status) ? pollMs : false,
+  });
+}
+
+/**
+ * The consignee contradictions for a NEEDS_REVIEW batch, each awaiting a
+ * decision. Enabled only once a batch id is known; not polled (a batch's
+ * decisions change only via the operator's own PATCH, which invalidates this).
+ */
+export function useBatchDecisions(
+  batchId: number | null,
+): UseQueryResult<Decision[], Error> {
+  const { get } = useApi();
+  return useQuery<Decision[], Error>({
+    queryKey: challanKeys.decisions(batchId ?? -1),
+    enabled: batchId != null,
+    queryFn: ({ signal }) =>
+      get<Decision[]>(`/challan/batches/${batchId}/decisions`, signal),
   });
 }
 
@@ -266,6 +305,33 @@ export function useGenerateBatch(): UseMutationResult<
       post<BatchOut>(`/challan/batches/${batchId}/generate`, { series }),
     onSuccess: (batch) => {
       qc.setQueryData(challanKeys.batch(batch.id), batch);
+      void qc.invalidateQueries({ queryKey: ['challan', 'batches'] });
+    },
+  });
+}
+
+/**
+ * Resolve consignee contradictions on a NEEDS_REVIEW batch. Submits a subset or
+ * all of the decisions; when none remain PENDING the batch flips to VALIDATED.
+ * Invalidates the batch, its decisions, and the recent-batches list on success.
+ */
+export function useSubmitDecisions(): UseMutationResult<
+  BatchOut,
+  Error,
+  { batchId: number; decisions: { id: number; choice: DecisionChoice }[] }
+> {
+  const { patch } = useApi();
+  const qc = useQueryClient();
+  return useMutation<
+    BatchOut,
+    Error,
+    { batchId: number; decisions: { id: number; choice: DecisionChoice }[] }
+  >({
+    mutationFn: ({ batchId, decisions }) =>
+      patch<BatchOut>(`/challan/batches/${batchId}/decisions`, { decisions }),
+    onSuccess: (batch) => {
+      qc.setQueryData(challanKeys.batch(batch.id), batch);
+      void qc.invalidateQueries({ queryKey: challanKeys.decisions(batch.id) });
       void qc.invalidateQueries({ queryKey: ['challan', 'batches'] });
     },
   });
