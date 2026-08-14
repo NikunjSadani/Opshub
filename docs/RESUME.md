@@ -167,6 +167,7 @@ Blocked on owner GCP/Firebase access (needed for runtime-verification):
 8. **Verify the migration on Postgres** (enum DDL) before staging.
 
 ## Needed from owner
+- **No git remote is configured yet** (`git remote -v` is empty; `develop`/`main` are local-only). To push/CI/deploy, add the GitHub `origin` first — then the "push `develop` → staging auto-deploy" flow can run (still needs the deploy secrets below).
 - **GCP + Firebase access** to provision/deploy (Terraform written + validate-clean, not applied without it).
 - **Deploy wiring after GCP** (for the CI/CD workflows): GitHub secrets `WIF_PROVIDER`, `DEPLOY_SA`; vars `GCP_PROJECT_ID` (staging) + `GCP_PROJECT_ID_PROD`; an Artifact Registry repo `opshub`; and a `production` GitHub Environment with required reviewers (the prod gate).
 - The 4 module inputs (Phase 1/2): second use case · challan `L`-seed · master data · GST retention.
