@@ -575,3 +575,88 @@ def test_new_gstin_merged_superset_across_groups(env: tuple[Session, str]) -> No
     # Both challans print the merged phone, not one group's blank.
     for ch in db.execute(select(Challan).where(Challan.batch_id == batch.id)).scalars():
         assert "9820000000" in (ch.consignee_phone or "")
+
+
+def _add_project(db: Session, name: str) -> str:
+    """Create another ACTIVE project under the seeded BRI client; return its code."""
+    from app.modules.projects.models import Project, ProjectClient
+    client = db.execute(select(ProjectClient).where(ProjectClient.code == "BRI")).scalar_one()
+    projects_service.create_project(db, client_id=client.id, name=name, actor_uid="tester")
+    db.commit()
+    return db.execute(
+        select(Project.code).where(Project.name == name)
+    ).scalar_one()
+
+
+def test_resume_ignores_master_change_to_already_issued_group(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    from app.modules.projects.models import Project, ProjectStatus
+    code2 = _add_project(db, "Second")  # BRI-002 (active)
+    data = _workbook([
+        _row("G1", "Store A", "Item", "1", "100.00", "105.00", project="BRI-001"),
+        _row("G2", "Store B", "Item", "1", "100.00", "105.00", project=code2),
+    ])
+    batch = _upload(db, data)
+    service.validate_batch(db, batch, actor_uid="tester")
+    # First run: G1 issues, G2's render fails -> FAILED, one challan.
+    service.generate(db, batch, RaisingRenderer(fail_on=2), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.FAILED.value
+    assert len(list(db.execute(select(Challan)).scalars())) == 1
+
+    # G1's project (ALREADY ISSUED) goes ON_HOLD — it must not block finishing G2.
+    proj1 = db.execute(select(Project).where(Project.code == "BRI-001")).scalar_one()
+    projects_service.set_status(db, project=proj1, status=ProjectStatus.ON_HOLD.value)
+    db.commit()
+
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.COMPLETED.value
+    challans = list(db.execute(select(Challan)).scalars())
+    assert len(challans) == 2 and len({c.allocation_id for c in challans}) == 2
+
+
+def test_resume_blocks_when_remaining_group_master_invalid(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    from app.modules.projects.models import Project, ProjectStatus
+    code2 = _add_project(db, "Second")  # BRI-002
+    data = _workbook([
+        _row("G1", "Store A", "Item", "1", "100.00", "105.00", project="BRI-001"),
+        _row("G2", "Store B", "Item", "1", "100.00", "105.00", project=code2),
+    ])
+    batch = _upload(db, data)
+    service.validate_batch(db, batch, actor_uid="tester")
+    service.generate(db, batch, RaisingRenderer(fail_on=2), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.FAILED.value
+
+    # G2's project (the REMAINING, not-yet-issued group) goes ON_HOLD -> retry can't
+    # finish it; batch stays FAILED, the one issued challan is kept + named.
+    proj2 = db.execute(select(Project).where(Project.code == code2)).scalar_one()
+    projects_service.set_status(db, project=proj2, status=ProjectStatus.ON_HOLD.value)
+    db.commit()
+
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.FAILED.value
+    assert "already issued" in (batch.message or "") and "remaining" in (batch.message or "")
+    assert len(list(db.execute(select(Challan)).scalars())) == 1
+
+
+def test_resume_revalidates_a_voided_group(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    batch = _upload(db, _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00")]))
+    service.validate_batch(db, batch, actor_uid="tester")
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.COMPLETED.value
+    challan = db.execute(select(Challan)).scalar_one()
+
+    # Void the issued challan, then deactivate its HSN in master data.
+    service.void_challan(db, challan, reason="wrong", actor_uid="tester")
+    hsn = db.execute(select(HsnCode).where(HsnCode.hsn == "1509")).scalar_one()
+    hsn.active = False
+    db.commit()
+
+    # A VOIDED group is NOT "done" — it must be RE-VALIDATED on retry (its number is
+    # re-minted), so it can't be silently re-issued bypassing the now-inactive HSN.
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    assert batch.status != BatchStatus.COMPLETED.value
+    issued = [c for c in db.execute(select(Challan)).scalars()
+              if c.status == ChallanStatus.ISSUED.value]
+    assert issued == []  # nothing re-issued past HSN validation

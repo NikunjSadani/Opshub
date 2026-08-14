@@ -135,6 +135,10 @@ class Challan(Base):
     # The referenced project's human id (e.g. "BRI-001"), validated ACTIVE at
     # generation and snapshotted here so the register/print never re-resolve it.
     project_code: Mapped[str] = mapped_column(String(24), default="", index=True)
+    # The upload's `Challan Group` label this challan came from. Lets a RESUME of a
+    # partially-generated batch tell which groups are already issued (done), so a
+    # later master-data change to a completed group can't wedge the retry.
+    group_key: Mapped[str] = mapped_column(String(120), default="")
 
     # consignor snapshot (the single fixed dispatching entity)
     consignor_name: Mapped[str] = mapped_column(String(200))

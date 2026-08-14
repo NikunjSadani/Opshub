@@ -84,7 +84,9 @@ class ChallanError(Exception):
 
 # ------------------------------------------------------------------ validation
 
-def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
+def validate(
+    db: Session, rows: list[RawRow], *, skip_error_groups: frozenset[str] = frozenset()
+) -> ValidationResult:
     """Structural checks (no DB) + semantic checks (master data / projects /
     consignee golden record), then group.
 
@@ -92,6 +94,12 @@ def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
     WARNINGS (consignee deviations, possible splits), or — when there are no errors
     — the parsed challans grouped by `challan_group`. No golden records are written
     here (consignee resolution runs `dry_run`); the real write is at generation.
+
+    `skip_error_groups` (a RESUME concern) drops errors on groups that are already
+    fully issued: on a retry of a partially-generated batch, a master-data change to
+    an ALREADY-DONE group must not block finishing the rest. Errors on batch-level
+    rows (row 0) and on the remaining (not-yet-issued) groups are kept; if every
+    group is already issued, all errors drop (nothing left to generate, just repackage).
     """
     if len(rows) > MAX_BATCH_ROWS:
         return ValidationResult(errors=[RowError(
@@ -140,6 +148,9 @@ def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
     clean_rows = [r for r in rows if r.row_number not in bad]
     _consignee_consistency_errors(clean_rows, errors)
     contradictions = _detect_contradictions(db, clean_rows, errors)
+
+    if skip_error_groups:
+        errors = _filter_resume_errors(rows, errors, skip_error_groups)
 
     warnings.sort(key=lambda e: (e.row_number, e.column))
     if errors:
@@ -386,6 +397,37 @@ def _hsn(db: Session, hsn: str, cache: dict[str, HsnCode | None]) -> HsnCode | N
     return cache[hsn]
 
 
+def _filter_resume_errors(
+    rows: list[RawRow], errors: list[RowError], skip_groups: frozenset[str]
+) -> list[RowError]:
+    """Drop re-validation errors for already-issued groups (a resume). Batch-level
+    (row 0) errors and errors on the remaining not-yet-issued groups are kept. If
+    every group is already issued, all errors drop — nothing is left to generate."""
+    row_group = {r.row_number: r.cells.get("challan_group", "").strip() for r in rows}
+    remaining = {g for g in row_group.values() if g} - skip_groups
+    if not remaining:
+        return []
+    return [e for e in errors
+            if e.row_number == 0 or row_group.get(e.row_number, "") in remaining]
+
+
+def _issued_group_keys(db: Session, batch: ChallanBatch) -> frozenset[str]:
+    """The `Challan Group` labels with a genuinely ISSUED challan for this batch.
+
+    VOID challans are EXCLUDED: a voided group's allocation is also void, so a retry
+    re-mints a number and re-issues it — that group must therefore be RE-VALIDATED,
+    never skipped as 'done' (else a voided challan could be re-issued bypassing its
+    HSN/project validation)."""
+    return frozenset(
+        db.execute(
+            select(Challan.group_key).where(
+                Challan.batch_id == batch.id,
+                Challan.status == ChallanStatus.ISSUED.value,
+            )
+        ).scalars()
+    ) - {""}
+
+
 def _build_challans(
     rows: list[RawRow], hsns: dict[str, HsnCode | None]
 ) -> list[ParsedChallan]:
@@ -486,25 +528,35 @@ def _generate_inner(
     `reservations` list so the wrapper can void orphans if an early phase throws."""
     storage = get_storage()
     rows, structural = parsing.parse_workbook(_source_bytes(db, batch, storage))
-    result = ValidationResult(errors=structural) if structural else validate(db, rows)
+    # RESUME reconcile: on a retry, re-validation ignores errors for groups whose
+    # challans are already issued (done + immutable) — so a master-data change to a
+    # completed portion of the batch can't wedge finishing the rest. A change to a
+    # still-remaining group is kept and blocks (correctly). A structural parse error
+    # is never group-scoped, so it still blocks.
+    skip_groups = _issued_group_keys(db, batch)
+    result = (ValidationResult(errors=structural) if structural
+              else validate(db, rows, skip_error_groups=skip_groups))
     if not result.ok:
         report = _store(db, storage, _issue_report_bytes(result.issues),
                         f"batch-{batch.id}-errors.csv", "challan-error-report",
                         actor_uid, "text/csv")
         batch.error_report_file_id = report.id
-        # If this is a RETRY and some challans were already issued in a prior run,
-        # a now-failing re-validation (e.g. the project was set ON_HOLD, or an HSN
-        # deactivated, between runs) must NOT bury those valid statutory documents
-        # by zeroing the counts as FAILED_VALIDATION. Mark FAILED (retryable) with an
-        # honest message and preserve the issued count instead.
+        # A RETRY that still fails on a REMAINING (not-yet-issued) group must NOT bury
+        # the already-issued statutory documents by zeroing counts as FAILED_VALIDATION.
+        # Mark FAILED (retryable), preserve the issued count, and name the blocked rows.
         already_issued = db.execute(
-            select(func.count()).select_from(Challan).where(Challan.batch_id == batch.id)
+            select(func.count()).select_from(Challan).where(
+                Challan.batch_id == batch.id,
+                Challan.status == ChallanStatus.ISSUED.value,
+            )
         ).scalar() or 0
         if already_issued:
+            blocked = sorted({e.row_number for e in result.errors if e.row_number})
+            where = f" (rows {blocked})" if blocked else ""
             batch.status = BatchStatus.FAILED.value
             batch.message = (
-                f"re-validation failed after {already_issued} challan(s) were already "
-                "issued; master data may have changed — resolve it and retry")
+                f"{already_issued} challan(s) already issued; the remaining challans "
+                f"still fail validation{where} — resolve the master data and retry")
             _audit(db, "challan.batch_failed", actor_uid, batch.id,
                    {"already_issued": already_issued, "errors": len(result.errors)})
         else:
@@ -667,6 +719,7 @@ def _persist_challan(
         number_int=alloc.number,
         challan_date=pc.challan_date,
         project_code=project.code,
+        group_key=pc.group_key,
         consignor_name=consignor.name,
         consignor_gstin=consignor.gstin,
         consignor_state=consignor.state,
