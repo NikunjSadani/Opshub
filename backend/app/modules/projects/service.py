@@ -183,6 +183,25 @@ def create_project(
     raise ProjectIdContention("could not allocate a project id — please retry")
 
 
+def resolve_active_project(db: Session, code: str) -> Project | None:
+    """Return the ACTIVE project whose human id matches `code`, else None.
+
+    Used by the challan generator to enforce "Project ID must pre-exist + be
+    Active". `code` is normalized (strip + upper) to match stored `<CODE>-<seq>`.
+    A missing project, or one that is ON_HOLD/CLOSED, resolves to None so the
+    caller can raise a blocking validation error.
+    """
+    normalized = code.strip().upper()
+    if not normalized:
+        return None
+    return db.execute(
+        select(Project).where(
+            Project.code == normalized,
+            Project.status == ProjectStatus.ACTIVE.value,
+        )
+    ).scalar_one_or_none()
+
+
 def set_status(
     db: Session, *, project: Project, status: str, actor_uid: str | None = None
 ) -> Project:

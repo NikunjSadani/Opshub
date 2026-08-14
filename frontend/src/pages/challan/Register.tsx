@@ -181,6 +181,7 @@ export function Register() {
               <Tr>
                 <Th>Number</Th>
                 <Th>Date</Th>
+                <Th>Project ID</Th>
                 <Th>Consignee</Th>
                 <Th>Ship-to state</Th>
                 <Th>E-way</Th>
@@ -195,8 +196,13 @@ export function Register() {
                   <Td className="font-medium text-slate-900">{c.number}</Td>
                   <Td className="whitespace-nowrap">{formatDate(c.challan_date)}</Td>
                   <Td>
-                    <span className="text-slate-900">{c.consignee_brand}</span>
-                    <span className="text-slate-400"> — </span>
+                    {c.project_code ? (
+                      <span className="font-medium text-slate-900">{c.project_code}</span>
+                    ) : (
+                      <span className="text-slate-400">—</span>
+                    )}
+                  </Td>
+                  <Td>
                     <span className="text-slate-600">{c.consignee_name}</span>
                   </Td>
                   <Td>{c.ship_to_state}</Td>

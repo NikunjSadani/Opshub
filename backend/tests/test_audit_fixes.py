@@ -23,17 +23,19 @@ from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
 from app.db import Base, get_db
-from app.modules.challan import parsing, service
+from app.modules.challan import parsing, schema, service
 from app.modules.challan.models import BatchStatus, ChallanBatch
 from app.modules.challan.routes import router as challan_router
-from app.modules.masterdata.models import Consignee, Consignor, HsnCode
+from app.modules.masterdata.models import Consignor, HsnCode
 from app.modules.numbering import service as numbering
 from app.modules.numbering.models import NumberingAllocation
 from app.modules.numbering.routes import router as numbering_router
+from app.modules.projects import service as projects_service
 from app.platform.auth import current_user
 from app.platform.models import Role, Setting, User, UserModuleAccess
 
 GSTIN = "27AAAAA0000A1Z5"
+CONSIGNEE_GSTIN = "27AAPFU0939F1ZV"  # valid checksum, Maharashtra — the upload path
 ADMIN = User(firebase_uid="adm", email="a@x.com", name="A", role=Role.ADMIN, active=True)
 MIS = User(firebase_uid="mis", email="m@x.com", name="M", role=Role.MIS, active=True,
            module_access=[UserModuleAccess(module_key="document_automation")])
@@ -71,11 +73,12 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     TestSession = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
     seed = TestSession()
     seed.add(Consignor(name="Gifsy Depot", gstin=GSTIN, state="Maharashtra", active=True))
-    seed.add(Consignee(brand="Deoleo", state="Maharashtra", name="Deoleo MH", gstin=GSTIN,
-                       active=True))
     seed.add(HsnCode(hsn="1509", gst_rate=Decimal("5"), active=True))
     seed.add(Setting(key="eway_threshold", value={"amount": 1000}, updated_by="seed"))
     numbering.seed_series(seed, "L", fy="26-27", last_number=0)
+    seed.flush()
+    _client = projects_service.create_client(seed, name="Britannia", code="BRI", actor_uid="seed")
+    projects_service.create_project(seed, client_id=_client.id, name="Rewards", actor_uid="seed")
     seed.commit()
     seed.close()
 
@@ -100,21 +103,28 @@ def _as(client: TestClient, user: User) -> None:
     client.app.dependency_overrides[current_user] = lambda: user
 
 
-def _xlsx(rows: list[list[str]]) -> bytes:
+def _xlsx(rows: list[dict[str, str]]) -> bytes:
     wb = Workbook()
     ws = wb.active
-    ws.append(list(service.parsing.CHALLAN_COLUMNS))
+    ws.append([schema.COLUMN_HEADERS[k] for k in schema.CHALLAN_COLUMNS])
     for r in rows:
-        ws.append(r)
+        ws.append([r.get(k, "") for k in schema.CHALLAN_COLUMNS])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def _row(group: str) -> list[str]:
-    # Column order matches schema.CHALLAN_COLUMNS; amount is tax-inclusive (100x1x1.05).
-    return [group, "Deoleo", "Maharashtra", "Store A", "Addr A", "", "", "",
-            "15-05-2026", "Item", "1509", "1", "100.00", "105.00", "5", "", ""]
+def _row(group: str) -> dict[str, str]:
+    # amount is tax-inclusive (100x1x1.05). Consignee typed inline + resolved by GSTIN.
+    return {
+        "challan_group": group, "project_id": "BRI-001",
+        "ship_to_name": "Store A", "ship_to_address_line1": "Addr A",
+        "ship_to_state": "Maharashtra", "ship_to_pincode": "400001",
+        "consignee_name": "Deoleo MH", "consignee_address_line1": "Mumbai HQ",
+        "consignee_state": "Maharashtra", "consignee_gstin": CONSIGNEE_GSTIN,
+        "challan_date": "15-05-2026", "description": "Item", "hsn": "1509",
+        "quantity": "1", "rate": "100.00", "amount": "105.00", "gst_rate": "5",
+    }
 
 
 # --------------------------------------------------------- MED-3: date overflow
@@ -127,9 +137,10 @@ def test_parse_date_rejects_overflow_serial() -> None:
 
 def test_structural_date_error_instead_of_raise() -> None:
     row = parsing.RawRow(row_number=2, cells={
-        "group": "G1", "brand": "Deoleo", "ship_to_state": "MH", "ship_to_name": "S",
-        "ship_to_address": "A", "challan_date": "9999999", "description": "Item",
-        "hsn": "1509", "quantity": "1",
+        "challan_group": "G1", "project_id": "BRI-001", "ship_to_name": "S",
+        "ship_to_address_line1": "A", "ship_to_state": "MH", "consignee_name": "C",
+        "consignee_gstin": CONSIGNEE_GSTIN, "challan_date": "9999999",
+        "description": "Item", "hsn": "1509", "quantity": "1",
     })
     errors = parsing.structural_row_errors([row])  # must NOT raise
     assert any(e.column == "challan_date" for e in errors)
@@ -248,3 +259,37 @@ def test_upload_over_cap_rejected(client: TestClient, monkeypatch: pytest.Monkey
         files={"file": ("in.xlsx", big, "application/vnd.ms-excel")},
     )
     assert r.status_code == 413
+
+
+# ------------------------------------------ inc15: money-cell overflow (HIGH)
+
+def test_parse_paise_rejects_overflow_value() -> None:
+    # A finite but absurdly-large money cell overflows the Decimal context on
+    # quantize; it must return None (-> a clean row error) not raise, so the
+    # synchronous upload can't 500 on a 4-character cell.
+    for junk in ("1E30", "111111111111111111111111111", "123456789012345678901234567.99"):
+        assert parsing.parse_paise(junk) is None
+
+
+def _min_cells(**over: str) -> dict[str, str]:
+    base = {
+        "challan_group": "G1", "project_id": "BRI-001", "ship_to_name": "S",
+        "ship_to_address_line1": "A", "ship_to_state": "MH", "consignee_name": "C",
+        "consignee_gstin": CONSIGNEE_GSTIN, "challan_date": "15-05-2026",
+        "description": "Item", "hsn": "1509", "quantity": "1",
+    }
+    base.update(over)
+    return base
+
+
+def test_structural_amount_overflow_is_row_error_not_crash() -> None:
+    row = parsing.RawRow(row_number=2, cells=_min_cells(amount="1E30"))
+    errors = parsing.structural_row_errors([row])  # must NOT raise
+    assert any(e.column == "amount" for e in errors)
+
+
+def test_structural_amount_too_large_is_row_error() -> None:
+    # 2e13 rupees -> 2e15 paise, above the sanity ceiling -> a clean row error.
+    row = parsing.RawRow(row_number=2, cells=_min_cells(amount="20000000000000"))
+    errors = parsing.structural_row_errors([row])
+    assert any(e.column == "amount" and "too large" in e.message for e in errors)

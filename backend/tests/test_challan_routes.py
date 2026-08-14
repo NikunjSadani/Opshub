@@ -19,16 +19,18 @@ from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
 from app.db import Base, get_db
-from app.modules.challan import service
+from app.modules.challan import schema
 from app.modules.challan.models import Challan, ChallanStatus
 from app.modules.challan.routes import router
-from app.modules.masterdata.models import Consignee, Consignor, HsnCode
+from app.modules.masterdata.models import Consignor, HsnCode
 from app.modules.numbering import service as numbering
 from app.modules.numbering.models import NumberingAllocation
+from app.modules.projects import service as projects_service
 from app.platform.auth import current_user
 from app.platform.models import Role, Setting, User, UserModuleAccess
 
-GSTIN = "27AAAAA0000A1Z5"
+GSTIN = "27AAAAA0000A1Z5"                 # consignor / direct-insert snapshots (not checksummed)
+CONSIGNEE_GSTIN = "27AAPFU0939F1ZV"       # valid checksum, Maharashtra — the upload path
 ADMIN = User(firebase_uid="adm", email="a@x.com", name="A", role=Role.ADMIN, active=True)
 MIS = User(firebase_uid="mis", email="m@x.com", name="M", role=Role.MIS, active=True,
            module_access=[UserModuleAccess(module_key="document_automation")])
@@ -44,11 +46,12 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     TestSession = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
     seed = TestSession()
     seed.add(Consignor(name="Gifsy Depot", gstin=GSTIN, state="Maharashtra", active=True))
-    seed.add(Consignee(brand="Deoleo", state="Maharashtra", name="Deoleo MH", gstin=GSTIN,
-                       active=True))
     seed.add(HsnCode(hsn="1509", gst_rate=Decimal("5"), active=True))
     seed.add(Setting(key="eway_threshold", value={"amount": 1000}, updated_by="seed"))
     numbering.seed_series(seed, "L", fy="26-27", last_number=0)
+    seed.flush()
+    _client = projects_service.create_client(seed, name="Britannia", code="BRI", actor_uid="seed")
+    projects_service.create_project(seed, client_id=_client.id, name="Rewards", actor_uid="seed")
     seed.commit()
     seed.close()
 
@@ -72,21 +75,30 @@ def _as(client: TestClient, user: User) -> None:
     client.app.dependency_overrides[current_user] = lambda: user
 
 
-def _xlsx(rows: list[list[str]]) -> bytes:
+def _xlsx(rows: list[dict[str, str]]) -> bytes:
     wb = Workbook()
     ws = wb.active
-    ws.append(list(service.parsing.CHALLAN_COLUMNS))
+    ws.append([schema.COLUMN_HEADERS[k] for k in schema.CHALLAN_COLUMNS])
     for r in rows:
-        ws.append(r)
+        ws.append([r.get(k, "") for k in schema.CHALLAN_COLUMNS])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def _row(group: str, hsn: str = "1509", amount: str = "105.00") -> list[str]:
-    # Column order must match schema.CHALLAN_COLUMNS; amount is tax-inclusive (100x1x1.05).
-    return [group, "Deoleo", "Maharashtra", "Store A", "Addr A", "", "", "",
-            "15-05-2026", "Item", hsn, "1", "100.00", amount, "5", "", ""]
+def _row(group: str, hsn: str = "1509", amount: str = "105.00") -> dict[str, str]:
+    # amount is tax-inclusive (100x1x1.05). Consignee typed inline + resolved by GSTIN.
+    return {
+        "challan_group": group, "project_id": "BRI-001",
+        "ship_to_enterprise": "Store A Ent", "ship_to_name": "Store A",
+        "ship_to_address_line1": "Addr A", "ship_to_state": "Maharashtra",
+        "ship_to_pincode": "400001", "ship_to_phone": "9900000000",
+        "consignee_name": "Deoleo MH", "consignee_address_line1": "Mumbai HQ",
+        "consignee_pincode": "400001", "consignee_state": "Maharashtra",
+        "consignee_phone": "9800000000", "consignee_gstin": CONSIGNEE_GSTIN,
+        "challan_date": "15-05-2026", "description": "Item", "hsn": hsn,
+        "quantity": "1", "rate": "100.00", "amount": amount, "gst_rate": "5",
+    }
 
 
 def _upload(client: TestClient, data: bytes) -> dict[str, object]:

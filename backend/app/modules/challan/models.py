@@ -85,6 +85,9 @@ class Challan(Base):
     fy: Mapped[str] = mapped_column(String(7), index=True)
     number_int: Mapped[int] = mapped_column(Integer)
     challan_date: Mapped[date] = mapped_column(Date)
+    # The referenced project's human id (e.g. "BRI-001"), validated ACTIVE at
+    # generation and snapshotted here so the register/print never re-resolve it.
+    project_code: Mapped[str] = mapped_column(String(24), default="", index=True)
 
     # consignor snapshot (the single fixed dispatching entity)
     consignor_name: Mapped[str] = mapped_column(String(200))
@@ -93,21 +96,28 @@ class Challan(Base):
     consignor_address: Mapped[str] = mapped_column(String(600), default="")
     consignor_phone: Mapped[str] = mapped_column(String(40), default="")
 
-    # consignee snapshot (resolved from Brand -> ship-to State registry)
-    consignee_brand: Mapped[str] = mapped_column(String(120))
+    # consignee snapshot (resolved from the GSTIN-keyed golden record, inc 15;
+    # `consignee_brand` is retained NULLABLE for pre-inc-15 issued rows and is no
+    # longer written — the inline GSTIN identifies the party now).
+    consignee_brand: Mapped[str | None] = mapped_column(String(120), default="")
     consignee_name: Mapped[str] = mapped_column(String(200))
     consignee_gstin: Mapped[str] = mapped_column(String(15))
     consignee_state: Mapped[str] = mapped_column(String(60))
-    consignee_address: Mapped[str] = mapped_column(String(600), default="")
+    consignee_address: Mapped[str] = mapped_column(String(600), default="")  # joined
     consignee_phone: Mapped[str] = mapped_column(String(40), default="")
 
-    # ship-to ("Detail of Shipment to" — 5 fields from the upload)
+    # ship-to ("Detail of Shipment to"). Captured SPLIT (line1/line2/city/pincode)
+    # and also stored joined in `ship_to_address` for faithful printing.
     ship_to_name: Mapped[str] = mapped_column(String(200))
-    ship_to_address: Mapped[str] = mapped_column(String(600))
+    ship_to_address: Mapped[str] = mapped_column(String(600))  # joined block (print)
+    ship_to_address_line1: Mapped[str] = mapped_column(String(300), default="")
+    ship_to_address_line2: Mapped[str] = mapped_column(String(300), default="")
+    ship_to_city: Mapped[str] = mapped_column(String(120), default="")
+    ship_to_pincode: Mapped[str] = mapped_column(String(10), default="")
     ship_to_state: Mapped[str] = mapped_column(String(60))
     ship_to_enterprise: Mapped[str] = mapped_column(String(200), default="")
-    ship_to_number: Mapped[str] = mapped_column(String(40), default="")
-    ship_to_contact: Mapped[str] = mapped_column(String(200), default="")
+    ship_to_number: Mapped[str] = mapped_column(String(40), default="")  # phone
+    ship_to_contact: Mapped[str] = mapped_column(String(200), default="")  # legacy, unused
 
     po_number: Mapped[str] = mapped_column(String(60), default="")
     invoice_number: Mapped[str] = mapped_column(String(60), default="")

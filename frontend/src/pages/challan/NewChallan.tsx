@@ -178,7 +178,9 @@ export function NewChallan() {
         : generating
           ? 'Generating challans…'
           : uploaded?.status === 'VALIDATED'
-            ? `Validated: ${uploaded.challan_count} challans, ${uploaded.line_count} lines.`
+            ? uploaded.error_report_file_id != null
+              ? `Validated with warnings: ${uploaded.message ?? 'review the warnings report'}. These are non-blocking — you can still generate.`
+              : `Validated: ${uploaded.challan_count} challans, ${uploaded.line_count} lines.`
             : uploaded?.status === 'FAILED_VALIDATION'
               ? 'Validation failed. Download the error report for details.'
               : '';
@@ -240,6 +242,9 @@ export function NewChallan() {
             <>
               <div className="mb-3 flex items-center gap-2">
                 <Badge tone="green">Validated</Badge>
+                {uploaded.error_report_file_id != null && (
+                  <Badge tone="amber">{uploaded.message ?? 'Review warnings'}</Badge>
+                )}
                 <span className="text-sm text-slate-500">Batch #{uploaded.id}</span>
               </div>
               <dl className="grid grid-cols-2 gap-3 text-sm">
@@ -252,6 +257,33 @@ export function NewChallan() {
                   <dd className="text-lg font-semibold text-slate-900">{uploaded.line_count}</dd>
                 </div>
               </dl>
+
+              {uploaded.error_report_file_id != null && (
+                <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3">
+                  <p className="mb-1 text-sm font-semibold text-amber-800">
+                    Review before generating
+                  </p>
+                  <p className="text-sm text-amber-800">
+                    Non-blocking, but worth a look: where a consignee GSTIN already exists, the
+                    stored name/address is printed on the challan — not what you typed. Warnings
+                    also flag challans that may be duplicates. Download the report to see each one.
+                  </p>
+                  <div className="mt-3">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() =>
+                        onDownload(
+                          uploaded.error_report_file_id,
+                          `batch-${uploaded.id}-warnings.csv`,
+                        )
+                      }
+                    >
+                      Download warnings report
+                    </Button>
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -265,8 +297,8 @@ export function NewChallan() {
                 {uploaded.message ?? 'The workbook has validation errors. Fix them and re-upload.'}
               </p>
               <p className="mt-1 text-xs text-slate-400">
-                The report lists every problem as Row, Column, Problem — fix those rows and upload
-                again.
+                The report lists every problem as Row, Severity, Column, Problem — fix those rows
+                and upload again.
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <Button
@@ -321,6 +353,7 @@ export function NewChallan() {
               <div className="mt-4 flex flex-wrap gap-2">
                 <Button onClick={onGenerate} disabled={!seriesValid} loading={generate.isPending}>
                   Generate {uploaded!.challan_count} challan{uploaded!.challan_count === 1 ? '' : 's'}
+                  {uploaded!.error_report_file_id != null ? ' (warnings)' : ''}
                 </Button>
                 <Button variant="ghost" onClick={reset} disabled={generate.isPending}>
                   Cancel

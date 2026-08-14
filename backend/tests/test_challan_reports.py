@@ -71,16 +71,16 @@ def _add(
     total_paise: int | None = None,
     eway: bool = False,
     challan_date: date = date(2026, 5, 15),
-    consignee_brand: str = "Deoleo",
+    project_code: str = "BRI-001",
     consignee_name: str = "Deoleo MH",
     ship_to_state: str = "MH",
 ) -> int:
     n = next(_seq)
     session.add(Challan(
         batch_id=1, allocation_id=n, number=f"GIF/DC/{fy}/{series}/{n:06d}",
-        series=series, fy=fy, number_int=n, challan_date=challan_date,
+        series=series, fy=fy, number_int=n, challan_date=challan_date, project_code=project_code,
         consignor_name="C", consignor_gstin=GSTIN, consignor_state="MH",
-        consignee_brand=consignee_brand, consignee_name=consignee_name, consignee_gstin=GSTIN,
+        consignee_name=consignee_name, consignee_gstin=GSTIN,
         consignee_state="MH", ship_to_name="S", ship_to_address="A", ship_to_state=ship_to_state,
         eway_required=eway, total_paise=total_paise, status=status,
     ))
@@ -134,7 +134,7 @@ def test_csv_export_shape_and_filters(client: TestClient) -> None:
 
     lines = r.text.strip().split("\n")
     assert lines[0] == (
-        "Number,Date,Consignee Brand,Consignee Name,Ship-to State,E-way,Total (INR),Status")
+        "Number,Date,Project ID,Consignee Name,Ship-to State,E-way,Total (INR),Status")
     assert len(lines) == 3  # header + one row per challan
 
     # the series filter narrows the CSV just like the register
@@ -158,8 +158,8 @@ def test_csv_money_formatting(client: TestClient) -> None:
 
 def test_csv_injection_guard(client: TestClient) -> None:
     db = client.app.state.TestSession()
-    # a consignee brand + ship-to state that start with '=' must be neutralized
-    _add(db, total_paise=10000, consignee_brand="=cmd()", ship_to_state="=A1")
+    # a project id + ship-to state that start with '=' must be neutralized
+    _add(db, total_paise=10000, project_code="=cmd()", ship_to_state="=A1")
     db.commit()
     db.close()
 

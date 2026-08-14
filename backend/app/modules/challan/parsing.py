@@ -7,8 +7,16 @@ complete English report before the service ever reserves a number:
   parse_workbook(bytes)          -> (list[RawRow], list[RowError])  # shape/headers
   structural_row_errors(rows)    -> list[RowError]                  # per-row + group
 
-The semantic layer (consignor/consignee/HSN lookups, building `ParsedChallan`s)
-lives in the service — this module deliberately stops at structural truth.
+The 26-column template captures a structured ship-to block (line1/line2/city/
+pincode/state), an INLINE consignee (name / address / GSTIN — the golden-record
+key), a referenced `project_id`, and a line item, with rows sharing an explicit
+`challan_group` folded into one challan. Uploaded headers are matched via
+`schema.header_to_key`, so the friendly headers ("Project ID", "Consignee
+GSTIN", "GST No", "City", ...), the raw keys, and the alias set all parse.
+
+The semantic layer (consignor lookup, GSTIN checksum + golden-record resolution,
+HSN lookups, building `ParsedChallan`s) lives in the service — this module
+deliberately stops at structural truth (no GSTIN checksum here).
 
 Money is integer PAISE via `Decimal`, never float: `parse_paise` multiplies rupees
 by 100 and rounds HALF-UP to the paise. `rate` may legitimately be free text
@@ -24,11 +32,11 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from openpyxl import load_workbook
 
 from app.modules.challan.schema import (
-    CHALLAN_COLUMNS,
     GROUP_CONSISTENT_FIELDS,
     REQUIRED_COLUMNS,
     RawRow,
     RowError,
+    header_to_key,
 )
 
 # Excel's day-zero for the 1900 date system, offset by its fictional 1900-02-29.
@@ -60,12 +68,18 @@ def _to_decimal(text: str) -> Decimal | None:
 def parse_paise(text: str) -> int | None:
     """Rupees string ("1,234.50") -> integer paise (123450), or None if not numeric.
 
-    Half-up rounding to the paise keeps money exact and float-free.
+    Half-up rounding to the paise keeps money exact and float-free. A finite but
+    absurdly-large value (e.g. "1E30") overflows the Decimal context on quantize,
+    raising InvalidOperation; we catch it and return None so a junk cell becomes a
+    clean row error instead of crashing the synchronous upload with a 500.
     """
     rupees = _to_decimal(text)
     if rupees is None:
         return None
-    paise = (rupees * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    try:
+        paise = (rupees * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
     return int(paise)
 
 
@@ -135,12 +149,14 @@ def _to_str(value: object) -> str:
 def parse_workbook(data: bytes) -> tuple[list[RawRow], list[RowError]]:
     """Load the first worksheet from `data` and read its rows against the template.
 
-    Row 1 is the header; headers match `CHALLAN_COLUMNS` case-insensitively and
-    whitespace-trimmed. Returns ([], [errors]) — never raises — if the file can't
-    be opened or any `REQUIRED_COLUMNS` header is missing (one error per missing
-    key, all at row 1). Otherwise returns (rows, []): each `RawRow` carries the
-    real 1-based sheet row number (first data row = 2), every mapped cell coerced
-    to a trimmed string; fully-blank rows and unknown/extra columns are dropped.
+    Row 1 is the header; each header cell is mapped to its canonical column key
+    via `schema.header_to_key`, which accepts the friendly display header, the
+    raw key, and the alias set (all case-insensitive + whitespace-collapsed).
+    Returns ([], [errors]) — never raises — if the file can't be opened or any
+    `REQUIRED_COLUMNS` header is missing (one error per missing key, all at row
+    1). Otherwise returns (rows, []): each `RawRow` carries the real 1-based
+    sheet row number (first data row = 2), every mapped cell coerced to a
+    trimmed string; fully-blank rows and unknown/extra columns are dropped.
     """
     try:
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
@@ -155,8 +171,8 @@ def parse_workbook(data: bytes) -> tuple[list[RawRow], list[RowError]]:
         for idx, raw in enumerate(header or ()):
             if raw is None:
                 continue
-            key = str(raw).strip().lower()
-            if key in CHALLAN_COLUMNS and key not in col_index:
+            key = header_to_key(str(raw))
+            if key is not None and key not in col_index:
                 col_index[key] = idx
 
         missing = [c for c in REQUIRED_COLUMNS if c not in col_index]
@@ -204,11 +220,18 @@ def _required_errors(row: RawRow, errors: list[RowError]) -> None:
             errors.append(RowError(row.row_number, col, f"{col} is required"))
 
 
+# A generous sanity ceiling on a single money cell (paise). Well within BigInteger
+# even summed across a batch, but rejects an absurd/typo value (e.g. "1E30") at
+# validation with a clear message instead of a deferred insert overflow at generate.
+_MAX_MONEY_PAISE = 10**15  # = Rs 10,000,000,000,000
+
+
 def _numeric_errors(row: RawRow, errors: list[RowError]) -> None:
-    """Validate quantity (> 0), amount (>= 0), and gst_rate (0..100) when present.
+    """Validate quantity (> 0), amount (>= 0), gst_rate (0..100), and PIN codes.
 
     Emptiness is left to `_required_errors`, so these fire only on a present-but-
-    malformed value (no duplicate error for a blank required cell).
+    malformed value (no duplicate error for a blank required cell). Pincodes are
+    OPTIONAL, so they are checked only when present (must be exactly 6 digits).
     """
     c = row.cells
     if c.get("quantity", "").strip():
@@ -221,16 +244,27 @@ def _numeric_errors(row: RawRow, errors: list[RowError]) -> None:
         if amount is None or amount < 0:
             errors.append(RowError(row.row_number, "amount",
                                    "amount must be a number >= 0"))
+        elif amount > _MAX_MONEY_PAISE:
+            errors.append(RowError(row.row_number, "amount", "amount is too large"))
     rate = c.get("rate", "").strip()
-    if rate:  # rate may be free text; only a PARSED-numeric-and-negative rate is wrong
+    if rate:  # rate may be free text; only a PARSED-numeric-and-out-of-range rate is wrong
         rate_paise = parse_paise(rate)
         if rate_paise is not None and rate_paise < 0:
             errors.append(RowError(row.row_number, "rate", "rate must not be negative"))
+        elif rate_paise is not None and rate_paise > _MAX_MONEY_PAISE:
+            errors.append(RowError(row.row_number, "rate", "rate is too large"))
     if c.get("gst_rate", "").strip():
         gst = parse_qty(c["gst_rate"])
         if gst is None or gst < 0 or gst > 100:
             errors.append(RowError(row.row_number, "gst_rate",
                                    "gst_rate must be a number between 0 and 100"))
+    for col in ("ship_to_pincode", "consignee_pincode"):
+        pin = c.get(col, "").replace(" ", "")
+        # isascii() guards against non-ASCII digit code points (e.g. Devanagari
+        # digits) that isdigit() alone would accept for a statutory PIN.
+        if pin and not (len(pin) == 6 and pin.isascii() and pin.isdigit()):
+            errors.append(RowError(row.row_number, col,
+                                   f"{col} must be a 6-digit PIN code"))
 
 
 def _date_errors(row: RawRow, errors: list[RowError]) -> None:
@@ -243,11 +277,11 @@ def _date_errors(row: RawRow, errors: list[RowError]) -> None:
 def _group_consistency_errors(rows: list[RawRow], errors: list[RowError]) -> None:
     """Flag every row whose GROUP_CONSISTENT_FIELDS diverge from its group's first row.
 
-    Rows are grouped by `group`; a blank group is left to `_required_errors`.
+    Rows are grouped by `challan_group`; a blank group is left to `_required_errors`.
     """
     groups: dict[str, list[RawRow]] = {}
     for row in rows:
-        key = row.cells.get("group", "").strip()
+        key = row.cells.get("challan_group", "").strip()
         if key:
             groups.setdefault(key, []).append(row)
 

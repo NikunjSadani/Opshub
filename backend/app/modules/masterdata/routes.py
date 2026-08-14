@@ -636,17 +636,21 @@ def update_consignee_party(
     row = db.get(ConsigneeParty, row_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
-    update_party(
-        db,
-        party=row,
-        name=body.name,
-        address_line1=body.address_line1,
-        address_line2=body.address_line2,
-        pincode=body.pincode,
-        state=body.state,
-        phone=body.phone,
-        actor_uid=user.firebase_uid,
-    )
+    try:
+        update_party(
+            db,
+            party=row,
+            name=body.name,
+            address_line1=body.address_line1,
+            address_line2=body.address_line2,
+            pincode=body.pincode,
+            state=body.state,
+            phone=body.phone,
+            actor_uid=user.firebase_uid,
+        )
+    except ConsigneeMasterError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     db.commit()
     db.refresh(row)
     return row

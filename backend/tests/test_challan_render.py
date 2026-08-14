@@ -23,14 +23,15 @@ from app.modules.challan.schema import (
 def _view(show_amount: bool = True) -> ChallanView:
     return ChallanView(
         number="GIF/DC/26-27/L/000189",
+        project_id="BRI-001",
         invoice_number="INV-2026-778",
         challan_date="28th July 2026",
         consignor=ConsignorView("Tech Gifsy Solutions Limited", "Howrah warehouse",
                                 "19AAACT9811F1Z9", "+91 6289864191"),
         consignee=ConsigneeView("Britannia Industries Limited", "Hajipur, Bihar",
                                 "10AABCB2066P2ZT", "Bihar (10)", "+91 6289864191"),
-        ship_to=ShipToView("Nihit Agarwal", "Harsiddhi Main Market",
-                           "M/S SHUBH LAXMI TRADERS", "9031281906", "Nihit"),
+        ship_to=ShipToView("Nihit Agarwal", "Harsiddhi Main Market, Ujjain",
+                           "M/S SHUBH LAXMI TRADERS", "9031281906"),
         lines=[
             LineView(1, "Titan Men's Watch", "91022900", "3", "5,500", "19,470"),
             LineView(2, "Titan Couple Watch", "91022900", "2", "9,500", "22,420"),
@@ -61,14 +62,29 @@ def test_invoice_number_prints_above_challan_number() -> None:
     assert "Invoice No.:" not in build_challan_html(view)
 
 
+def test_project_id_prints_under_challan_number() -> None:
+    html = build_challan_html(_view())
+    assert "Project ID: BRI-001" in html
+    # positioned just below the delivery challan number
+    assert html.index("Delivery Challan No.:") < html.index("Project ID:")
+    # omitted entirely (label and all) when blank
+    view = _view()
+    view.project_id = ""
+    assert "Project ID:" not in build_challan_html(view)
+
+
 def test_html_escapes_untrusted_values() -> None:
     view = _view()
     view.lines[0].description = "<script>alert(1)</script>"
     view.ship_to.name = "</td><td>x"
+    view.consignee.address = "<b>inject</b>"
+    view.project_id = "<img src=x onerror=alert(1)>"
     html = build_challan_html(view)
     assert "&lt;script&gt;" in html
     assert "<script>alert(1)</script>" not in html
     assert "</td><td>x" not in html
+    assert "<b>inject</b>" not in html
+    assert "<img src=x" not in html
 
 
 def test_value_free_hides_amounts() -> None:

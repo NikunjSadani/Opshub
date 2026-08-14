@@ -95,6 +95,7 @@ def resolve_or_create(
     phone: str = "",
     source: str = "UPLOAD",
     actor_uid: str | None = None,
+    dry_run: bool = False,
 ) -> ResolveResult:
     """Resolve a consignee party by GSTIN, auto-creating an unknown one.
 
@@ -105,7 +106,15 @@ def resolve_or_create(
       digits-only) for each non-empty incoming value that differs from stored, do
       NOT overwrite, return `created=False` + the deviations.
 
-    Raises `ConsigneeMasterError` if the GSTIN is not a well-formed key.
+    `dry_run=True` performs the SAME validation + deviation computation but WRITES
+    NOTHING (no insert, no audit): an unknown GSTIN returns a transient, unsaved
+    `ConsigneeParty` with `created=True`; a known GSTIN returns the stored record +
+    deviations. The upload validator uses this so a batch that ultimately FAILS
+    never leaves auto-created golden records behind — the real write happens only
+    at generation time.
+
+    Raises `ConsigneeMasterError` if the GSTIN is not a well-formed key, or (on the
+    create path) if a recognized incoming state disagrees with the GSTIN code.
     """
     gstin = normalize_gstin(gstin)
     if not valid_gstin(gstin):
@@ -140,6 +149,10 @@ def resolve_or_create(
             created_by=actor_uid,
             updated_by=actor_uid,
         )
+        if dry_run:
+            # Transient, never added to the session — returned only so the caller
+            # can see created=True. No insert, no audit, no flush.
+            return ResolveResult(party=party, created=True, deviations=[])
         try:
             with db.begin_nested():
                 db.add(party)
@@ -227,7 +240,14 @@ def apply_incoming(
     """Update the stored record from provided (non-None) values — used when a user
     or admin ACCEPTS a deviation. Only genuinely-changed fields are written, so a
     no-op edit neither bumps `updated_at` nor writes an audit row. Audited only on a
-    real change (`consignee_party.updated`)."""
+    real change (`consignee_party.updated`).
+
+    A provided `state` is held to the same GSTIN↔state consistency as create, so an
+    edit (or an accepted state-deviation) can never leave a self-contradictory
+    (GSTIN, state) pair to be snapshotted onto a statutory challan (e.g. GSTIN code
+    27/Maharashtra with state 'Gujarat')."""
+    if state is not None:
+        _require_state_match(party.gstin, collapse_ws(state))
     changed: dict[str, str] = {}
     for fname, incoming in (
         ("name", name),

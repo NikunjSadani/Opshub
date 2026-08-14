@@ -54,7 +54,8 @@ export interface ChallanOut {
   fy: string;
   /** ISO date string (backend `date`). */
   challan_date: string;
-  consignee_brand: string;
+  /** The referenced Project ID (backend `project_code`, e.g. "BRI-001"). */
+  project_code: string;
   consignee_name: string;
   ship_to_state: string;
   eway_required: boolean;

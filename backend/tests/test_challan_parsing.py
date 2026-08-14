@@ -1,8 +1,8 @@
 """Challan parsing + structural validation — exercised against real .xlsx bytes.
 
 Builds in-memory workbooks with openpyxl (never a fixture file) so the header
-matching, row-number arithmetic, blank-row skipping, numeric/date/group checks,
-and the money/date helpers are all under test end to end.
+matching, row-number arithmetic, blank-row skipping, numeric/date/pincode/group
+checks, and the money/date helpers are all under test end to end.
 """
 from __future__ import annotations
 
@@ -13,17 +13,30 @@ from decimal import Decimal
 from openpyxl import Workbook
 
 from app.modules.challan import parsing
-from app.modules.challan.schema import CHALLAN_COLUMNS
+from app.modules.challan.schema import CHALLAN_COLUMNS, COLUMN_HEADERS
+
+# A checksum-VALID consignee GSTIN (Maharashtra, state code 27). Structural
+# parsing does not verify the checksum, but realistic fixtures use a real one.
+_VALID_GSTIN = "27AAPFU0939F1ZV"
 
 _DEFAULTS: dict[str, object] = {
-    "group": "G1",
-    "brand": "Bertolli",
-    "ship_to_state": "Karnataka",
-    "ship_to_name": "Retail Mart",
-    "ship_to_address": "12 MG Road",
+    "challan_group": "G1",
+    "project_id": "BRI-001",
     "ship_to_enterprise": "Mart Enterprises",
-    "ship_to_number": "9000000000",
-    "ship_to_contact": "Ravi",
+    "ship_to_name": "Retail Mart",
+    "ship_to_address_line1": "12 MG Road",
+    "ship_to_address_line2": "Near Metro",
+    "ship_to_city": "Bengaluru",
+    "ship_to_state": "Karnataka",
+    "ship_to_pincode": "560001",
+    "ship_to_phone": "9000000000",
+    "consignee_name": "Umbrella Foods",
+    "consignee_address_line1": "5 Marine Drive",
+    "consignee_address_line2": "Nariman Point",
+    "consignee_pincode": "400021",
+    "consignee_state": "Maharashtra",
+    "consignee_phone": "9800000000",
+    "consignee_gstin": _VALID_GSTIN,
     "challan_date": "10-08-2026",
     "description": "Olive Oil 1L",
     "hsn": "1509",
@@ -40,6 +53,11 @@ def _row(**overrides: object) -> list[object]:
     """A valid data row (in CHALLAN_COLUMNS order) with per-cell overrides."""
     merged = {**_DEFAULTS, **overrides}
     return [merged[col] for col in CHALLAN_COLUMNS]
+
+
+def _friendly_headers() -> list[object]:
+    """The template's human-readable display headers, in column order."""
+    return [COLUMN_HEADERS[col] for col in CHALLAN_COLUMNS]
 
 
 def _xlsx(headers: list[object], data_rows: list[list[object]]) -> bytes:
@@ -64,8 +82,19 @@ def test_clean_two_line_one_group_parses() -> None:
     assert errors == []
     assert len(rows) == 2
     assert [r.row_number for r in rows] == [2, 3]  # first data row = sheet row 2
-    assert rows[0].cells["group"] == "G1"
+    assert rows[0].cells["challan_group"] == "G1"
     assert rows[1].cells["description"] == "Olive Oil 2L"
+    assert parsing.structural_row_errors(rows) == []
+
+
+def test_friendly_headers_parse() -> None:
+    """The downloaded template's friendly display headers map to canonical keys."""
+    data = _xlsx(_friendly_headers(), [_row()])
+    rows, errors = parsing.parse_workbook(data)
+    assert errors == []
+    assert len(rows) == 1
+    assert rows[0].cells["consignee_gstin"] == _VALID_GSTIN
+    assert rows[0].cells["project_id"] == "BRI-001"
     assert parsing.structural_row_errors(rows) == []
 
 
@@ -75,17 +104,29 @@ def test_headers_match_case_insensitively_and_trimmed() -> None:
     rows, errors = parsing.parse_workbook(data)
     assert errors == []
     assert len(rows) == 1
-    assert rows[0].cells["brand"] == "Bertolli"
+    assert rows[0].cells["consignee_name"] == "Umbrella Foods"
+
+
+def test_alias_headers_map_to_canonical_keys() -> None:
+    """A hand-adjusted sheet using "GST No" and "City" still parses correctly."""
+    headers = list(_friendly_headers())
+    headers[CHALLAN_COLUMNS.index("consignee_gstin")] = "GST No"
+    headers[CHALLAN_COLUMNS.index("ship_to_city")] = "City"
+    data = _xlsx(headers, [_row()])
+    rows, errors = parsing.parse_workbook(data)
+    assert errors == []
+    assert rows[0].cells["consignee_gstin"] == _VALID_GSTIN
+    assert rows[0].cells["ship_to_city"] == "Bengaluru"
 
 
 def test_missing_required_column_is_reported() -> None:
-    headers = [c for c in CHALLAN_COLUMNS if c != "brand"]
+    headers = [c for c in CHALLAN_COLUMNS if c != "consignee_gstin"]
     data = _xlsx(list(headers), [])
     rows, errors = parsing.parse_workbook(data)
     assert rows == []
     assert len(errors) == 1
     assert errors[0].row_number == 1
-    assert errors[0].column == "brand"
+    assert errors[0].column == "consignee_gstin"
 
 
 def test_unopenable_file_is_reported_not_raised() -> None:
@@ -156,6 +197,53 @@ def test_free_text_rate_still_allowed() -> None:
     assert problems == []
 
 
+def test_bad_ship_to_pincode_reported() -> None:
+    """A present ship-to pincode must be exactly 6 digits (5 digits / junk fail)."""
+    data = _xlsx(list(CHALLAN_COLUMNS), [
+        _row(ship_to_pincode="56001"),      # 5 digits
+        _row(ship_to_pincode="ABC123"),     # non-numeric
+    ])
+    problems = {
+        (e.row_number, e.column)
+        for e in parsing.structural_row_errors(parsing.parse_workbook(data)[0])
+    }
+    assert (2, "ship_to_pincode") in problems
+    assert (3, "ship_to_pincode") in problems
+
+
+def test_bad_consignee_pincode_reported() -> None:
+    """A present consignee pincode must be exactly 6 digits (5 digits / junk fail)."""
+    data = _xlsx(list(CHALLAN_COLUMNS), [
+        _row(consignee_pincode="40002"),    # 5 digits
+        _row(consignee_pincode="not-a-pin"),  # non-numeric
+    ])
+    problems = {
+        (e.row_number, e.column)
+        for e in parsing.structural_row_errors(parsing.parse_workbook(data)[0])
+    }
+    assert (2, "consignee_pincode") in problems
+    assert (3, "consignee_pincode") in problems
+
+
+def test_blank_pincode_is_allowed() -> None:
+    """Pincodes are optional — a blank one raises no pincode error."""
+    data = _xlsx(list(CHALLAN_COLUMNS), [_row(ship_to_pincode="", consignee_pincode="")])
+    problems = [
+        e for e in parsing.structural_row_errors(parsing.parse_workbook(data)[0])
+        if e.column in ("ship_to_pincode", "consignee_pincode")
+    ]
+    assert problems == []
+
+
+def test_bad_date_reported() -> None:
+    data = _xlsx(list(CHALLAN_COLUMNS), [_row(challan_date="not-a-date")])
+    problems = {
+        (e.row_number, e.column)
+        for e in parsing.structural_row_errors(parsing.parse_workbook(data)[0])
+    }
+    assert (2, "challan_date") in problems
+
+
 def test_missing_required_value_reported_per_row() -> None:
     data = _xlsx(list(CHALLAN_COLUMNS), [_row(ship_to_name="")])
     errors = parsing.structural_row_errors(parsing.parse_workbook(data)[0])
@@ -172,6 +260,18 @@ def test_group_inconsistent_ship_to_state_is_reported() -> None:
     offenders = [e for e in errors if e.column == "ship_to_state"]
     assert len(offenders) == 1
     assert offenders[0].row_number == 3  # the divergent row, not the first
+
+
+def test_distinct_groups_are_not_cross_checked() -> None:
+    """Rows in different `challan_group`s may legitimately differ."""
+    data = _xlsx(list(CHALLAN_COLUMNS), [
+        _row(challan_group="G1", ship_to_state="Karnataka"),
+        _row(challan_group="G2", ship_to_state="Kerala"),
+    ])
+    rows, _ = parsing.parse_workbook(data)
+    offenders = [e for e in parsing.structural_row_errors(rows)
+                 if e.column == "ship_to_state"]
+    assert offenders == []
 
 
 def test_errors_are_sorted_by_row_then_column() -> None:

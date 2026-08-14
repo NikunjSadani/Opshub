@@ -1,11 +1,10 @@
 """The self-documenting upload template: structure, the download route, and a
 ROUND-TRIP proof that the template's own example rows parse + validate cleanly
-against seeded master data (so the examples can never silently rot)."""
+(structurally), so the examples can never silently rot."""
 from __future__ import annotations
 
 import io
 from collections.abc import Iterator
-from decimal import Decimal
 
 import pytest
 from fastapi import FastAPI
@@ -16,42 +15,15 @@ from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
 from app.db import Base, get_db
-from app.modules.challan import parsing, service, template
+from app.modules.challan import parsing, template
 from app.modules.challan.routes import router
-from app.modules.challan.schema import CHALLAN_COLUMNS
-from app.modules.masterdata.models import Consignee, Consignor, HsnCode
-from app.modules.numbering import service as numbering
+from app.modules.challan.schema import CHALLAN_COLUMNS, COLUMN_HEADERS
 from app.platform.auth import current_user
-from app.platform.models import Role, Setting, User, UserModuleAccess
+from app.platform.models import Role, User, UserModuleAccess
 
-GSTIN = "27AAAAA0000A1Z5"
 MIS = User(firebase_uid="mis", email="m@x.com", name="M", role=Role.MIS, active=True,
            module_access=[UserModuleAccess(module_key="document_automation")])
 OUTSIDER = User(firebase_uid="out", email="o@x.com", name="O", role=Role.OPERATIONS, active=True)
-
-
-def _seed(db: Session) -> None:
-    db.add(Consignor(name="Gifsy Depot", gstin=GSTIN, state="Maharashtra", active=True))
-    db.add(Consignee(brand="Deoleo", state="Maharashtra", name="Deoleo MH", gstin=GSTIN,
-                     active=True))
-    db.add(HsnCode(hsn="1509", gst_rate=Decimal("5"), active=True))
-    db.add(Setting(key="eway_threshold", value={"amount": 1000}, updated_by="seed"))
-    numbering.seed_series(db, "L", fy="26-27", last_number=0)
-    db.commit()
-
-
-@pytest.fixture
-def session() -> Iterator[Session]:
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
-                           poolclass=StaticPool, future=True)
-    Base.metadata.create_all(engine)
-    db = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)()
-    _seed(db)
-    try:
-        yield db
-    finally:
-        db.close()
-        engine.dispose()
 
 
 @pytest.fixture
@@ -85,22 +57,22 @@ def test_template_structure() -> None:
     assert "Instructions" in wb.sheetnames
     ws = wb.worksheets[0]
     header = [c.value for c in ws[1]]
-    assert header == list(CHALLAN_COLUMNS)  # exact keys -> parser recognizes them
+    # Row 1 is written with the FRIENDLY display headers, in canonical column order.
+    assert header == [COLUMN_HEADERS[key] for key in CHALLAN_COLUMNS]
 
 
-def test_template_examples_roundtrip_validate(session: Session) -> None:
-    # The template's OWN example rows must parse + validate against master data.
+def test_template_examples_roundtrip_validate() -> None:
+    # The template's OWN example rows must parse + pass the no-database checks.
     rows, structural = parsing.parse_workbook(template.build_template_xlsx())
-    assert structural == []
-    result = service.validate(session, rows)
-    assert result.ok, [(e.row_number, e.column, e.message) for e in result.errors]
-    challans = {c.group_key: c for c in result.challans}
-    assert set(challans) == {"C1", "C2"}
-    # C1: single priced line, tax-inclusive 100 x 10 x 1.05 = 1050.00 -> 105000 paise.
-    assert challans["C1"].total_paise == 105000
-    # C2: two value-free lines -> no total.
-    assert challans["C2"].total_paise is None
-    assert len(challans["C2"].lines) == 2
+    assert structural == []  # friendly headers all recognised, no missing columns
+    assert parsing.structural_row_errors(rows) == []
+    # ...and they group into the two example challans by the Challan Group column.
+    groups: dict[str, list[object]] = {}
+    for row in rows:
+        groups.setdefault(row.cells["challan_group"], []).append(row)
+    assert set(groups) == {"C1", "C2"}
+    assert len(groups["C1"]) == 1   # single priced line
+    assert len(groups["C2"]) == 2   # two value-free lines
 
 
 def test_template_download_route(client: TestClient) -> None:

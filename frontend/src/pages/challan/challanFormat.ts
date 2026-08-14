@@ -36,12 +36,19 @@ export function batchArtifacts(
   b: BatchOut,
 ): Array<{ label: string; fileId: number; name: string }> {
   const links: Array<{ label: string; fileId: number; name: string }> = [];
-  if (b.error_report_file_id != null)
+  if (b.error_report_file_id != null) {
+    // The same file id holds ERRORS on a failed-validation batch but non-blocking
+    // WARNINGS on any batch that validated (VALIDATED/GENERATING/COMPLETED). Label
+    // it by status so a succeeded batch never shows a misleading "Error report"
+    // that an operator would skip — the deviations/possible-splits matter on a
+    // statutory document. Terminology matches the report's own Severity column.
+    const isErrors = b.status === 'FAILED_VALIDATION';
     links.push({
-      label: 'Error report',
+      label: isErrors ? 'Error report' : 'Warnings',
       fileId: b.error_report_file_id,
-      name: `batch-${b.id}-errors.csv`,
+      name: `batch-${b.id}-${isErrors ? 'errors' : 'warnings'}.csv`,
     });
+  }
   if (b.zip_file_id != null)
     links.push({ label: 'ZIP', fileId: b.zip_file_id, name: `batch-${b.id}.zip` });
   if (b.merged_pdf_file_id != null)

@@ -315,3 +315,32 @@ def test_noop_update_does_not_audit_or_bump(db: Session) -> None:
     after = len(list(db.execute(select(AuditLog)).scalars()))
     assert after == before  # no consignee_party.updated row for a no-op
     assert party.updated_by == "u1"  # updated_by not bumped by the no-op
+
+
+def test_update_party_rejects_gstin_state_contradiction(db: Session) -> None:
+    # A golden record whose state contradicts its GSTIN state code would be
+    # snapshotted onto a statutory challan (e.g. "Gujarat (27)"); the update path
+    # must enforce the same GSTIN<->state consistency as create.
+    party = create_party(db, gstin=GSTIN_A, name="Acme", state="Maharashtra", actor_uid="u1")
+    db.flush()
+    with pytest.raises(ConsigneeMasterError):
+        update_party(db, party=party, state="Gujarat", actor_uid="u2")  # 27 != Gujarat(24)
+
+
+def test_update_party_allows_matching_state(db: Session) -> None:
+    party = create_party(db, gstin=GSTIN_A, name="Acme", state="Maharashtra", actor_uid="u1")
+    db.flush()
+    update_party(db, party=party, state="Maharashtra", name="Acme Two", actor_uid="u2")
+    assert party.name == "Acme Two" and party.state == "Maharashtra"
+
+
+def test_patch_state_contradiction_422(client: TestClient) -> None:
+    created = client.post(
+        "/api/v1/masterdata/consignee-parties",
+        json={"gstin": GSTIN_A, "name": "Acme", "state": "Maharashtra"},
+    ).json()
+    r = client.patch(
+        f"/api/v1/masterdata/consignee-parties/{created['id']}",
+        json={"state": "Gujarat"},
+    )
+    assert r.status_code == 422

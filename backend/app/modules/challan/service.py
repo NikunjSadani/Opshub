@@ -5,12 +5,20 @@ constraint: numbers for the whole batch are reserved and **committed in one shor
 transaction BEFORE any PDF is rendered**, so the counter row-lock is never held
 across document generation. Rendering + issuing then run with no numbering lock.
 
-  validate(db, rows)                 -> ValidationResult (English errors or challans)
+  validate(db, rows)                 -> ValidationResult (errors + warnings + challans)
   generate(db, batch, renderer, ...) -> reserve(commit) -> render -> issue -> zip/merge
 
-Consignor + consignee are re-resolved from master data at generation and
-SNAPSHOTTED onto each challan, so later edits never rewrite an issued document.
-Untrusted cell values are escaped by the renderer (bind-as-data).
+Increment 15: the consignee is TYPED INLINE and resolved against the GSTIN-keyed
+golden record (`masterdata.consignee_master`) — an unknown GSTIN auto-creates a
+party AT GENERATION TIME (never during validation of a batch that might fail), and
+a known GSTIN with differing details yields a non-blocking DEVIATION WARNING while
+the STORED golden record (never the typed value) is snapshotted. Every challan
+references an ACTIVE Project (printed). Two different `challan_group`s that ship to
+the same consignee + destination + date are a non-blocking WARNING (possible split).
+
+Consignor + consignee + project are re-resolved and SNAPSHOTTED onto each challan,
+so later edits never rewrite an issued document. Untrusted cell values are escaped
+by the renderer (bind-as-data).
 """
 from __future__ import annotations
 
@@ -30,6 +38,7 @@ from app.modules.challan.models import (
     ChallanStatus,
 )
 from app.modules.challan.schema import (
+    COLLISION_FIELDS,
     ChallanView,
     ConsigneeView,
     ConsignorView,
@@ -42,11 +51,15 @@ from app.modules.challan.schema import (
     ValidationResult,
 )
 from app.modules.files.models import StoredFile
-from app.modules.masterdata.models import Consignee, Consignor, HsnCode
-from app.modules.masterdata.normalize import collapse_ws
+from app.modules.masterdata import consignee_master
+from app.modules.masterdata.consignee_master import ConsigneeMasterError
+from app.modules.masterdata.models import ConsigneeParty, Consignor, HsnCode
+from app.modules.masterdata.normalize import match_key, valid_gstin
 from app.modules.numbering import service as numbering
 from app.modules.numbering.models import AllocationStatus, NumberingAllocation
 from app.modules.numbering.service import IST
+from app.modules.projects import service as projects
+from app.modules.projects.models import Project
 from app.platform import audit
 from app.platform.models import Setting
 from app.platform.storage import Storage, get_storage
@@ -66,36 +79,40 @@ class ChallanError(Exception):
 # ------------------------------------------------------------------ validation
 
 def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
-    """Structural checks (no DB) + semantic checks (master data), then group.
+    """Structural checks (no DB) + semantic checks (master data / projects /
+    consignee golden record), then group.
 
-    Returns every error found (for a complete English report), or — when clean —
-    the parsed challans grouped by the `group` key.
+    Returns every blocking ERROR (for a complete English report) plus non-blocking
+    WARNINGS (consignee deviations, possible splits), or — when there are no errors
+    — the parsed challans grouped by `challan_group`. No golden records are written
+    here (consignee resolution runs `dry_run`); the real write is at generation.
     """
     if len(rows) > MAX_BATCH_ROWS:
         return ValidationResult(errors=[RowError(
             0, "", f"batch has {len(rows)} rows; the per-batch limit is {MAX_BATCH_ROWS}")])
-    groups = {r.cells.get("group", "") for r in rows} - {""}
+    groups = {r.cells.get("challan_group", "") for r in rows} - {""}
     if len(groups) > MAX_BATCH_CHALLANS:
         return ValidationResult(errors=[RowError(
             0, "", f"batch has {len(groups)} challans; the limit is {MAX_BATCH_CHALLANS}")])
     errors: list[RowError] = list(parsing.structural_row_errors(rows))
+    warnings: list[RowError] = []
     bad = {e.row_number for e in errors}
 
     if _active_consignor(db) is None:
         errors.append(RowError(
             0, "", "exactly one active consignor must be configured in master data"))
 
-    consignees: dict[tuple[str, str], Consignee | None] = {}
+    projects_cache: dict[str, Project | None] = {}
     hsns: dict[str, HsnCode | None] = {}
 
     for row in rows:
         if row.row_number in bad:
             continue  # can't semantically check a structurally-broken row
         c = row.cells
-        if _consignee(db, c["brand"], c["ship_to_state"], consignees) is None:
-            errors.append(RowError(row.row_number, "brand",
-                                   f"no active consignee for brand '{c['brand']}' "
-                                   f"in state '{c['ship_to_state']}'"))
+        if _project(db, c["project_id"], projects_cache) is None:
+            errors.append(RowError(row.row_number, "project_id",
+                                   f"project '{c['project_id']}' does not exist or is not Active"))
+        _consignee_preview(db, row, errors, warnings)
         hsn = _hsn(db, c["hsn"], hsns)
         if hsn is None:
             errors.append(RowError(row.row_number, "hsn",
@@ -110,11 +127,173 @@ def validate(db: Session, rows: list[RawRow]) -> ValidationResult:
             _amount_sanity(row, hsn, errors)
 
     _amount_presence_consistency(rows, errors)
+    warnings.extend(_collision_warnings(rows))
+    warnings.extend(_intrabatch_new_gstin_warnings(db, rows))
 
+    warnings.sort(key=lambda e: (e.row_number, e.column))
     if errors:
         errors.sort(key=lambda e: (e.row_number, e.column))
-        return ValidationResult(errors=errors)
-    return ValidationResult(challans=_build_challans(rows, hsns))
+        return ValidationResult(errors=errors, warnings=warnings)
+    return ValidationResult(warnings=warnings, challans=_build_challans(rows, hsns))
+
+
+def _consignee_preview(
+    db: Session, row: RawRow, errors: list[RowError], warnings: list[RowError]
+) -> None:
+    """Read-only consignee resolution (`dry_run`): an invalid GSTIN / state mismatch
+    is a blocking error; a known GSTIN whose typed details differ from the stored
+    golden record yields one WARNING per field (the stored value is what we use)."""
+    c = row.cells
+    try:
+        result = consignee_master.resolve_or_create(
+            db,
+            gstin=c["consignee_gstin"],
+            name=c["consignee_name"],
+            address_line1=c.get("consignee_address_line1", ""),
+            address_line2=c.get("consignee_address_line2", ""),
+            pincode=c.get("consignee_pincode", ""),
+            state=c.get("consignee_state", ""),
+            phone=c.get("consignee_phone", ""),
+            source="UPLOAD",
+            dry_run=True,
+        )
+    except ConsigneeMasterError as err:
+        column = "consignee_state" if "does not match the GSTIN" in str(err) else "consignee_gstin"
+        errors.append(RowError(row.row_number, column, str(err)))
+        return
+    for dev in result.deviations:
+        warnings.append(RowError(
+            row.row_number, f"consignee_{dev.field}",
+            f"consignee {dev.field}: using the stored value '{dev.stored}' "
+            f"(you entered '{dev.incoming}')",
+            severity="WARNING"))
+
+
+def _first_row_per_group(rows: list[RawRow]) -> tuple[dict[str, RawRow], list[str]]:
+    """The first RawRow of each `challan_group`, plus the groups in first-seen order."""
+    first_row: dict[str, RawRow] = {}
+    order: list[str] = []
+    for row in rows:
+        key = row.cells.get("challan_group", "").strip()
+        if key and key not in first_row:
+            first_row[key] = row
+            order.append(key)
+    return first_row, order
+
+
+def _identity_value(field: str, raw: str) -> str:
+    """Normalize a collision-identity field. `challan_date` is parsed to ISO so two
+    equivalent date spellings (16-05-2026 vs 2026-05-16) collide; text via match_key."""
+    if field == "challan_date":
+        parsed = parsing.parse_date(raw)
+        return parsed.isoformat() if parsed is not None else match_key(raw)
+    return match_key(raw)
+
+
+def _collision_warnings(rows: list[RawRow]) -> list[RowError]:
+    """Warn when two DIFFERENT groups share the same shipment identity tuple
+    (consignee GSTIN + ship-to + date) — a likely "should this be one challan?"
+    mistake. Non-blocking: legitimately-separate same-day shipments are allowed."""
+    first_row, order = _first_row_per_group(rows)
+
+    buckets: dict[tuple[str, ...], list[str]] = {}
+    for key in order:
+        cells = first_row[key].cells
+        identity = tuple(_identity_value(f, cells.get(f, "")) for f in COLLISION_FIELDS)
+        if all(part == "" for part in identity):
+            continue  # nothing to compare (fully blank shipment fields)
+        buckets.setdefault(identity, []).append(key)
+
+    warnings: list[RowError] = []
+    for members in buckets.values():
+        if len(members) < 2:
+            continue
+        for key in members:
+            others = ", ".join(m for m in members if m != key)
+            warnings.append(RowError(
+                first_row[key].row_number, "challan_group",
+                f"challan '{key}' ships to the same consignee + destination + date as "
+                f"{others}; confirm these are separate challans, not one",
+                severity="WARNING"))
+    return warnings
+
+
+# Consignee fields to compare for the intra-batch new-GSTIN check: (short name used
+# in the warning column, upload cell key). Text fields compare via match_key; the
+# numeric pair via digits-only, mirroring the golden-record deviation semantics.
+_CONSIGNEE_DIFF_TEXT: tuple[tuple[str, str], ...] = (
+    ("name", "consignee_name"),
+    ("address_line1", "consignee_address_line1"),
+    ("address_line2", "consignee_address_line2"),
+    ("state", "consignee_state"),
+)
+_CONSIGNEE_DIFF_NUM: tuple[tuple[str, str], ...] = (
+    ("pincode", "consignee_pincode"),
+    ("phone", "consignee_phone"),
+)
+
+
+def _digits(value: str) -> str:
+    return "".join(ch for ch in value if ch.isdigit())
+
+
+def _consignee_field_diffs(
+    first: dict[str, str], later: dict[str, str]
+) -> list[tuple[str, str, str]]:
+    """(short_field, first_value, later_value) for each field the later row typed
+    differently from the first row's. An empty later value is never a difference."""
+    diffs: list[tuple[str, str, str]] = []
+    for short, key in _CONSIGNEE_DIFF_TEXT:
+        a, b = first.get(key, ""), later.get(key, "")
+        if b and match_key(a) != match_key(b):
+            diffs.append((short, a, b))
+    for short, key in _CONSIGNEE_DIFF_NUM:
+        a, b = first.get(key, ""), later.get(key, "")
+        if b and _digits(a) != _digits(b):
+            diffs.append((short, a, b))
+    return diffs
+
+
+def _intrabatch_new_gstin_warnings(db: Session, rows: list[RawRow]) -> list[RowError]:
+    """Warn when a GSTIN that is NEW to the golden-record master appears in two
+    groups of the SAME upload with conflicting consignee details.
+
+    The master auto-creates that party from the FIRST group's typed values at
+    generation, then every later group snapshots those same stored values — so a
+    later group's differing typed name/address is silently dropped. During
+    validation the party doesn't exist yet, so `resolve_or_create(dry_run)` can't
+    surface this; we detect it here. (A GSTIN already IN the master is handled by
+    the per-row deviation check against the stored record.)"""
+    first_row, order = _first_row_per_group(rows)
+    all_keys = [key for _short, key in (*_CONSIGNEE_DIFF_TEXT, *_CONSIGNEE_DIFF_NUM)]
+    in_master: dict[str, bool] = {}
+    seen: dict[str, tuple[str, dict[str, str]]] = {}  # gstin -> (group, typed fields)
+    warnings: list[RowError] = []
+
+    for group in order:
+        cells = first_row[group].cells
+        gstin = consignee_master.normalize_gstin(cells.get("consignee_gstin", ""))
+        if not valid_gstin(gstin):
+            continue  # an invalid GSTIN is already a blocking error elsewhere
+        if gstin not in in_master:
+            in_master[gstin] = db.execute(
+                select(ConsigneeParty.id).where(ConsigneeParty.gstin == gstin)
+            ).scalar_one_or_none() is not None
+        if in_master[gstin]:
+            continue  # existing record -> per-row deviations already cover it
+        typed = {key: cells.get(key, "") for key in all_keys}
+        if gstin in seen:
+            first_group, first_typed = seen[gstin]
+            for short, stored, incoming in _consignee_field_diffs(first_typed, typed):
+                warnings.append(RowError(
+                    first_row[group].row_number, f"consignee_{short}",
+                    f"consignee {short}: challan '{group}' entered '{incoming}', but the "
+                    f"same GSTIN in challan '{first_group}' will create the golden record "
+                    f"as '{stored}' — that stored value is what gets printed",
+                    severity="WARNING"))
+        else:
+            seen[gstin] = (group, typed)
+    return warnings
 
 
 def _amount_presence_consistency(rows: list[RawRow], errors: list[RowError]) -> None:
@@ -125,7 +304,7 @@ def _amount_presence_consistency(rows: list[RawRow], errors: list[RowError]) -> 
     """
     groups: dict[str, list[RawRow]] = {}
     for row in rows:
-        key = row.cells.get("group", "").strip()
+        key = row.cells.get("challan_group", "").strip()
         if key:
             groups.setdefault(key, []).append(row)
     for key, members in groups.items():
@@ -172,18 +351,10 @@ def _active_consignor(db: Session) -> Consignor | None:
     return rows[0] if len(rows) == 1 else None
 
 
-def _consignee(
-    db: Session, brand: str, state: str, cache: dict[tuple[str, str], Consignee | None]
-) -> Consignee | None:
-    key = (collapse_ws(brand).lower(), collapse_ws(state).lower())
+def _project(db: Session, code: str, cache: dict[str, Project | None]) -> Project | None:
+    key = code.strip().upper()
     if key not in cache:
-        cache[key] = db.execute(
-            select(Consignee).where(
-                func.lower(func.trim(Consignee.brand)) == key[0],
-                func.lower(func.trim(Consignee.state)) == key[1],
-                Consignee.active.is_(True),
-            )
-        ).scalar_one_or_none()
+        cache[key] = projects.resolve_active_project(db, key)
     return cache[key]
 
 
@@ -198,29 +369,39 @@ def _hsn(db: Session, hsn: str, cache: dict[str, HsnCode | None]) -> HsnCode | N
 def _build_challans(
     rows: list[RawRow], hsns: dict[str, HsnCode | None]
 ) -> list[ParsedChallan]:
-    """Group clean rows by `group` (first-seen order) into ParsedChallans.
+    """Group clean rows by `challan_group` (first-seen order) into ParsedChallans.
 
     Amount is OPTIONAL (None -> value-free line). GST is taken from the HSN (the
     authoritative rate, already cross-checked against any supplied gst_rate).
+    Consignee fields are carried as TYPED; resolution/snapshot happens at generate.
     """
     groups: dict[str, ParsedChallan] = {}
     order: list[str] = []
     for row in rows:
         c = row.cells
-        key = c["group"]
+        key = c["challan_group"]
         if key not in groups:
             challan_date = parsing.parse_date(c["challan_date"])
             if challan_date is None:  # pragma: no cover - structurally pre-validated
                 raise ChallanError(f"unparseable challan_date on row {row.row_number}")
             groups[key] = ParsedChallan(
                 group_key=key,
-                brand=c["brand"],
-                ship_to_state=c["ship_to_state"],
-                ship_to_name=c["ship_to_name"],
-                ship_to_address=c["ship_to_address"],
+                project_id=c["project_id"],
                 ship_to_enterprise=c.get("ship_to_enterprise", ""),
-                ship_to_number=c.get("ship_to_number", ""),
-                ship_to_contact=c.get("ship_to_contact", ""),
+                ship_to_name=c["ship_to_name"],
+                ship_to_address_line1=c["ship_to_address_line1"],
+                ship_to_address_line2=c.get("ship_to_address_line2", ""),
+                ship_to_city=c.get("ship_to_city", ""),
+                ship_to_state=c["ship_to_state"],
+                ship_to_pincode=c.get("ship_to_pincode", ""),
+                ship_to_phone=c.get("ship_to_phone", ""),
+                consignee_name=c["consignee_name"],
+                consignee_address_line1=c.get("consignee_address_line1", ""),
+                consignee_address_line2=c.get("consignee_address_line2", ""),
+                consignee_pincode=c.get("consignee_pincode", ""),
+                consignee_state=c.get("consignee_state", ""),
+                consignee_phone=c.get("consignee_phone", ""),
+                consignee_gstin=c["consignee_gstin"],
                 challan_date=challan_date,
                 po_number=c.get("po_number", ""),
                 invoice_number=c.get("invoice_number", ""),
@@ -253,7 +434,7 @@ def generate(
 ) -> ChallanBatch:
     """Reserve (commit) -> render -> issue -> package. Re-validates defensively.
 
-    On validation failure: writes an English error report and marks the batch
+    On validation failure: writes an English issue report and marks the batch
     FAILED_VALIDATION — no numbers are reserved. On success: every challan is
     ISSUED with a bound number and a stored PDF, plus a ZIP and a merged PDF.
 
@@ -287,16 +468,32 @@ def _generate_inner(
     rows, structural = parsing.parse_workbook(_source_bytes(db, batch, storage))
     result = ValidationResult(errors=structural) if structural else validate(db, rows)
     if not result.ok:
-        report = _store(db, storage, _error_report_bytes(result.errors),
+        report = _store(db, storage, _issue_report_bytes(result.issues),
                         f"batch-{batch.id}-errors.csv", "challan-error-report",
                         actor_uid, "text/csv")
         batch.error_report_file_id = report.id
-        batch.status = BatchStatus.FAILED_VALIDATION.value
-        batch.challan_count = 0  # a re-validation failure invalidates the earlier counts
-        batch.line_count = 0
-        batch.message = f"{len(result.errors)} validation error(s)"
-        _audit(db, "challan.batch_failed_validation", actor_uid, batch.id,
-               {"errors": len(result.errors)})
+        # If this is a RETRY and some challans were already issued in a prior run,
+        # a now-failing re-validation (e.g. the project was set ON_HOLD, or an HSN
+        # deactivated, between runs) must NOT bury those valid statutory documents
+        # by zeroing the counts as FAILED_VALIDATION. Mark FAILED (retryable) with an
+        # honest message and preserve the issued count instead.
+        already_issued = db.execute(
+            select(func.count()).select_from(Challan).where(Challan.batch_id == batch.id)
+        ).scalar() or 0
+        if already_issued:
+            batch.status = BatchStatus.FAILED.value
+            batch.message = (
+                f"re-validation failed after {already_issued} challan(s) were already "
+                "issued; master data may have changed — resolve it and retry")
+            _audit(db, "challan.batch_failed", actor_uid, batch.id,
+                   {"already_issued": already_issued, "errors": len(result.errors)})
+        else:
+            batch.status = BatchStatus.FAILED_VALIDATION.value
+            batch.challan_count = 0  # a clean re-validation failure invalidates earlier counts
+            batch.line_count = 0
+            batch.message = _issue_message(result)
+            _audit(db, "challan.batch_failed_validation", actor_uid, batch.id,
+                   {"errors": len(result.errors), "warnings": len(result.warnings)})
         db.commit()
         return batch
 
@@ -394,11 +591,30 @@ def _persist_challan(
     threshold_paise: int,
     actor_uid: str | None,
 ) -> Challan:
-    """Build the Challan + line items with fresh master-data snapshots."""
+    """Build the Challan + line items with fresh snapshots.
+
+    The consignee is resolved against the GSTIN golden record HERE (the real
+    auto-create), and the STORED record — not the typed values — is snapshotted, so
+    an issued challan always carries the canonical party. The project is re-checked
+    Active. The ship-to address is joined for the printed block.
+    """
     consignor = _active_consignor(db)
-    consignee = _consignee(db, pc.brand, pc.ship_to_state, {})
-    if consignor is None or consignee is None:  # pragma: no cover - pre-validated
-        raise ChallanError("master data changed after validation")
+    project = projects.resolve_active_project(db, pc.project_id)
+    if consignor is None or project is None:  # pragma: no cover - pre-validated
+        raise ChallanError("consignor/project changed after validation")
+    res = consignee_master.resolve_or_create(
+        db,
+        gstin=pc.consignee_gstin,
+        name=pc.consignee_name,
+        address_line1=pc.consignee_address_line1,
+        address_line2=pc.consignee_address_line2,
+        pincode=pc.consignee_pincode,
+        state=pc.consignee_state,
+        phone=pc.consignee_phone,
+        source="UPLOAD",
+        actor_uid=actor_uid,
+    )
+    party = res.party
     alloc = _allocation(db, alloc_id)
     total = pc.total_paise  # int | None (None => value-free challan)
     challan = Challan(
@@ -409,23 +625,28 @@ def _persist_challan(
         fy=alloc.fy,
         number_int=alloc.number,
         challan_date=pc.challan_date,
+        project_code=project.code,
         consignor_name=consignor.name,
         consignor_gstin=consignor.gstin,
         consignor_state=consignor.state,
         consignor_address=consignor.address,
         consignor_phone=consignor.phone,
-        consignee_brand=consignee.brand,
-        consignee_name=consignee.name,
-        consignee_gstin=consignee.gstin,
-        consignee_state=consignee.state,
-        consignee_address=consignee.address,
-        consignee_phone=consignee.phone,
+        consignee_brand="",
+        consignee_name=party.name,
+        consignee_gstin=party.gstin,
+        consignee_state=party.state,
+        consignee_address=_join_consignee(party),
+        consignee_phone=party.phone,
         ship_to_name=pc.ship_to_name,
-        ship_to_address=pc.ship_to_address,
+        ship_to_address=_join_ship_to(pc),
+        ship_to_address_line1=pc.ship_to_address_line1,
+        ship_to_address_line2=pc.ship_to_address_line2,
+        ship_to_city=pc.ship_to_city,
+        ship_to_pincode=pc.ship_to_pincode,
         ship_to_state=pc.ship_to_state,
         ship_to_enterprise=pc.ship_to_enterprise,
-        ship_to_number=pc.ship_to_number,
-        ship_to_contact=pc.ship_to_contact,
+        ship_to_number=pc.ship_to_phone,
+        ship_to_contact="",
         po_number=pc.po_number,
         invoice_number=pc.invoice_number,
         eway_required=total is not None and total > threshold_paise,
@@ -470,6 +691,19 @@ def void_challan(
 
 
 # ------------------------------------------------------------------- helpers
+
+def _join_ship_to(pc: ParsedChallan) -> str:
+    """Join the split ship-to fields into one printed address block."""
+    parts = [pc.ship_to_address_line1, pc.ship_to_address_line2, pc.ship_to_city,
+             pc.ship_to_state, pc.ship_to_pincode]
+    return ", ".join(p.strip() for p in parts if p.strip())
+
+
+def _join_consignee(party: ConsigneeParty) -> str:
+    """Join the golden record's address lines + pincode into one printed block."""
+    parts = [party.address_line1, party.address_line2, party.pincode]
+    return ", ".join(p.strip() for p in parts if p.strip())
+
 
 def _source_bytes(db: Session, batch: ChallanBatch, storage: Storage) -> bytes:
     if batch.source_file_id is None:
@@ -564,17 +798,37 @@ def _csv_field(value: str) -> str:
     return f'"{value}"'
 
 
-def _error_report_bytes(errors: list[RowError]) -> bytes:
-    lines = ["Row,Column,Problem"]
-    for e in errors:
-        lines.append(f"{e.row_number},{_csv_field(e.column)},{_csv_field(e.message)}")
+def _issue_message(result: ValidationResult) -> str:
+    """A short human summary of the validation outcome for `batch.message`."""
+    parts = []
+    if result.errors:
+        parts.append(f"{len(result.errors)} validation error(s)")
+    if result.warnings:
+        parts.append(f"{len(result.warnings)} warning(s)")
+    return "; ".join(parts) if parts else "no issues"
+
+
+def _issue_report_bytes(issues: list[RowError]) -> bytes:
+    """Render errors + warnings to the downloadable English report (CSV).
+
+    A `Severity` column distinguishes blocking ERRORs from non-blocking WARNINGs
+    so the operator sees deviations/possible-splits without them blocking generate.
+    """
+    lines = ["Row,Severity,Column,Problem"]
+    for e in issues:
+        lines.append(
+            f"{e.row_number},{_csv_field(e.severity)},{_csv_field(e.column)},{_csv_field(e.message)}"
+        )
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def _build_view(ch: Challan) -> ChallanView:
     show_amount = ch.total_paise is not None
+    code = ch.consignee_gstin[:2] if len(ch.consignee_gstin) >= 2 else ""
+    state_label = f"{ch.consignee_state} ({code})" if ch.consignee_state else code
     return ChallanView(
         number=ch.number,
+        project_id=ch.project_code,
         invoice_number=ch.invoice_number,
         challan_date=_ordinal_date(ch.challan_date),
         consignor=ConsignorView(
@@ -582,11 +836,10 @@ def _build_view(ch: Challan) -> ChallanView:
             gstin=ch.consignor_gstin, phone=ch.consignor_phone),
         consignee=ConsigneeView(
             name=ch.consignee_name, address=ch.consignee_address, gstin=ch.consignee_gstin,
-            state_label=f"{ch.consignee_state} ({ch.consignee_gstin[:2]})",
-            phone=ch.consignee_phone),
+            state_label=state_label, phone=ch.consignee_phone),
         ship_to=ShipToView(
-            name=ch.ship_to_name, address=ch.ship_to_address, enterprise=ch.ship_to_enterprise,
-            number=ch.ship_to_number, contact_person=ch.ship_to_contact),
+            name=ch.ship_to_name, address=ch.ship_to_address,
+            enterprise=ch.ship_to_enterprise, phone=ch.ship_to_number),
         lines=[
             LineView(
                 line_no=line.line_no,
@@ -673,25 +926,33 @@ def new_batch(db: Session, *, source_file_id: int, actor_uid: str | None) -> Cha
 def validate_batch(db: Session, batch: ChallanBatch, *, actor_uid: str | None) -> ValidationResult:
     """Parse + validate the batch's source file synchronously (no rendering).
 
-    Sets the batch to VALIDATED or FAILED_VALIDATION (writing an error report),
-    and returns the result. No numbers are reserved.
+    Sets the batch to VALIDATED or FAILED_VALIDATION (writing an issue report), and
+    returns the result. No numbers are reserved and no golden records are written.
+    A VALIDATED batch that carries WARNINGS still gets an issue report attached (the
+    warnings) so the operator can review deviations/possible-splits before generate.
     """
     storage = get_storage()
     rows, structural = parsing.parse_workbook(_source_bytes(db, batch, storage))
     result = ValidationResult(errors=structural) if structural else validate(db, rows)
     if not result.ok:
-        report = _store(db, storage, _error_report_bytes(result.errors),
+        report = _store(db, storage, _issue_report_bytes(result.issues),
                         f"batch-{batch.id}-errors.csv", "challan-error-report",
                         actor_uid, "text/csv")
         batch.error_report_file_id = report.id
         batch.status = BatchStatus.FAILED_VALIDATION.value
-        batch.message = f"{len(result.errors)} validation error(s)"
+        batch.message = _issue_message(result)
     else:
+        if result.warnings:
+            report = _store(db, storage, _issue_report_bytes(result.warnings),
+                            f"batch-{batch.id}-warnings.csv", "challan-error-report",
+                            actor_uid, "text/csv")
+            batch.error_report_file_id = report.id
         batch.status = BatchStatus.VALIDATED.value
         batch.challan_count = len(result.challans)
         batch.line_count = sum(len(pc.lines) for pc in result.challans)
-        batch.message = None
+        batch.message = _issue_message(result) if result.warnings else None
     _audit(db, "challan.batch_validated", actor_uid, batch.id,
-           {"status": batch.status, "errors": len(result.errors)})
+           {"status": batch.status, "errors": len(result.errors),
+            "warnings": len(result.warnings)})
     db.commit()
     return result

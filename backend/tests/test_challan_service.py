@@ -4,6 +4,11 @@ issue -> package, with a fake renderer (WeasyPrint is container-only).
 Proves the numbering lock-window is closed: the fake renderer, on its first call,
 reads the DB from a SEPARATE connection and asserts every number was already
 reserved+committed before any rendering began.
+
+Increment 15: the consignee is typed inline + resolved by GSTIN (golden record),
+and each challan references an ACTIVE Project. These tests also cover the new
+behaviours — GSTIN auto-create at generation, deviation WARNINGS (non-blocking),
+possible-split WARNINGS, and an unknown Project ID being a blocking error.
 """
 from __future__ import annotations
 
@@ -19,15 +24,17 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import Base
-from app.modules.challan import service
+from app.modules.challan import schema, service
 from app.modules.challan.models import BatchStatus, Challan, ChallanStatus
-from app.modules.masterdata.models import Consignee, Consignor, HsnCode
+from app.modules.masterdata.models import ConsigneeParty, Consignor, HsnCode
 from app.modules.numbering import service as numbering
 from app.modules.numbering.models import AllocationStatus, NumberingAllocation
+from app.modules.projects import service as projects_service
 from app.platform.models import Setting
 from app.platform.storage import get_storage
 
-GSTIN = "27AAAAA0000A1Z2"  # valid, Maharashtra
+GSTIN = "27AAPFU0939F1ZV"  # valid checksum, Maharashtra (27)
+CONSIGNOR_GSTIN = "27AAAAA0000A1Z5"  # consignor gstin is not checksum-validated
 
 
 @event.listens_for(Engine, "connect")
@@ -92,29 +99,61 @@ def env(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[Ses
 
 
 def _seed(db: Session) -> None:
-    db.add(Consignor(name="Tech Gifsy Solutions Limited", gstin=GSTIN, state="Maharashtra",
-                     address="Howrah warehouse", phone="+91 6289864191", active=True))
-    db.add(Consignee(brand="Deoleo", state="Maharashtra", name="Deoleo MH", gstin=GSTIN,
-                     address="Mumbai", phone="+91 6289864191", active=True))
+    db.add(Consignor(name="Tech Gifsy Solutions Limited", gstin=CONSIGNOR_GSTIN,
+                     state="Maharashtra", address="Howrah warehouse",
+                     phone="+91 6289864191", active=True))
     db.add(HsnCode(hsn="1509", gst_rate=Decimal("5"), active=True))
     db.add(Setting(key="eway_threshold", value={"amount": 1000}, updated_by="seed"))
     numbering.seed_series(db, "L", fy="26-27", last_number=0)
+    db.flush()
+    # An ACTIVE project "BRI-001" every default row references.
+    client = projects_service.create_client(db, name="Britannia", code="BRI", actor_uid="seed")
+    projects_service.create_project(db, client_id=client.id, name="Rewards", actor_uid="seed")
     db.commit()
 
 
-# Column order must match schema.CHALLAN_COLUMNS.
 def _row(group: str, ship: str, desc: str, qty: str, rate: str, amount: str,
-         brand: str = "Deoleo", state: str = "Maharashtra") -> list[str]:
-    return [group, brand, state, ship, f"{ship} address", "", "", "",
-            "15-05-2026", desc, "1509", qty, rate, amount, "5", "", ""]
+         gstin: str = GSTIN, project: str = "BRI-001", state: str = "Maharashtra",
+         **over: str) -> dict[str, str]:
+    """One line row keyed by canonical column key; `over` patches any field."""
+    row = {
+        "challan_group": group,
+        "project_id": project,
+        "ship_to_enterprise": f"{ship} Enterprises",
+        "ship_to_name": ship,
+        "ship_to_address_line1": f"{ship} address",
+        "ship_to_address_line2": "",
+        "ship_to_city": "Mumbai",
+        "ship_to_state": state,
+        "ship_to_pincode": "400001",
+        "ship_to_phone": "9900000000",
+        "consignee_name": "Deoleo MH",
+        "consignee_address_line1": "Mumbai HQ",
+        "consignee_address_line2": "",
+        "consignee_pincode": "400001",
+        "consignee_state": state,
+        "consignee_phone": "9800000000",
+        "consignee_gstin": gstin,
+        "challan_date": "15-05-2026",
+        "description": desc,
+        "hsn": "1509",
+        "quantity": qty,
+        "rate": rate,
+        "amount": amount,
+        "gst_rate": "5",
+        "po_number": "",
+        "invoice_number": "",
+    }
+    row.update(over)
+    return row
 
 
-def _workbook(rows: list[list[str]]) -> bytes:
+def _workbook(rows: list[dict[str, str]]) -> bytes:
     wb = Workbook()
     ws = wb.active
-    ws.append(list(service.parsing.CHALLAN_COLUMNS))
+    ws.append([schema.COLUMN_HEADERS[k] for k in schema.CHALLAN_COLUMNS])
     for r in rows:
-        ws.append(r)
+        ws.append([r.get(k, "") for k in schema.CHALLAN_COLUMNS])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -162,6 +201,7 @@ def test_happy_path_reserves_before_render_and_issues(env: tuple[Session, str]) 
     assert [c.number for c in challans] == ["GIF/DC/26-27/L/000001", "GIF/DC/26-27/L/000002"]
     assert all(c.status == ChallanStatus.ISSUED.value for c in challans)
     assert challans[0].consignee_gstin == GSTIN and challans[0].consignor_name.startswith("Tech")
+    assert challans[0].project_code == "BRI-001"
     # tax-inclusive totals + e-way flag (threshold 1000 rupees = 100000 paise)
     assert challans[0].total_paise == 210000 and challans[0].eway_required is True
     assert challans[1].total_paise == 21000 and challans[1].eway_required is False
@@ -211,8 +251,7 @@ def test_amount_sanity_absolute_cap_catches_large_typo(env: tuple[Session, str])
 
 def test_gst_rate_mismatch_flagged(env: tuple[Session, str]) -> None:
     db, _ = env
-    rows = [_row("G1", "Store A", "Item", "10", "100.00", "1050.00")]
-    rows[0][14] = "18"  # supplied gst_rate 18 != HSN 1509 rate 5
+    rows = [_row("G1", "Store A", "Item", "10", "100.00", "1050.00", gst_rate="18")]
     batch = _upload(db, _workbook(rows))
     result = service.validate_batch(db, batch, actor_uid="tester")
     assert not result.ok and any(e.column == "gst_rate" for e in result.errors)
@@ -220,25 +259,91 @@ def test_gst_rate_mismatch_flagged(env: tuple[Session, str]) -> None:
 
 def test_single_consignor_required(env: tuple[Session, str]) -> None:
     db, _ = env
-    db.add(Consignor(name="Second Depot", gstin=GSTIN, state="Maharashtra", active=True))
+    db.add(Consignor(name="Second Depot", gstin=CONSIGNOR_GSTIN, state="Maharashtra",
+                     active=True))
     db.commit()  # now TWO active consignors -> ambiguous
     batch = _upload(db, _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00")]))
     result = service.validate_batch(db, batch, actor_uid="tester")
     assert not result.ok and any("consignor" in e.message for e in result.errors)
 
 
-def test_case_insensitive_masterdata_resolves(env: tuple[Session, str]) -> None:
+def test_unknown_project_is_blocking_error(env: tuple[Session, str]) -> None:
     db, _ = env
     data = _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00",
-                           brand="DEOLEO", state="maharashtra")])
+                           project="ZZZ-999")])
     batch = _upload(db, data)
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert not result.ok and any(e.column == "project_id" for e in result.errors)
+
+
+def test_inactive_project_is_blocking_error(env: tuple[Session, str]) -> None:
+    db, _ = env
+    from app.modules.projects.models import Project, ProjectStatus
+    project = db.execute(select(Project).where(Project.code == "BRI-001")).scalar_one()
+    projects_service.set_status(db, project=project, status=ProjectStatus.CLOSED.value)
+    db.commit()
+    batch = _upload(db, _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00")]))
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert not result.ok and any(e.column == "project_id" for e in result.errors)
+
+
+def test_unknown_gstin_autocreated_and_deviation_is_warning(env: tuple[Session, str]) -> None:
+    db, db_url = env
+    fresh = "24AAACB2894G1ZT"  # Gujarat (24), valid
+    data = _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00",
+                           gstin=fresh, state="Gujarat")])
+    batch = _upload(db, data)
+    # No golden record is written during validation of a batch (dry-run resolve).
     assert service.validate_batch(db, batch, actor_uid="tester").ok
+    assert db.execute(
+        select(func.count()).select_from(ConsigneeParty).where(ConsigneeParty.gstin == fresh)
+    ).scalar() == 0
+    # Generation auto-creates the golden record from the typed values.
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    party = db.execute(select(ConsigneeParty).where(ConsigneeParty.gstin == fresh)).scalar_one()
+    assert party.name == "Deoleo MH" and party.source == "UPLOAD"
+
+    # Same GSTIN, DIFFERENT typed name -> non-blocking WARNING; the STORED name is
+    # snapshotted onto the challan, never the typed one.
+    data2 = _workbook([_row("G9", "Store B", "Item", "1", "100.00", "105.00",
+                            gstin=fresh, state="Gujarat", consignee_name="Different Name Ltd")])
+    batch2 = _upload(db, data2)
+    result2 = service.validate_batch(db, batch2, actor_uid="tester")
+    assert result2.ok  # warnings do not block
+    assert any(w.severity == "WARNING" and w.column == "consignee_name"
+               for w in result2.warnings)
+    assert batch2.error_report_file_id is not None  # warnings report attached on VALIDATED
+    service.generate(db, batch2, FakeRenderer(db_url), series="L", actor_uid="tester")
+    ch2 = db.execute(select(Challan).where(Challan.batch_id == batch2.id)).scalar_one()
+    assert ch2.consignee_name == "Deoleo MH"  # stored golden record wins
+
+
+def test_invalid_gstin_is_blocking_error(env: tuple[Session, str]) -> None:
+    db, _ = env
+    data = _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00",
+                           gstin="27AAPFU0939F1ZZ")])  # bad check digit
+    batch = _upload(db, data)
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert not result.ok and any(e.column == "consignee_gstin" for e in result.errors)
+
+
+def test_same_destination_different_groups_warns(env: tuple[Session, str]) -> None:
+    db = env[0]
+    # G1 and G2 ship to the same consignee + destination + date -> possible split.
+    data = _workbook([
+        _row("G1", "Store A", "Item", "1", "100.00", "105.00"),
+        _row("G2", "Store A", "Item", "1", "100.00", "105.00"),
+    ])
+    batch = _upload(db, data)
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert result.ok  # non-blocking
+    assert any(w.column == "challan_group" and w.severity == "WARNING"
+               for w in result.warnings)
 
 
 def test_validation_failure_writes_error_report(env: tuple[Session, str]) -> None:
     db, _ = env
-    rows = [_row("G1", "Store A", "Bad HSN", "1", "100.00", "105.00")]
-    rows[0][10] = "9999"  # unknown HSN
+    rows = [_row("G1", "Store A", "Bad HSN", "1", "100.00", "105.00", hsn="9999")]
     batch = _upload(db, _workbook(rows))
     result = service.validate_batch(db, batch, actor_uid="tester")
     assert not result.ok
@@ -292,10 +397,70 @@ def test_challan_date_drives_fy(env: tuple[Session, str]) -> None:
     db, db_url = env
     numbering.seed_series(db, "L", fy="25-26", last_number=0)
     db.commit()
-    rows = [_row("G1", "Store A", "Item", "1", "100.00", "105.00")]
-    rows[0][8] = "15-03-2026"  # March -> prior FY 25-26
+    rows = [_row("G1", "Store A", "Item", "1", "100.00", "105.00",
+                 challan_date="15-03-2026")]  # March -> prior FY 25-26
     batch = _upload(db, _workbook(rows))
     service.validate_batch(db, batch, actor_uid="tester")
     service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
     challan = db.execute(select(Challan)).scalar_one()
     assert challan.fy == "25-26" and challan.number == "GIF/DC/25-26/L/000001"
+
+
+def test_intrabatch_new_gstin_conflict_warns(env: tuple[Session, str]) -> None:
+    db = env[0]
+    fresh = "24AAACB2894G1ZT"  # Gujarat, new to the master
+    # Two groups, same NEW GSTIN, different typed consignee name. The golden record
+    # is created from G1's values; G2 would be snapshotted with G1's name -> WARN.
+    data = _workbook([
+        _row("G1", "Store A", "Item", "1", "100.00", "105.00", gstin=fresh, state="Gujarat"),
+        _row("G2", "Store B", "Item", "1", "100.00", "105.00", gstin=fresh, state="Gujarat",
+             consignee_name="Other Traders Pvt Ltd"),
+    ])
+    batch = _upload(db, data)
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert result.ok  # non-blocking
+    assert any(w.severity == "WARNING" and w.column == "consignee_name"
+               for w in result.warnings)
+
+
+def test_collision_warns_across_mixed_date_formats(env: tuple[Session, str]) -> None:
+    db = env[0]
+    # Same consignee + destination, one date "16-05-2026" and one "2026-05-16"
+    # (same day, different spelling) must still collide as a possible split.
+    data = _workbook([
+        _row("G1", "Store A", "Item", "1", "100.00", "105.00", challan_date="16-05-2026"),
+        _row("G2", "Store A", "Item", "1", "100.00", "105.00", challan_date="2026-05-16"),
+    ])
+    batch = _upload(db, data)
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert result.ok
+    assert any(w.column == "challan_group" and w.severity == "WARNING"
+               for w in result.warnings)
+
+
+def test_retry_after_partial_generation_and_project_hold_preserves_issued(
+    env: tuple[Session, str],
+) -> None:
+    db, db_url = env
+    from app.modules.projects.models import Project, ProjectStatus
+    data = _workbook([
+        _row("G1", "Store A", "Item", "1", "100.00", "105.00"),
+        _row("G2", "Store B", "Item", "1", "100.00", "105.00"),
+    ])
+    batch = _upload(db, data)
+    service.validate_batch(db, batch, actor_uid="tester")
+    # First run fails on the 2nd render: 1 challan issued, batch FAILED.
+    service.generate(db, batch, RaisingRenderer(fail_on=2), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.FAILED.value
+    assert len(list(db.execute(select(Challan)).scalars())) == 1
+
+    # The project is put ON_HOLD before retry, so re-validation now fails. The
+    # already-issued challan must NOT be buried: batch FAILED (not FAILED_VALIDATION),
+    # counts not zeroed, the issued statutory document still present.
+    proj = db.execute(select(Project).where(Project.code == "BRI-001")).scalar_one()
+    projects_service.set_status(db, project=proj, status=ProjectStatus.ON_HOLD.value)
+    db.commit()
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.FAILED.value
+    assert "already" in (batch.message or "")
+    assert len(list(db.execute(select(Challan)).scalars())) == 1

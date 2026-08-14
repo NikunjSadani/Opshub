@@ -61,10 +61,9 @@ def _consignee_block(c: ConsigneeView) -> Markup:
 def _ship_to_block(s: ShipToView) -> Markup:
     return Markup("").join([
         _kv("Name -", s.name),
-        _kv("Address -", s.address),
         _kv("Enterprise Name -", s.enterprise),
-        _kv("Number -", s.number),
-        _kv("Contact Person Name -", s.contact_person),
+        _kv("Address -", s.address),
+        _kv("Number -", s.phone),
     ])
 
 
@@ -91,6 +90,11 @@ def build_challan_html(view: ChallanView) -> str:
     invoice = (
         Markup(f"<div>Invoice No.: {escape(view.invoice_number)}</div>")
         if view.invoice_number
+        else Markup("")
+    )
+    project = (
+        Markup(f"<div>Project ID: {escape(view.project_id)}</div>")
+        if view.project_id
         else Markup("")
     )
 
@@ -134,6 +138,7 @@ def build_challan_html(view: ChallanView) -> str:
           <div class="meta">
             {invoice}
             <div>Delivery Challan No.: <span class="num">{number}</span></div>
+            {project}
             <div>Date of Challan: {date}</div>
           </div>
         </td>
@@ -178,6 +183,7 @@ def build_challan_html(view: ChallanView) -> str:
     ).format(
         number=escape(view.number),
         invoice=invoice,
+        project=project,
         date=escape(view.challan_date),
         consignor=_consignor_block(view.consignor),
         consignee=_consignee_block(view.consignee),

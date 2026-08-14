@@ -54,7 +54,7 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # Hard ceiling on a single CSV export so the response can never be unbounded.
 MAX_CSV_ROWS = 50000
 _CSV_HEADER = (
-    "Number,Date,Consignee Brand,Consignee Name,Ship-to State,E-way,Total (INR),Status"
+    "Number,Date,Project ID,Consignee Name,Ship-to State,E-way,Total (INR),Status"
 )
 
 
@@ -92,7 +92,7 @@ class ChallanOut(BaseModel):
     series: str
     fy: str
     challan_date: Any
-    consignee_brand: str
+    project_code: str
     consignee_name: str
     ship_to_state: str
     eway_required: bool
@@ -341,7 +341,7 @@ def export_challans_csv(
         lines.append(",".join((
             service._csv_field(ch.number),
             f'"{ch.challan_date.isoformat()}"',
-            service._csv_field(ch.consignee_brand),
+            service._csv_field(ch.project_code),
             service._csv_field(ch.consignee_name),
             service._csv_field(ch.ship_to_state),
             f'"{"Yes" if ch.eway_required else "No"}"',
