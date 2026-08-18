@@ -42,5 +42,16 @@ test.describe('Challan lifecycle', () => {
 
     // Its status flips to VOID.
     await expect(page.getByRole('row', { name: firstNo }).getByText('VOID')).toBeVisible();
+
+    // Filter the register by status, and export it as CSV (a real backend request).
+    await page.getByLabel('Status').selectOption('VOID');
+    await expect(page.getByRole('row', { name: firstNo })).toBeVisible();
+    const [csv] = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes('/challan/challans.csv') && r.status() === 200,
+      ),
+      page.getByRole('button', { name: 'Download CSV' }).click(),
+    ]);
+    expect(csv.ok()).toBeTruthy();
   });
 });
