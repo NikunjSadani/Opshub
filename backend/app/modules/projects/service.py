@@ -136,6 +136,10 @@ def create_project(
     under one client serialize, then computes `seq = max(existing seq) + 1`. The
     UNIQUE on `project.code` and `(client_id, seq)` is the backstop; on a race the
     insert is retried once against the re-read ceiling. Audited. Returns the row.
+
+    Idempotent on (client_id, name): a double-submit / network retry returns the
+    already-created project instead of minting a second one (which would burn a
+    sequence number). Distinct names still create distinct projects.
     """
     name = _clean_name(name)
     if not name:
@@ -148,6 +152,20 @@ def create_project(
         ).scalar_one_or_none()
         if client is None or not client.active:
             raise ProjectClientNotFound(f"client {client_id} not found or inactive")
+
+        # Idempotency guard: a double-submit / retry with an identical
+        # (client_id, name) must NOT mint a second project and burn a sequence
+        # number. Return the existing row instead. Checked UNDER the client
+        # row-lock so a concurrent retry serializes behind the first commit and
+        # still dedupes (not just the sequential-retry case). Distinct names
+        # still mint a fresh project as normal.
+        existing = db.execute(
+            select(Project)
+            .where(Project.client_id == client_id, Project.name == name)
+            .order_by(Project.seq.desc())
+        ).scalars().first()
+        if existing is not None:
+            return existing
 
         seq = _max_seq(db, client_id) + 1
         code = f"{client.code}-{seq:03d}"

@@ -22,7 +22,13 @@ import {
   useUploadBatch,
   type BatchOut,
 } from '../../api/challan';
-import { BATCH_STATUS_LABEL, BATCH_STATUS_TONE, batchArtifacts, errorMessage } from './challanFormat';
+import {
+  BATCH_STATUS_LABEL,
+  BATCH_STATUS_TONE,
+  batchArtifacts,
+  batchHasWarnings,
+  errorMessage,
+} from './challanFormat';
 import { ReviewPanel } from './ReviewPanel';
 
 const SERIES_RE = /^[A-Za-z0-9]{1,8}$/;
@@ -191,7 +197,7 @@ export function NewChallan() {
               ? `Needs review: ${reviewCount} item${reviewCount === 1 ? '' : 's'}. Resolve them before generating.`
               : 'Needs review before generating.'
             : uploaded?.status === 'VALIDATED'
-              ? uploaded.error_report_file_id != null
+              ? batchHasWarnings(uploaded)
                 ? `Validated with warnings: ${uploaded.message ?? 'review the warnings report'}. These are non-blocking — you can still generate.`
                 : `Validated: ${uploaded.challan_count} challans, ${uploaded.line_count} lines.`
               : uploaded?.status === 'FAILED_VALIDATION'
@@ -255,7 +261,7 @@ export function NewChallan() {
             <>
               <div className="mb-3 flex items-center gap-2">
                 <Badge tone="green">Validated</Badge>
-                {uploaded.error_report_file_id != null && (
+                {batchHasWarnings(uploaded) && (
                   <Badge tone="amber">{uploaded.message ?? 'Review warnings'}</Badge>
                 )}
                 <span className="text-sm text-slate-500">Batch #{uploaded.id}</span>
@@ -271,7 +277,7 @@ export function NewChallan() {
                 </div>
               </dl>
 
-              {uploaded.error_report_file_id != null && (
+              {batchHasWarnings(uploaded) && (
                 <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3">
                   <p className="mb-1 text-sm font-semibold text-amber-800">
                     Review before generating
@@ -371,7 +377,7 @@ export function NewChallan() {
               <div className="mt-4 flex flex-wrap gap-2">
                 <Button onClick={onGenerate} disabled={!seriesValid} loading={generate.isPending}>
                   Generate {uploaded!.challan_count} challan{uploaded!.challan_count === 1 ? '' : 's'}
-                  {uploaded!.error_report_file_id != null ? ' (warnings)' : ''}
+                  {batchHasWarnings(uploaded!) ? ' (warnings)' : ''}
                 </Button>
                 <Button variant="ghost" onClick={reset} disabled={generate.isPending}>
                   Cancel

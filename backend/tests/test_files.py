@@ -19,7 +19,7 @@ from app.db import Base, get_db
 from app.modules.files.models import StoredFile  # noqa: F401 - registers the table
 from app.modules.files.routes import router
 from app.platform.auth import current_user
-from app.platform.models import Role, User
+from app.platform.models import Role, User, UserModuleAccess
 from app.platform.storage import LocalStorage
 
 
@@ -44,7 +44,14 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
             db.close()
 
     def _override_user() -> User:
-        return User(firebase_uid="fb-tester", email="tester@x.com", active=True)
+        # Holds a module grant so it clears the upload authz gate (upload requires
+        # at least one grant); the round-trip tests exercise mechanics, not authz.
+        return User(
+            firebase_uid="fb-tester",
+            email="tester@x.com",
+            active=True,
+            module_access=[UserModuleAccess(module_key="document_automation")],
+        )
 
     app = FastAPI()
     app.include_router(router, prefix="/api/v1/files")

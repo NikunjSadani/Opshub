@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Badge, Button, ConfirmDialog, ErrorState, Loading, useToast } from '../../ui';
+import { useAuth } from '../../auth/AuthProvider';
 import { ApiError } from '../../api/client';
 import {
   challanKeys,
@@ -72,6 +73,12 @@ export function ReviewPanel({
   onResolved: (updated: BatchOut) => void;
 }) {
   const toast = useToast();
+  const { user } = useAuth();
+  // "Update master" permanently edits shared master data — the backend requires
+  // `masterdata.edit` (ADMIN). Gate it in the UI too so a non-admin can't pick an
+  // option that only earns them a 403 after clearing the danger confirm. Mirrors
+  // how the Register gates Void behind isAdmin.
+  const isAdmin = user?.role === 'ADMIN';
   const qc = useQueryClient();
   const submit = useSubmitDecisions();
   const decisionsQuery = useBatchDecisions(batch.id);
@@ -264,11 +271,14 @@ export function ReviewPanel({
                         <div className="mt-2 flex flex-col gap-1.5 sm:flex-row sm:flex-wrap sm:gap-4">
                           {CHOICE_OPTIONS.map((opt) => {
                             const inputId = `decision-${d.id}-${opt.value}`;
+                            const optDisabled = opt.value === 'UPDATE_MASTER' && !isAdmin;
                             return (
                               <label
                                 key={opt.value}
                                 htmlFor={inputId}
-                                className="flex items-start gap-2 text-sm text-slate-700"
+                                className={`flex items-start gap-2 text-sm ${
+                                  optDisabled ? 'text-slate-400' : 'text-slate-700'
+                                }`}
                               >
                                 <input
                                   id={inputId}
@@ -277,11 +287,16 @@ export function ReviewPanel({
                                   value={opt.value}
                                   checked={choices[d.id] === opt.value}
                                   onChange={() => select(d.id, opt.value)}
-                                  className="mt-0.5"
+                                  disabled={optDisabled}
+                                  className="mt-0.5 disabled:cursor-not-allowed"
                                 />
                                 <span>
                                   <span className="font-medium">{opt.label}</span>
-                                  <span className="block text-xs text-slate-500">{opt.hint}</span>
+                                  <span className="block text-xs text-slate-500">
+                                    {optDisabled
+                                      ? 'Admin only — choose This upload / Reject, or ask an admin.'
+                                      : opt.hint}
+                                  </span>
                                 </span>
                               </label>
                             );

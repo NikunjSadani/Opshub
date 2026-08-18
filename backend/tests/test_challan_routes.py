@@ -8,19 +8,22 @@ from __future__ import annotations
 
 import io
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 from fastapi import FastAPI
 from openpyxl import Workbook
 from sqlalchemy import create_engine
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
+from app.config import get_settings
 from app.db import Base, get_db
 from app.modules.challan import schema
-from app.modules.challan.models import Challan, ChallanStatus
+from app.modules.challan.models import BatchStatus, Challan, ChallanBatch, ChallanStatus
 from app.modules.challan.routes import router
 from app.modules.masterdata.models import Consignor, HsnCode
 from app.modules.numbering import service as numbering
@@ -272,3 +275,93 @@ def test_duplicate_decision_ids_422(client: TestClient) -> None:
                             {"id": did, "choice": "THIS_UPLOAD"}]},
     )
     assert r.status_code == 422
+
+
+# ----------------------------------------------------- recover / stuck-sweep
+
+def _generating_batch(client: TestClient, *, stale: bool = False) -> int:
+    """Create a batch wedged in GENERATING; optionally backdate it past the sweep
+    cutoff (a raw UPDATE, so the `onupdate` timestamp default doesn't overwrite it)."""
+    db = client.app.state.TestSession()
+    batch = ChallanBatch(status=BatchStatus.GENERATING.value)
+    db.add(batch)
+    db.commit()
+    bid = batch.id
+    if stale:
+        db.execute(sa_update(ChallanBatch).where(ChallanBatch.id == bid)
+                   .values(updated_at=datetime.now(UTC) - timedelta(hours=2)))
+        db.commit()
+    db.close()
+    return bid
+
+
+def test_recover_requires_admin(client: TestClient) -> None:
+    bid = _generating_batch(client)
+    _as(client, MIS)  # module grant, but NOT admin
+    assert client.post(f"/api/v1/challan/batches/{bid}/recover").status_code == 403
+
+
+def test_recover_missing_batch_404(client: TestClient) -> None:
+    _as(client, ADMIN)
+    assert client.post("/api/v1/challan/batches/99999/recover").status_code == 404
+
+
+def test_recover_rejects_non_generating(client: TestClient) -> None:
+    body = _upload(client, _xlsx([_row("G1")]))  # VALIDATED, not GENERATING
+    _as(client, ADMIN)
+    r = client.post(f"/api/v1/challan/batches/{body['id']}/recover")
+    assert r.status_code == 409
+
+
+def test_recover_resets_generating_to_failed(client: TestClient) -> None:
+    bid = _generating_batch(client, stale=True)  # idle past the stuck threshold
+    _as(client, ADMIN)
+    r = client.post(f"/api/v1/challan/batches/{bid}/recover")
+    assert r.status_code == 200 and r.json()["status"] == "FAILED"
+
+
+def test_recover_refuses_fresh_generating(client: TestClient) -> None:
+    # A batch still making progress (fresh heartbeat) is not "stuck" -> 409, not reset.
+    bid = _generating_batch(client, stale=False)
+    _as(client, ADMIN)
+    r = client.post(f"/api/v1/challan/batches/{bid}/recover")
+    assert r.status_code == 409
+
+
+def test_stuck_sweep_disabled_without_secret(client: TestClient) -> None:
+    get_settings.cache_clear()
+    r = client.post("/api/v1/challan/batches/sweep-stuck",
+                    headers={"X-Sweep-Secret": "anything"})
+    assert r.status_code == 503, r.text
+
+
+def test_stuck_sweep_rejects_wrong_secret(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("SWEEP_SECRET", "s3cret")
+    try:
+        assert client.post("/api/v1/challan/batches/sweep-stuck",
+                           headers={"X-Sweep-Secret": "nope"}).status_code == 403
+        assert client.post("/api/v1/challan/batches/sweep-stuck").status_code == 403
+    finally:
+        get_settings.cache_clear()
+
+
+def test_stuck_sweep_resets_only_stale(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("SWEEP_SECRET", "s3cret")
+    try:
+        stale = _generating_batch(client, stale=True)
+        fresh = _generating_batch(client, stale=False)
+        r = client.post("/api/v1/challan/batches/sweep-stuck",
+                        headers={"X-Sweep-Secret": "s3cret"})
+        assert r.status_code == 200 and r.json() == {"reset": 1}
+        db = client.app.state.TestSession()
+        assert db.get(ChallanBatch, stale).status == "FAILED"
+        assert db.get(ChallanBatch, fresh).status == "GENERATING"
+        db.close()
+    finally:
+        get_settings.cache_clear()

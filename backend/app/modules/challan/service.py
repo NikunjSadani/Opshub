@@ -22,11 +22,12 @@ by the renderer (bind-as-data).
 """
 from __future__ import annotations
 
-from datetime import date, datetime, time
+import logging
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.modules.challan import parsing, render, review_report
@@ -67,6 +68,8 @@ from app.platform import audit
 from app.platform.models import Setting
 from app.platform.storage import Storage, get_storage
 
+logger = logging.getLogger(__name__)
+
 MODULE_KEY = "document_automation"
 # Per-batch caps. MAX_BATCH_CHALLANS is the meaningful seatbelt (one upload can't
 # burn an unbounded slice of the never-reused statutory sequence). MAX_BATCH_ROWS is
@@ -76,6 +79,19 @@ MODULE_KEY = "document_automation"
 MAX_BATCH_ROWS = 50000
 MAX_BATCH_CHALLANS = 2000
 _AMOUNT_TOL_CAP_PAISE = 50000  # Rs 500 — absolute ceiling on the amount-sanity band
+# A GENERATING batch that hasn't advanced its progress heartbeat (`updated_at`) for
+# this long looks genuinely stuck (its worker died) and may be recovered. Set well
+# above the time to render a SINGLE challan, so a live-but-slow render is never
+# mistaken for a dead worker.
+_STUCK_AFTER = timedelta(minutes=2)
+
+
+def _as_utc(dt: datetime | None) -> datetime:
+    """Coerce a stored datetime to tz-aware UTC (SQLite returns naive). A missing
+    timestamp is treated as the epoch so a never-stamped row reads as 'long idle'."""
+    if dt is None:
+        return datetime.fromtimestamp(0, tz=UTC)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 class ChallanError(Exception):
@@ -85,7 +101,11 @@ class ChallanError(Exception):
 # ------------------------------------------------------------------ validation
 
 def validate(
-    db: Session, rows: list[RawRow], *, skip_error_groups: frozenset[str] = frozenset()
+    db: Session,
+    rows: list[RawRow],
+    *,
+    skip_error_groups: frozenset[str] = frozenset(),
+    exclude_batch_id: int | None = None,
 ) -> ValidationResult:
     """Structural checks (no DB) + semantic checks (master data / projects /
     consignee golden record), then group.
@@ -148,6 +168,7 @@ def validate(
     clean_rows = [r for r in rows if r.row_number not in bad]
     _consignee_consistency_errors(clean_rows, errors)
     contradictions = _detect_contradictions(db, clean_rows, errors)
+    warnings.extend(_duplicate_register_warnings(db, clean_rows, exclude_batch_id))
 
     if skip_error_groups:
         errors = _filter_resume_errors(rows, errors, skip_error_groups)
@@ -171,42 +192,48 @@ def _consignee_by_gstin(rows: list[RawRow]) -> dict[str, list[RawRow]]:
     return groups
 
 
-def _consignee_conflicts(a: dict[str, str], b: dict[str, str]) -> list[tuple[str, str, str]]:
-    """(short_field, a_value, b_value) where a AND b both hold a non-empty value that
-    differs. A blank in either row is 'not specified', never a conflict."""
-    out: list[tuple[str, str, str]] = []
-    for short, key in _CONSIGNEE_DIFF_TEXT:
-        av, bv = a.get(key, ""), b.get(key, "")
-        if av and bv and match_key(av) != match_key(bv):
-            out.append((short, av, bv))
-    for short, key in _CONSIGNEE_DIFF_NUM:
-        av, bv = a.get(key, ""), b.get(key, "")
-        if av and bv and _digits(av) != _digits(bv):
-            out.append((short, av, bv))
-    return out
-
-
 def _consignee_consistency_errors(rows: list[RawRow], errors: list[RowError]) -> None:
     """The SAME GSTIN must carry the SAME consignee details across the upload (it is
-    one legal party). Two rows disagreeing on a field for one GSTIN is a blocking
-    error — which also guarantees each field has a single 'your value' to decide on
-    in the contradiction review."""
+    one legal party). Consistency is tracked per FIELD against the first NON-EMPTY
+    value seen for that field (NOT the first row, which may leave an optional field
+    blank) — mirroring `_merged_consignee`'s first-non-empty pick, so the single
+    merged value that gets snapshotted is provably the one agreed value.
+
+    A blank is 'not specified' and never conflicts; two DIFFERENT non-empty values
+    for one field are the blocking error — INCLUDING when an earlier row left the
+    field blank. (A first-row-only comparison would let a later differing value slip
+    through unflagged and be silently dropped by the merge, printing an address the
+    operator never entered for that group.) This also guarantees each field has a
+    single 'your value' to decide on in the contradiction review.
+    """
     for gstin, grp in _consignee_by_gstin(rows).items():
-        base = grp[0]
-        for row in grp[1:]:
-            for short, a, b in _consignee_conflicts(base.cells, row.cells):
-                errors.append(RowError(
-                    row.row_number, f"consignee_{short}",
-                    f"consignee {short} '{b}' differs from row {base.row_number} "
-                    f"('{a}') for the same GSTIN {gstin}; the same GSTIN must carry the "
-                    "same consignee details across the upload"))
+        seen: dict[str, tuple[str, int]] = {}  # field short -> (first non-empty value, row)
+        for row in grp:
+            for short, key, numeric in _CONSIGNEE_DIFF_SPECS:
+                value = row.cells.get(key, "").strip()
+                if not value:
+                    continue
+                prev = seen.get(short)
+                if prev is None:
+                    seen[short] = (value, row.row_number)
+                    continue
+                prev_value, prev_row = prev
+                same = (_digits(value) == _digits(prev_value) if numeric
+                        else match_key(value) == match_key(prev_value))
+                if not same:
+                    errors.append(RowError(
+                        row.row_number, f"consignee_{short}",
+                        f"consignee {short} '{value}' differs from row {prev_row} "
+                        f"('{prev_value}') for the same GSTIN {gstin}; the same GSTIN "
+                        "must carry the same consignee details across the upload"))
 
 
 def _merged_consignee(grp: list[RawRow]) -> dict[str, str]:
     """One representative consignee field-set for a GSTIN: the first non-empty value
-    per field across its rows (non-empties agree — consistency is enforced)."""
+    per field across its rows (non-empties agree — consistency is enforced by
+    `_consignee_consistency_errors`, which flags any later differing value)."""
     merged: dict[str, str] = {}
-    for _short, key in (*_CONSIGNEE_DIFF_TEXT, *_CONSIGNEE_DIFF_NUM):
+    for _short, key, _numeric in _CONSIGNEE_DIFF_SPECS:
         merged[key] = ""
         for row in grp:
             value = row.cells.get(key, "").strip()
@@ -308,18 +335,70 @@ def _collision_warnings(rows: list[RawRow]) -> list[RowError]:
     return warnings
 
 
-# Consignee fields to compare for the intra-batch new-GSTIN check: (short name used
-# in the warning column, upload cell key). Text fields compare via match_key; the
-# numeric pair via digits-only, mirroring the golden-record deviation semantics.
-_CONSIGNEE_DIFF_TEXT: tuple[tuple[str, str], ...] = (
-    ("name", "consignee_name"),
-    ("address_line1", "consignee_address_line1"),
-    ("address_line2", "consignee_address_line2"),
-    ("state", "consignee_state"),
-)
-_CONSIGNEE_DIFF_NUM: tuple[tuple[str, str], ...] = (
-    ("pincode", "consignee_pincode"),
-    ("phone", "consignee_phone"),
+def _duplicate_register_warnings(
+    db: Session, rows: list[RawRow], exclude_batch_id: int | None
+) -> list[RowError]:
+    """Warn (NON-blocking) when a group would re-issue against a challan ALREADY in
+    the register with the same (consignee GSTIN, challan group, date) — the tell of an
+    accidental re-run / re-upload of a batch that already generated. The operator can
+    still proceed (a genuine same-day repeat to the same consignee is allowed).
+
+    The batch being validated is EXCLUDED so a RESUME of its own already-issued groups
+    never warns against itself. One bounded query (scoped to the uploaded GSTINs +
+    dates), matched in Python — never a full-register scan.
+    """
+    first_row, order = _first_row_per_group(rows)
+    wanted: list[tuple[str, date, str]] = []  # (gstin, date, group label)
+    gstins: set[str] = set()
+    dates: set[date] = set()
+    for key in order:
+        cells = first_row[key].cells
+        gstin = consignee_master.normalize_gstin(cells.get("consignee_gstin", ""))
+        challan_date = parsing.parse_date(cells.get("challan_date", ""))
+        if not gstin or challan_date is None:
+            continue
+        wanted.append((gstin, challan_date, key))
+        gstins.add(gstin)
+        dates.add(challan_date)
+    if not wanted:
+        return []
+    stmt = select(
+        Challan.consignee_gstin, Challan.challan_date, Challan.group_key, Challan.number
+    ).where(
+        Challan.status == ChallanStatus.ISSUED.value,
+        Challan.consignee_gstin.in_(gstins),
+        Challan.challan_date.in_(dates),
+    )
+    if exclude_batch_id is not None:
+        stmt = stmt.where(Challan.batch_id != exclude_batch_id)
+    existing: dict[tuple[str, date, str], str] = {
+        (gstin, cdate, group): number
+        for gstin, cdate, group, number in db.execute(stmt).all()
+    }
+    warnings: list[RowError] = []
+    for gstin, challan_date, key in wanted:
+        number = existing.get((gstin, challan_date, key))
+        if number:
+            warnings.append(RowError(
+                first_row[key].row_number, "challan_group",
+                f"challan '{key}' matches an already-issued challan {number} in the "
+                "register (same consignee GSTIN, group, and date) — confirm this isn't "
+                "a duplicate re-issue",
+                severity="WARNING"))
+    return warnings
+
+
+# Consignee fields compared for same-GSTIN consistency + the merged snapshot:
+# (short name used in the warning/decision column, upload cell key, compare-numerically?).
+# Text fields compare via match_key; the numeric pair (pincode/phone) via digits-only,
+# mirroring the golden-record deviation semantics.
+_CONSIGNEE_DIFF_SPECS: tuple[tuple[str, str, bool], ...] = (
+    ("name", "consignee_name", False),
+    ("address_line1", "consignee_address_line1", False),
+    ("address_line2", "consignee_address_line2", False),
+    ("state", "consignee_state", False),
+    ("pincode", "consignee_pincode", True),
+    ("phone", "consignee_phone", True),
 )
 
 
@@ -441,7 +520,10 @@ def _build_challans(
     order: list[str] = []
     for row in rows:
         c = row.cells
-        key = c["challan_group"]
+        # Canonicalize the group key (strip) so the idempotency key, the stored
+        # `Challan.group_key`, and the resume error-filter all compare identically —
+        # not merely because the parser happens to strip cells.
+        key = c["challan_group"].strip()
         if key not in groups:
             challan_date = parsing.parse_date(c["challan_date"])
             if challan_date is None:  # pragma: no cover - structurally pre-validated
@@ -535,7 +617,8 @@ def _generate_inner(
     # is never group-scoped, so it still blocks.
     skip_groups = _issued_group_keys(db, batch)
     result = (ValidationResult(errors=structural) if structural
-              else validate(db, rows, skip_error_groups=skip_groups))
+              else validate(db, rows, skip_error_groups=skip_groups,
+                            exclude_batch_id=batch.id))
     if not result.ok:
         report = _store(db, storage, _issue_report_bytes(result.issues),
                         f"batch-{batch.id}-errors.csv", "challan-error-report",
@@ -593,9 +676,13 @@ def _generate_inner(
             reservations.append((pc, alloc.id))
     except numbering.NumberingError as err:
         db.rollback()
+        # NumberingError messages are our own operator-facing strings (e.g. "series L
+        # is not configured — seed the starting number"), safe to surface. The audit
+        # detail records only the error type, never a raw exception string.
+        logger.warning("challan batch %s numbering failed", batch.id, exc_info=err)
         batch.status = BatchStatus.FAILED.value
-        batch.message = f"numbering: {err}"
-        _audit(db, "challan.batch_failed", actor_uid, batch.id, {"error": str(err)})
+        batch.message = f"could not reserve numbers: {err}"
+        _audit(db, "challan.batch_failed", actor_uid, batch.id, {"error_type": "NumberingError"})
         db.commit()
         return batch
     db.commit()  # <-- reservations durable; numbering lock released BEFORE rendering
@@ -618,6 +705,13 @@ def _generate_inner(
                 challan.pdf_file_id = stored.id
                 numbering.issue(db, _allocation(db, alloc_id), entity="challan",
                                 entity_id=str(challan.id), actor_uid=actor_uid)
+                # Progress HEARTBEAT: stamp the batch row each issued challan so
+                # `updated_at` reflects real generation progress, not just when
+                # GENERATING was entered. This is what lets the stuck-sweep / recover
+                # distinguish a live-but-slow render from a dead worker (a long render
+                # keeps bumping this; a lost worker stops) — without it, a healthy
+                # large batch would be swept to FAILED mid-flight.
+                batch.updated_at = datetime.now(UTC)
                 db.commit()
             pdfs.append((f"{_safe(challan.number)}.pdf", _stored_bytes(db, storage, challan)))
 
@@ -663,10 +757,97 @@ def _fail_generation(
         if alloc is not None and alloc.status == AllocationStatus.RESERVED.value:
             numbering.void(db, alloc, reason="batch generation failed", actor_uid=actor_uid)
     batch.status = BatchStatus.FAILED.value
-    batch.message = f"generation failed: {err}"[:2000]
-    _audit(db, "challan.batch_failed", actor_uid, batch.id, {"error": str(err)[:500]})
+    # The raw exception can embed internal detail (DB SQL/params, storage refs, file
+    # paths) — it is logged server-side, NEVER surfaced in the user-visible message or
+    # the audit trail. The operator gets a generic, actionable message.
+    logger.error("challan batch %s generation failed", batch.id, exc_info=err)
+    batch.message = ("generation failed due to an internal error — please retry; "
+                     "if it persists, contact support")
+    _audit(db, "challan.batch_failed", actor_uid, batch.id, {"error_type": type(err).__name__})
     db.commit()
     return batch
+
+
+def recover_stuck_batch(
+    db: Session, batch: ChallanBatch, *, actor_uid: str | None = None,
+    now: datetime | None = None,
+) -> ChallanBatch:
+    """Reset a batch STUCK in GENERATING back to a retryable FAILED state.
+
+    A batch enters GENERATING and its worker renders+issues; if that worker dies
+    (crash, OOM during render, or a deploy that drops the in-process job), nothing
+    else moves the batch out of GENERATING and it can't be retried — the operator's
+    only apparent recourse would be re-uploading, which would mint DUPLICATE statutory
+    numbers for the already-issued groups. This reconciles it to FAILED so the
+    resume-aware retry can finish it in place (issued groups skipped; still-RESERVED
+    numbers RESUMED via the numbering idempotency key, never re-minted).
+
+    GUARDED on the progress heartbeat: a batch whose `updated_at` advanced within the
+    last `_STUCK_AFTER` is still making progress (a live worker) and is REFUSED — so a
+    recover racing a healthy render can't flip a live batch to FAILED (which would let
+    a second worker resume the same reservations and void the first's, or tempt a
+    duplicate-minting re-upload). Raises `ChallanError` if the batch isn't GENERATING
+    or hasn't been idle long enough to look stuck.
+    """
+    if batch.status != BatchStatus.GENERATING.value:
+        raise ChallanError(f"batch is {batch.status}, not stuck in generation")
+    now = now or datetime.now(UTC)
+    if _as_utc(batch.updated_at) > now - _STUCK_AFTER:
+        raise ChallanError(
+            "batch is still making progress (it advanced in the last "
+            f"{int(_STUCK_AFTER.total_seconds() // 60)} min) — it doesn't look stuck; "
+            "if it truly isn't advancing, wait a moment and try again")
+    issued = db.execute(
+        select(func.count()).select_from(Challan).where(
+            Challan.batch_id == batch.id,
+            Challan.status == ChallanStatus.ISSUED.value,
+        )
+    ).scalar() or 0
+    batch.status = BatchStatus.FAILED.value
+    if issued:
+        batch.message = (f"generation was interrupted; {issued} challan(s) already "
+                         "issued — retry to finish the remaining challans")
+    else:
+        batch.message = ("generation was interrupted before any challan was issued "
+                         "— retry to generate")
+    _audit(db, "challan.batch_recovered", actor_uid, batch.id, {"already_issued": issued})
+    db.commit()
+    return batch
+
+
+def sweep_stuck_batches(
+    db: Session, *, older_than: timedelta, now: datetime | None = None
+) -> list[int]:
+    """Reset batches wedged in GENERATING past `older_than` back to FAILED (retryable).
+
+    The unattended counterpart of `recover_stuck_batch`: a deploy that evicts the
+    running container drops in-process generation jobs, leaving their batches stuck in
+    GENERATING. `older_than` is measured against the progress HEARTBEAT (`updated_at`,
+    bumped per issued challan in the render loop), NOT the time GENERATING was entered —
+    so a live-but-slow render keeps advancing the heartbeat and is never swept, while a
+    dead worker's batch stops advancing and is healed. Issued challans are kept and
+    still-RESERVED numbers are left for the idempotent resume / the numbering sweeper. A
+    SINGLE guarded atomic UPDATE (status re-checked at write time) so a batch that
+    legitimately COMPLETED in the window is never clobbered. Caller commits.
+    """
+    now = now or datetime.now(UTC)
+    cutoff = now - older_than
+    message = ("generation was interrupted (the worker was lost) — retry to finish "
+               "this batch")
+    stmt = (
+        update(ChallanBatch)
+        .where(
+            ChallanBatch.status == BatchStatus.GENERATING.value,
+            ChallanBatch.updated_at < cutoff,
+        )
+        .values(status=BatchStatus.FAILED.value, message=message)
+        .returning(ChallanBatch.id)
+        .execution_options(synchronize_session=False)
+    )
+    ids = [int(i) for i in db.execute(stmt).scalars().all()]
+    for batch_id in ids:
+        _audit(db, "challan.batch_recovered", "system:sweeper", batch_id, {"swept": True})
+    return ids
 
 
 def _persist_challan(
@@ -829,8 +1010,10 @@ def _apply_master_updates(
         if choice == DecisionChoice.UPDATE_MASTER.value:
             updates.setdefault(gstin, {})[field] = uploaded_map[(gstin, field)]
     for gstin, fields in updates.items():
+        # Row-lock the golden record so two batches applying UPDATE_MASTER to the same
+        # GSTIN serialize (no lost update); a no-op on SQLite, real on Postgres.
         party = db.execute(
-            select(ConsigneeParty).where(ConsigneeParty.gstin == gstin)
+            select(ConsigneeParty).where(ConsigneeParty.gstin == gstin).with_for_update()
         ).scalar_one_or_none()
         if party is None:  # pragma: no cover - a known-GSTIN contradiction implies it exists
             continue
@@ -1120,7 +1303,8 @@ def validate_batch(db: Session, batch: ChallanBatch, *, actor_uid: str | None) -
     """
     storage = get_storage()
     rows, structural = parsing.parse_workbook(_source_bytes(db, batch, storage))
-    result = ValidationResult(errors=structural) if structural else validate(db, rows)
+    result = (ValidationResult(errors=structural) if structural
+              else validate(db, rows, exclude_batch_id=batch.id))
     _clear_decisions(db, batch)
     if not result.ok:
         report = _store(db, storage, _issue_report_bytes(result.issues),
@@ -1176,11 +1360,17 @@ def submit_decisions(
     choices: dict[int, str],
     *,
     actor_uid: str | None,
+    allow_update_master: bool = False,
 ) -> ChallanBatch:
     """Record the operator's choice for one or more contradictions. When NONE remain
     PENDING the batch flips NEEDS_REVIEW -> VALIDATED (ready to generate); otherwise
     it stays in review. Raises `ChallanError` (route -> 409/422) on a bad state,
-    unknown decision id, or invalid choice."""
+    unknown decision id, or invalid choice.
+
+    `allow_update_master` re-asserts the admin gate at the SERVICE boundary (not only
+    the HTTP route): an `UPDATE_MASTER` choice — the sole one that mutates the SHARED
+    golden record — is refused unless the caller is authorized, so any future caller
+    of this function inherits the check instead of an ungated master write."""
     if batch.status != BatchStatus.NEEDS_REVIEW.value:
         raise ChallanError(f"batch is {batch.status}, not awaiting review")
     # Serialize concurrent submits on this batch so two PATCHes each resolving the
@@ -1197,6 +1387,10 @@ def submit_decisions(
             raise ChallanError(f"decision {decision_id} is not part of this batch")
         if choice not in valid:
             raise ChallanError(f"choice must be one of {sorted(valid)}")
+        if choice == DecisionChoice.UPDATE_MASTER.value and not allow_update_master:
+            raise ChallanError(
+                "updating the saved consignee record requires admin; choose "
+                "'This upload only' or 'Reject', or ask an admin to update the master")
         decision.choice = choice
     db.flush()
     pending = sum(1 for d in rows.values() if d.choice == DecisionChoice.PENDING.value)

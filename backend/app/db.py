@@ -17,7 +17,14 @@ _settings = get_settings()
 # sqlite needs check_same_thread=False for the dev bootstrap; Postgres ignores it.
 _connect_args = {"check_same_thread": False} if _settings.database_url.startswith("sqlite") else {}
 
-engine = create_engine(_settings.database_url, connect_args=_connect_args, future=True)
+# hide_parameters keeps bound values (which may embed PII) out of SQLAlchemy
+# exception strings — they'd otherwise render as `[parameters: (...)]`.
+engine = create_engine(
+    _settings.database_url,
+    connect_args=_connect_args,
+    future=True,
+    hide_parameters=True,
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 

@@ -18,6 +18,7 @@ ADMIN_ONLY: frozenset[str] = frozenset(
     {
         "user.manage",          # create/invite users, assign role + module access, enable/disable
         "challan.void",
+        "challan.recover",      # reset a batch wedged in GENERATING (dead worker) → retryable
         "numbering.override",
         "validation.override_bulk",
         "masterdata.edit",

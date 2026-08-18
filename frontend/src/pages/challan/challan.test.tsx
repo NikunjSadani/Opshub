@@ -1,8 +1,9 @@
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
-import { AuthProvider } from '../../auth/AuthProvider';
+import { AuthProvider, MockAuthProvider, type Role } from '../../auth/AuthProvider';
 import { ToastProvider } from '../../ui';
 import { NewChallan } from './NewChallan';
 import { Batches } from './Batches';
@@ -22,16 +23,24 @@ function renderNewChallan() {
   );
 }
 
-function renderBatches() {
+function renderBatches(role?: Role) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // Default AuthProvider signs in as ADMIN; pass a role to exercise the non-admin
+  // gates via the mock provider directly.
+  const auth = (children: ReactNode) =>
+    role ? (
+      <MockAuthProvider initialRole={role}>{children}</MockAuthProvider>
+    ) : (
+      <AuthProvider>{children}</AuthProvider>
+    );
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
-        <AuthProvider>
+        {auth(
           <ToastProvider>
             <Batches />
-          </ToastProvider>
-        </AuthProvider>
+          </ToastProvider>,
+        )}
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -377,5 +386,138 @@ describe('Batches review affordance', () => {
       await screen.findByText(/this upload disagrees with your saved records/i),
     ).toBeInTheDocument();
     expect(await screen.findByText('Pincode')).toBeInTheDocument();
+  });
+
+  it('offers Retry generation on a FAILED row and Recover on a GENERATING row (admin)', async () => {
+    const FAILED = {
+      id: 70,
+      status: 'FAILED',
+      challan_count: 3,
+      line_count: 6,
+      message: 'render crashed midway',
+      error_report_file_id: null,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+    const GENERATING = {
+      id: 71,
+      status: 'GENERATING',
+      challan_count: 2,
+      line_count: 4,
+      message: null,
+      error_report_file_id: null,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+    let generateBody: unknown = null;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const json = (data: unknown) =>
+          new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        if (url.includes('/generate') && method === 'POST') {
+          generateBody = JSON.parse(String(init?.body));
+          return json({ ...FAILED, status: 'GENERATING' });
+        }
+        if (url.includes('/challan/batches')) return json([FAILED, GENERATING]);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderBatches();
+
+    // FAILED -> Retry generation; opens a series prompt and POSTs /generate.
+    const retry = await screen.findByRole('button', { name: /retry generation/i });
+    fireEvent.click(retry);
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    // Confirm with the default series.
+    fireEvent.click(screen.getAllByRole('button', { name: /retry generation/i }).pop()!);
+    await waitFor(() => expect(generateBody).toEqual({ series: 'L' }));
+
+    // GENERATING -> Recover is available to an admin.
+    expect(screen.getByRole('button', { name: /^recover$/i })).toBeInTheDocument();
+  });
+
+  it('hides Recover from a non-admin on a GENERATING row and shows a hint instead', async () => {
+    const GENERATING = {
+      id: 72,
+      status: 'GENERATING',
+      challan_count: 2,
+      line_count: 4,
+      message: null,
+      error_report_file_id: null,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/challan/batches'))
+          return new Response(JSON.stringify([GENERATING]), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderBatches('OPERATIONS');
+
+    expect(await screen.findByText(/an admin can recover it/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^recover$/i })).not.toBeInTheDocument();
+  });
+
+  it('disables Update master in the review panel for a non-admin', async () => {
+    const NEEDS_REVIEW_BATCH = {
+      id: 90,
+      status: 'NEEDS_REVIEW',
+      challan_count: 1,
+      line_count: 2,
+      message: '1 consignee contradiction(s) to review before generating',
+      error_report_file_id: 77,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+    const DECISIONS = [
+      {
+        id: 9,
+        gstin: '27ABCDE1234F1Z5',
+        consignee_name: 'Acme Foods',
+        field: 'pincode',
+        stored_value: '400001',
+        uploaded_value: '400002',
+        choice: 'PENDING',
+      },
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        const json = (data: unknown) =>
+          new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        if (url.includes('/decisions')) return json(DECISIONS);
+        if (url.includes('/challan/batches')) return json([NEEDS_REVIEW_BATCH]);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderBatches('OPERATIONS');
+
+    fireEvent.click(await screen.findByRole('button', { name: /^review$/i }));
+    // The UPDATE_MASTER radio is present but disabled; the two safe options are not.
+    const updateMaster = (await screen.findByLabelText(/update master/i)) as HTMLInputElement;
+    expect(updateMaster).toBeDisabled();
+    expect(screen.getByLabelText(/this upload only/i)).toBeEnabled();
+    expect(screen.getByText(/admin only — choose this upload/i)).toBeInTheDocument();
   });
 });

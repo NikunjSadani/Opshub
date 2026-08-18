@@ -2,29 +2,52 @@ import { Fragment, useState } from 'react';
 import {
   Badge,
   Button,
+  ConfirmDialog,
   ErrorState,
   Loading,
   PageHeader,
   StatePanel,
   Table,
+  TextField,
   THead,
   Th,
   Tr,
   Td,
   useToast,
 } from '../../ui';
+import { useAuth } from '../../auth/AuthProvider';
 import { useApi } from '../../api/client';
-import { useBatchesQuery, type BatchOut } from '../../api/challan';
+import {
+  useBatchesQuery,
+  useGenerateBatch,
+  useRecoverBatch,
+  type BatchOut,
+} from '../../api/challan';
 import { BATCH_STATUS_LABEL, BATCH_STATUS_TONE, batchArtifacts, errorMessage } from './challanFormat';
 import { ReviewPanel } from './ReviewPanel';
 
+// Same series shape as New Challan step 3 — kept in sync so a retry from here
+// enforces the identical rule.
+const SERIES_RE = /^[A-Za-z0-9]{1,8}$/;
+
 export function Batches() {
   const toast = useToast();
+  const { user } = useAuth();
   const { download } = useApi();
+  const isAdmin = user?.role === 'ADMIN';
   const query = useBatchesQuery(50);
   // Which NEEDS_REVIEW batch (if any) has its inline review panel expanded, so a
   // batch stuck in review is resolvable here — not only inside the upload session.
   const [reviewingId, setReviewingId] = useState<number | null>(null);
+
+  // Retrying a FAILED (possibly partially-issued) batch re-runs generation for
+  // its un-issued challans without a re-upload — the only safe way to finish it
+  // after the live upload session is gone (a re-upload would MINT DUPLICATES).
+  const generate = useGenerateBatch();
+  const recover = useRecoverBatch();
+  const [retryTarget, setRetryTarget] = useState<BatchOut | null>(null);
+  const [retrySeries, setRetrySeries] = useState('L');
+  const [retryError, setRetryError] = useState<string | undefined>();
 
   async function onDownload(fileId: number | null, fallback: string) {
     if (fileId == null) return;
@@ -39,6 +62,47 @@ export function Batches() {
   // NEEDS_REVIEW on its own; collapse the panel once it is done.
   function onResolved(_updated: BatchOut) {
     setReviewingId(null);
+  }
+
+  function openRetry(b: BatchOut) {
+    setRetryTarget(b);
+    setRetrySeries('L');
+    setRetryError(undefined);
+    generate.reset();
+  }
+
+  function closeRetry() {
+    setRetryTarget(null);
+    setRetryError(undefined);
+    generate.reset();
+  }
+
+  function confirmRetry() {
+    if (!retryTarget) return;
+    if (!SERIES_RE.test(retrySeries)) {
+      setRetryError(retrySeries ? '1–8 letters/digits' : 'Series is required');
+      return;
+    }
+    generate.mutate(
+      { batchId: retryTarget.id, series: retrySeries },
+      {
+        onSuccess: (b) => {
+          toast.success(`Generation restarted for batch #${b.id}.`);
+          closeRetry();
+        },
+        onError: (err) => toast.error(errorMessage(err)),
+      },
+    );
+  }
+
+  function onRecover(b: BatchOut) {
+    recover.mutate(
+      { batchId: b.id },
+      {
+        onSuccess: (u) => toast.success(`Batch #${u.id} recovered — you can retry generation now.`),
+        onError: (err) => toast.error(errorMessage(err)),
+      },
+    );
   }
 
   return (
@@ -82,7 +146,10 @@ export function Batches() {
             {query.data.map((b) => {
               const links = batchArtifacts(b);
               const needsReview = b.status === 'NEEDS_REVIEW';
+              const isFailed = b.status === 'FAILED';
+              const isGenerating = b.status === 'GENERATING';
               const expanded = reviewingId === b.id;
+              const hasAction = needsReview || isFailed || isGenerating || links.length > 0;
               return (
                 <Fragment key={b.id}>
                   <Tr>
@@ -105,20 +172,37 @@ export function Batches() {
                             {expanded ? 'Close review' : 'Review'}
                           </Button>
                         )}
-                        {links.length === 0 && !needsReview ? (
-                          <span className="text-slate-400">—</span>
-                        ) : (
-                          links.map((l) => (
-                            <Button
-                              key={l.label}
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => onDownload(l.fileId, l.name)}
-                            >
-                              {l.label}
-                            </Button>
-                          ))
+                        {isFailed && (
+                          <Button variant="secondary" size="sm" onClick={() => openRetry(b)}>
+                            Retry generation
+                          </Button>
                         )}
+                        {isGenerating &&
+                          (isAdmin ? (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              loading={recover.isPending && recover.variables?.batchId === b.id}
+                              onClick={() => onRecover(b)}
+                            >
+                              Recover
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-slate-500">
+                              Generating… if it stays stuck, an admin can recover it.
+                            </span>
+                          ))}
+                        {links.map((l) => (
+                          <Button
+                            key={l.label}
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => onDownload(l.fileId, l.name)}
+                          >
+                            {l.label}
+                          </Button>
+                        ))}
+                        {!hasAction && <span className="text-slate-400">—</span>}
                       </div>
                     </Td>
                   </Tr>
@@ -135,6 +219,38 @@ export function Batches() {
           </tbody>
         </Table>
       )}
+
+      <ConfirmDialog
+        open={retryTarget != null}
+        title="Retry generation"
+        confirmLabel="Retry generation"
+        loading={generate.isPending}
+        onConfirm={confirmRetry}
+        onCancel={closeRetry}
+        message={
+          <div>
+            <p className="mb-3">
+              Re-run generation for batch{' '}
+              <span className="font-semibold">#{retryTarget?.id}</span>. Already-issued challans
+              keep their numbers; only the un-issued ones are generated. Do not re-upload the
+              workbook — that would create duplicate challan numbers.
+            </p>
+            <div className="max-w-[10rem]">
+              <TextField
+                label="Series"
+                value={retrySeries}
+                onChange={(e) => {
+                  setRetrySeries(e.target.value);
+                  if (retryError) setRetryError(undefined);
+                }}
+                error={retryError}
+                hint="Number prefix, e.g. L"
+                maxLength={8}
+              />
+            </div>
+          </div>
+        }
+      />
     </div>
   );
 }

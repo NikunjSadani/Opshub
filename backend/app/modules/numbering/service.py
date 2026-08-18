@@ -36,6 +36,7 @@ generation; reserve+commit, then generate, then `issue`+commit.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -51,6 +52,8 @@ from app.modules.numbering.models import (
     NumberingCounter,
 )
 from app.platform import audit
+
+logger = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
 _ISSUER_PREFIX = "GIF/DC"  # GIF (Gifsy) / DC (Delivery Challan)
@@ -272,7 +275,13 @@ def allocate(
             detail={"series": series, "fy": fy, "number": number},
         )
         return alloc
-    raise NumberingError(f"numbering contention on {series}/{fy}: {last_err}")
+    # The raw IntegrityError (which can embed SQL + bound parameters) is LOGGED, never
+    # surfaced: the caller-facing message stays generic so it can't leak DB internals.
+    logger.error(
+        "numbering contention on %s/%s after %d retries",
+        series, fy, _MAX_CONTENTION_RETRIES, exc_info=last_err,
+    )
+    raise NumberingError(f"numbering contention on {series}/{fy} — please retry")
 
 
 def _max_active_number(db: Session, series: str, fy: str) -> int:

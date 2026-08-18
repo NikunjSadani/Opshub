@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Badge,
   Button,
@@ -47,10 +47,24 @@ export function Register() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [downloading, setDownloading] = useState(false);
+  const [exportTruncated, setExportTruncated] = useState(false);
 
   const filters: ChallanFilters = { series, fy, status, date_from: dateFrom, date_to: dateTo };
+  // Debounce the filters that feed the query key so each keystroke in Series /
+  // Financial year / dates does not fire its own request; the list refetches
+  // ~300ms after typing settles. The immediate `filters` is still used for the
+  // CSV export (a deliberate button click, not a keystroke).
+  const [debouncedFilters, setDebouncedFilters] = useState<ChallanFilters>(filters);
+  useEffect(() => {
+    const t = window.setTimeout(
+      () => setDebouncedFilters({ series, fy, status, date_from: dateFrom, date_to: dateTo }),
+      300,
+    );
+    return () => window.clearTimeout(t);
+  }, [series, fy, status, dateFrom, dateTo]);
+
   // Changing any filter changes the query key, so paging naturally resets to page 0.
-  const query = useChallansInfiniteQuery(filters);
+  const query = useChallansInfiniteQuery(debouncedFilters);
   const rows = query.data?.pages.flat() ?? [];
 
   const voidMutation = useVoidChallan();
@@ -91,8 +105,16 @@ export function Register() {
 
   async function onDownloadCsv() {
     setDownloading(true);
+    setExportTruncated(false);
     try {
-      await downloadUrl(`/challan/challans.csv${buildChallanCsvQuery(filters)}`, 'challans.csv');
+      const result = await downloadUrl(
+        `/challan/challans.csv${buildChallanCsvQuery(filters)}`,
+        'challans.csv',
+      );
+      if (result.truncated) {
+        setExportTruncated(true);
+        toast.info('The export was capped at the maximum row limit — narrow the filters to get the full set.');
+      }
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -125,6 +147,17 @@ export function Register() {
           </Button>
         }
       />
+
+      {exportTruncated && (
+        <div
+          role="status"
+          className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+        >
+          The last CSV export was capped at the maximum row limit, so it is not the complete
+          result set. Add filters (series, financial year, or a date range) and export again for
+          the full data.
+        </div>
+      )}
 
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <TextField

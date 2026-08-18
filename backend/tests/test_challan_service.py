@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -350,7 +351,8 @@ def test_decision_update_master_writes_record(env: tuple[Session, str]) -> None:
     batch = _upload(db, data)
     service.validate_batch(db, batch, actor_uid="tester")
     decision = service.list_decisions(db, batch)[0]
-    service.submit_decisions(db, batch, {decision.id: "UPDATE_MASTER"}, actor_uid="tester")
+    service.submit_decisions(db, batch, {decision.id: "UPDATE_MASTER"}, actor_uid="tester",
+                             allow_update_master=True)
     service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
     party = db.execute(select(ConsigneeParty).where(ConsigneeParty.gstin == fresh)).scalar_one()
     ch = db.execute(select(Challan).where(Challan.batch_id == batch.id)).scalar_one()
@@ -546,7 +548,8 @@ def test_update_master_not_applied_on_generation_failure(env: tuple[Session, str
     batch = _upload(db, data)
     service.validate_batch(db, batch, actor_uid="tester")
     decision = service.list_decisions(db, batch)[0]
-    service.submit_decisions(db, batch, {decision.id: "UPDATE_MASTER"}, actor_uid="tester")
+    service.submit_decisions(db, batch, {decision.id: "UPDATE_MASTER"}, actor_uid="tester",
+                             allow_update_master=True)
     # Generation fails on the first render -> the master must NOT be mutated (the write
     # is deferred to batch success), so a failed batch never rewrites the shared record.
     service.generate(db, batch, RaisingRenderer(fail_on=1), series="L", actor_uid="tester")
@@ -660,3 +663,146 @@ def test_resume_revalidates_a_voided_group(env: tuple[Session, str]) -> None:
     issued = [c for c in db.execute(select(Challan)).scalars()
               if c.status == ChallanStatus.ISSUED.value]
     assert issued == []  # nothing re-issued past HSN validation
+
+
+# --- Whole-module audit regressions (inc 14-17 seam interactions) -------------
+
+def test_consignee_consistency_flags_blank_base_then_differing(env: tuple[Session, str]) -> None:
+    """H2: the first row for a GSTIN leaves an optional field blank, then two LATER
+    rows carry DIFFERENT non-empty values. This must be a blocking error — else the
+    second value is silently dropped and a never-entered address prints on a challan."""
+    db, _ = env
+    data = _workbook([
+        _row("G1", "Store A", "Item", "1", "100.00", "105.00", consignee_address_line1=""),
+        _row("G2", "Store B", "Item", "1", "100.00", "105.00",
+             consignee_address_line1="MUMBAI OFFICE"),
+        _row("G3", "Store C", "Item", "1", "100.00", "105.00",
+             consignee_address_line1="DELHI OFFICE"),
+    ])
+    batch = _upload(db, data)
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert not result.ok
+    assert any(e.column == "consignee_address_line1" and "differs" in e.message
+               for e in result.errors)
+
+
+def test_duplicate_register_warning_on_reupload(env: tuple[Session, str]) -> None:
+    """Owner-chosen WARN behaviour: re-uploading a batch whose (consignee GSTIN, group,
+    date) is already ISSUED surfaces a NON-blocking warning, never a block."""
+    db, db_url = env
+    b1 = _upload(db, _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00")]))
+    assert service.validate_batch(db, b1, actor_uid="tester").ok
+    service.generate(db, b1, FakeRenderer(db_url), series="L", actor_uid="tester")
+    assert b1.status == BatchStatus.COMPLETED.value
+
+    b2 = _upload(db, _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00")]))
+    result = service.validate_batch(db, b2, actor_uid="tester")
+    assert result.ok  # non-blocking — the operator can still proceed
+    assert b2.status == BatchStatus.VALIDATED.value
+    assert any(w.column == "challan_group" and "already-issued" in w.message
+               for w in result.warnings)
+
+
+def test_first_batch_has_no_self_duplicate_warning(env: tuple[Session, str]) -> None:
+    """The batch being validated is excluded from the duplicate check — an empty
+    register (or a resume of its own groups) never warns against itself."""
+    db, _ = env
+    batch = _upload(db, _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00")]))
+    result = service.validate_batch(db, batch, actor_uid="tester")
+    assert result.ok
+    assert not any("already-issued" in w.message for w in result.warnings)
+
+
+def test_recover_stuck_batch_then_retry_completes(env: tuple[Session, str]) -> None:
+    """H1: a batch wedged in GENERATING (dead worker) is reconciled to a retryable
+    FAILED, issued challans kept, and the retry finishes without re-minting numbers."""
+    db, db_url = env
+    code2 = _add_project(db, "Second")
+    data = _workbook([
+        _row("G1", "Store A", "Item", "1", "100.00", "105.00", project="BRI-001"),
+        _row("G2", "Store B", "Item", "1", "100.00", "105.00", project=code2),
+    ])
+    batch = _upload(db, data)
+    service.validate_batch(db, batch, actor_uid="tester")
+    service.generate(db, batch, RaisingRenderer(fail_on=2), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.FAILED.value
+
+    # Simulate a crash MID-generation: the batch is wedged in GENERATING, 1 issued.
+    batch.status = BatchStatus.GENERATING.value
+    db.commit()
+    # `now` in the future so the heartbeat reads as idle past the stuck threshold.
+    service.recover_stuck_batch(db, batch, actor_uid="tester",
+                                now=datetime.now(UTC) + timedelta(minutes=5))
+    assert batch.status == BatchStatus.FAILED.value
+    assert "already issued" in (batch.message or "")
+    assert len([c for c in db.execute(select(Challan)).scalars()
+                if c.status == ChallanStatus.ISSUED.value]) == 1
+
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    assert batch.status == BatchStatus.COMPLETED.value
+    challans = list(db.execute(select(Challan)).scalars())
+    assert len(challans) == 2 and len({c.allocation_id for c in challans}) == 2
+
+
+def test_recover_rejects_non_generating_batch(env: tuple[Session, str]) -> None:
+    db, _ = env
+    batch = _upload(db, _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00")]))
+    service.validate_batch(db, batch, actor_uid="tester")  # VALIDATED, not GENERATING
+    with pytest.raises(service.ChallanError):
+        service.recover_stuck_batch(db, batch, actor_uid="tester")
+
+
+def test_recover_refuses_batch_still_progressing(env: tuple[Session, str]) -> None:
+    """A GENERATING batch whose heartbeat is fresh (a live worker) must NOT be
+    recoverable — else a recover racing a healthy render could flip a live batch to
+    FAILED and let a second worker resume + void the first's reservations."""
+    db, _ = env
+    batch = _upload(db, _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00")]))
+    service.validate_batch(db, batch, actor_uid="tester")
+    batch.status = BatchStatus.GENERATING.value
+    db.commit()  # updated_at ~ now -> looks live
+    with pytest.raises(service.ChallanError):
+        service.recover_stuck_batch(db, batch, actor_uid="tester")  # now = real now
+
+
+def test_sweep_stuck_batches_resets_only_stale_generating(env: tuple[Session, str]) -> None:
+    db, _ = env
+    batch = _upload(db, _workbook([_row("G1", "Store A", "Item", "1", "100.00", "105.00")]))
+    service.validate_batch(db, batch, actor_uid="tester")
+    batch.status = BatchStatus.GENERATING.value
+    db.commit()
+
+    # Fresh GENERATING (updated_at ~ now) is NOT swept (cutoff = now - 30m).
+    assert service.sweep_stuck_batches(db, older_than=timedelta(minutes=30)) == []
+    db.commit()
+    db.refresh(batch)
+    assert batch.status == BatchStatus.GENERATING.value
+
+    # Advance 'now' well past the window -> the stale batch is reset to FAILED.
+    ids = service.sweep_stuck_batches(
+        db, older_than=timedelta(minutes=30), now=datetime.now(UTC) + timedelta(hours=2))
+    db.commit()
+    db.refresh(batch)
+    assert batch.id in ids and batch.status == BatchStatus.FAILED.value
+
+
+def test_submit_decisions_update_master_requires_authorization(
+    env: tuple[Session, str]
+) -> None:
+    """L4: UPDATE_MASTER is refused at the SERVICE boundary without authorization
+    (defense-in-depth beyond the HTTP route); THIS_UPLOAD stays open to anyone."""
+    db, db_url = env
+    fresh = "24AAACB2894G1ZT"
+    _seed_party(db, db_url, fresh)
+    data = _workbook([_row("G2", "Store B", "Item", "1", "100.00", "105.00",
+                           gstin=fresh, state="Gujarat", consignee_name="Deoleo India Ltd")])
+    batch = _upload(db, data)
+    service.validate_batch(db, batch, actor_uid="tester")
+    decision_id = service.list_decisions(db, batch)[0].id
+
+    with pytest.raises(service.ChallanError):
+        service.submit_decisions(db, batch, {decision_id: "UPDATE_MASTER"}, actor_uid="t")
+    db.rollback()
+
+    service.submit_decisions(db, batch, {decision_id: "THIS_UPLOAD"}, actor_uid="t")
+    assert batch.status == BatchStatus.VALIDATED.value

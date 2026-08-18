@@ -59,6 +59,12 @@ async function downloadError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, message);
 }
 
+/** Result of a URL download: whether the export was capped, and the saved name. */
+export interface DownloadResult {
+  truncated: boolean;
+  filename: string;
+}
+
 export interface RequestOptions {
   method?: string;
   /** JSON-serializable request body. */
@@ -135,7 +141,7 @@ export function useApi() {
   );
 
   const downloadUrl = useCallback(
-    async (path: string, fallbackName = 'download') => {
+    async (path: string, fallbackName = 'download'): Promise<DownloadResult> => {
       const token = await getToken();
       const res = await fetch(`${API_BASE}${path}`, {
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
@@ -153,6 +159,9 @@ export function useApi() {
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
+      // Streaming exports cap their row count and flag it with `X-Truncated: true`
+      // so the caller can tell the user the file is not the full result set.
+      return { truncated: res.headers.get('X-Truncated') === 'true', filename: name };
     },
     [getToken],
   );

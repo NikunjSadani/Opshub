@@ -30,6 +30,25 @@ export function errorMessage(err: unknown): string {
   return 'Something went wrong.';
 }
 
+/**
+ * True only when a batch carries a NON-BLOCKING warnings report — i.e. it
+ * validated (or moved past validation) AND still has a report file attached.
+ * A FAILED_VALIDATION batch's file is errors, a NEEDS_REVIEW batch's is the
+ * blocking review workbook — neither is "warnings", so both are excluded here.
+ *
+ * This is the single source of truth for the amber "review before generating"
+ * box. A review batch that has been resolved to VALIDATED has its
+ * `error_report_file_id` cleared server-side, so it correctly reports `false`
+ * and no stale warnings box (or mislabelled review download) is shown.
+ */
+export function batchHasWarnings(b: BatchOut): boolean {
+  return (
+    b.error_report_file_id != null &&
+    b.status !== 'FAILED_VALIDATION' &&
+    b.status !== 'NEEDS_REVIEW'
+  );
+}
+
 /** Download descriptors for whatever artifacts a batch has produced (shared by
  *  the Batches tab and the New Challan recent-batches list). */
 export function batchArtifacts(

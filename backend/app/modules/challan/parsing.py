@@ -50,17 +50,68 @@ _DATE_FORMATS = ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y")
 
 # ------------------------------------------------------------------- helpers
 
+# Only plain ASCII numerics are a number here. This rejects non-ASCII digit code
+# points (Devanagari/Arabic-Indic/fullwidth) and `Decimal`'s own "1_000"
+# underscore grouping — both of which `Decimal()` would otherwise silently accept
+# — mirroring the pincode ASCII guard so they surface as clean row errors. It also
+# incidentally rejects "NaN"/"Infinity"/"1E30" (letters), which must never
+# masquerade as a quantity or amount.
+_ASCII_NUMERIC = re.compile(r"\A[+\-0-9.,]+\Z")
+
+
+def _degroup(s: str) -> str | None:
+    """Validate thousands-comma grouping and return the comma-free number, else None.
+
+    A plain number with no comma passes through unchanged. When commas ARE present
+    they must form valid grouping — Western `1,234,567.89` or Indian `1,23,456.78`,
+    both accepted — meaning: the rightmost integer group is exactly 3 digits, the
+    first group is 1-3 digits, and every interior group has a consistent width (all
+    3 = Western, all 2 = Indian). A comma AFTER the decimal point (a European decimal
+    comma, e.g. "1.234,50"), an empty/oversized group, or mixed interior widths
+    (e.g. "1,0,0") is malformed grouping -> None, so it becomes a clean validation
+    row error instead of a silently-wrong value.
+    """
+    if "," not in s:
+        return s
+    sign, body = ("", s)
+    if body[:1] in "+-":
+        sign, body = body[0], body[1:]
+    if "." in body:
+        int_part, _, frac_part = body.partition(".")
+        if "," in frac_part:  # a comma may never trail the decimal point
+            return None
+    else:
+        int_part, frac_part = body, None
+    groups = int_part.split(",")
+    if len(groups) < 2 or any(not g.isdigit() for g in groups):
+        return None
+    first, last, interior = groups[0], groups[-1], groups[1:-1]
+    if not (1 <= len(first) <= 3) or len(last) != 3:
+        return None
+    if interior and not (all(len(g) == 3 for g in interior)
+                         or all(len(g) == 2 for g in interior)):
+        return None
+    degrouped = sign + "".join(groups)
+    return degrouped if frac_part is None else f"{degrouped}.{frac_part}"
+
+
 def _to_decimal(text: str) -> Decimal | None:
     """Parse a (comma-grouped) numeric string to a finite Decimal, else None.
 
-    Rejects blanks, junk, and non-finite tokens ("NaN"/"Infinity" are valid
-    `Decimal` literals but must never masquerade as a quantity or amount).
+    Rejects blanks, junk, non-ASCII digits, malformed comma grouping, and
+    non-finite tokens — anything that isn't an unambiguous plain-ASCII number
+    becomes None so it surfaces as a clean row error rather than a wrong value.
     """
-    cleaned = text.strip().replace(",", "")
-    if not cleaned:
+    s = text.strip()
+    if not s:
+        return None
+    if not _ASCII_NUMERIC.match(s):  # L1: non-ASCII digits / "1_000" underscores
+        return None
+    degrouped = _degroup(s)  # M2: reject European "1.234,50" / ambiguous "1,0,0"
+    if degrouped is None:
         return None
     try:
-        value = Decimal(cleaned)
+        value = Decimal(degrouped)
     except InvalidOperation:
         return None
     return value if value.is_finite() else None
@@ -70,9 +121,10 @@ def parse_paise(text: str) -> int | None:
     """Rupees string ("1,234.50") -> integer paise (123450), or None if not numeric.
 
     Half-up rounding to the paise keeps money exact and float-free. A finite but
-    absurdly-large value (e.g. "1E30") overflows the Decimal context on quantize,
-    raising InvalidOperation; we catch it and return None so a junk cell becomes a
-    clean row error instead of crashing the synchronous upload with a 500.
+    absurdly-large value (e.g. a 27-digit rupee figure) overflows the Decimal
+    context on quantize, raising InvalidOperation; we catch it and return None so a
+    junk cell becomes a clean row error instead of crashing the synchronous upload
+    with a 500. (A shorter "1E30" is already rejected upstream as non-numeric.)
     """
     rupees = _to_decimal(text)
     if rupees is None:
@@ -228,14 +280,32 @@ def _required_errors(row: RawRow, errors: list[RowError]) -> None:
             errors.append(RowError(row.row_number, col, f"{col} is required"))
 
 
-# A generous sanity ceiling on a single money cell (paise). Well within BigInteger
-# even summed across a batch, but rejects an absurd/typo value (e.g. "1E30") at
-# validation with a clear message instead of a deferred insert overflow at generate.
+# A generous sanity ceiling on a single money cell (paise). This bounds ONE cell,
+# not a batch total: a single 50,000-line group can sum well past int8 (5e19 >
+# 9.22e18), so any per-column total is the service's concern — here we only reject
+# an absurd/typo value (a huge amount/rate) at validation with a clear message
+# instead of a deferred insert overflow at generate.
 _MAX_MONEY_PAISE = 10**15  # = Rs 10,000,000,000,000
+
+# `quantity` maps to a Numeric(14,3) column: at most 11 integer digits and 3 decimal
+# places. A larger/more-precise value passes the `> 0` check but overflows the column
+# at generate — BURNING an already-reserved statutory number — so bound it here as a
+# validation row error (paralleling the _MAX_MONEY_PAISE money ceiling).
+_MAX_QTY = Decimal(10) ** 11  # exclusive ceiling: 11 integer digits
+_QTY_MAX_DECIMALS = 3
+
+
+def _qty_out_of_column(qty: Decimal) -> bool:
+    """True if a positive quantity won't fit the Numeric(14,3) column."""
+    if qty >= _MAX_QTY:
+        return True
+    exponent = qty.as_tuple().exponent
+    return isinstance(exponent, int) and -exponent > _QTY_MAX_DECIMALS
 
 
 def _numeric_errors(row: RawRow, errors: list[RowError]) -> None:
-    """Validate quantity (> 0), amount (>= 0), gst_rate (0..100), and PIN codes.
+    """Validate quantity (> 0, fits Numeric(14,3)), amount (>= 0), gst_rate
+    (0..100), and PIN codes.
 
     Emptiness is left to `_required_errors`, so these fire only on a present-but-
     malformed value (no duplicate error for a blank required cell). Pincodes are
@@ -247,6 +317,11 @@ def _numeric_errors(row: RawRow, errors: list[RowError]) -> None:
         if qty is None or qty <= 0:
             errors.append(RowError(row.row_number, "quantity",
                                    "quantity must be a positive number"))
+        elif _qty_out_of_column(qty):
+            errors.append(RowError(
+                row.row_number, "quantity",
+                "quantity is too large or too precise "
+                "(max 11 digits before and 3 after the decimal point)"))
     if c.get("amount", "").strip():
         amount = parse_paise(c["amount"])
         if amount is None or amount < 0:

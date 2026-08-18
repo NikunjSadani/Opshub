@@ -13,8 +13,9 @@ Admin-only (`challan.void`).
 """
 from __future__ import annotations
 
+import hmac
 import re
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import Annotated, Any, cast
@@ -25,6 +26,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
+    Header,
     HTTPException,
     Query,
     UploadFile,
@@ -120,6 +122,17 @@ class ChallanSummaryOut(BaseModel):
 
 class VoidBody(BaseModel):
     reason: str = Field(min_length=1, max_length=300)
+
+
+class StuckSweepBody(BaseModel):
+    # Conservative floor: a batch is only auto-reset after this long WITHOUT a progress
+    # heartbeat (see service._STUCK_AFTER / the render-loop heartbeat), so a live-but-
+    # slow render is never swept. 60 min default; never below 15.
+    older_than_minutes: int = Field(default=60, ge=15, le=1440)
+
+
+class StuckSweepOut(BaseModel):
+    reset: int
 
 
 class DecisionOut(BaseModel):
@@ -301,11 +314,61 @@ def submit_batch_decisions(
             "only' or 'Reject', or ask an admin to update the master")
     choices = {item.id: item.choice for item in body.decisions}
     try:
-        service.submit_decisions(db, batch, choices, actor_uid=user.firebase_uid)
+        service.submit_decisions(
+            db, batch, choices, actor_uid=user.firebase_uid,
+            allow_update_master=can(user, "masterdata.edit"),
+        )
     except service.ChallanError as err:
         raise HTTPException(status.HTTP_409_CONFLICT, str(err)) from err
     db.refresh(batch)
     return batch
+
+
+@router.post("/challan/batches/{batch_id}/recover", response_model=BatchOut)
+def recover_batch(
+    batch_id: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ChallanBatch:
+    """Reset a batch STUCK in GENERATING (its worker died — crash/OOM/deploy) back to
+    a retryable FAILED state, so it can be finished via retry WITHOUT re-uploading
+    (which would mint duplicate statutory numbers). ADMIN only; issued challans are
+    kept and reserved numbers resume idempotently on the retry."""
+    if not can(user, "challan.recover"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "challan.recover requires ADMIN")
+    batch = db.get(ChallanBatch, batch_id)
+    if batch is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "batch not found")
+    try:
+        service.recover_stuck_batch(db, batch, actor_uid=user.firebase_uid)
+    except service.ChallanError as err:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(err)) from err
+    db.refresh(batch)
+    return batch
+
+
+@router.post("/challan/batches/sweep-stuck", response_model=StuckSweepOut)
+def sweep_stuck_batches(
+    db: Annotated[Session, Depends(get_db)],
+    body: StuckSweepBody | None = None,
+    x_sweep_secret: Annotated[str | None, Header()] = None,
+) -> StuckSweepOut:
+    """Reset batches wedged in GENERATING past the cutoff back to FAILED (retryable).
+
+    The unattended counterpart of the recover endpoint — for a scheduler, NOT a user.
+    Authenticated by the same `X-Sweep-Secret` shared secret as the numbering sweep;
+    fail-closed (503) when no secret is configured. The service audits each reset."""
+    expected = get_settings().sweep_secret
+    if not expected:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "sweep disabled")
+    if x_sweep_secret is None or not hmac.compare_digest(x_sweep_secret, expected):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "invalid sweep secret")
+    body = body or StuckSweepBody()
+    ids = service.sweep_stuck_batches(
+        db, older_than=timedelta(minutes=body.older_than_minutes)
+    )
+    db.commit()
+    return StuckSweepOut(reset=len(ids))
 
 
 @router.get("/challan/batches", response_model=list[BatchOut])

@@ -189,12 +189,19 @@ export const challanKeys = {
 
 // ------------------------------------------------------------------ queries
 
-/** Recent batches (newest first). */
-export function useBatchesQuery(limit = 50): UseQueryResult<BatchOut[], Error> {
+/**
+ * Recent batches (newest first). Self-polls (default every 2.5s) while ANY row
+ * is GENERATING so its artifacts appear without a manual refresh — exactly what
+ * New Challan promises ("come back to the Batches tab later"). Polling stops the
+ * moment no row is GENERATING, so a quiet list makes no background requests.
+ */
+export function useBatchesQuery(limit = 50, pollMs = 2500): UseQueryResult<BatchOut[], Error> {
   const { get } = useApi();
   return useQuery<BatchOut[], Error>({
     queryKey: challanKeys.batches(limit),
     queryFn: ({ signal }) => get<BatchOut[]>(`/challan/batches?limit=${limit}`, signal),
+    refetchInterval: (query) =>
+      query.state.data?.some((b) => b.status === 'GENERATING') ? pollMs : false,
   });
 }
 
@@ -256,7 +263,11 @@ export function useChallansInfiniteQuery(
     queryFn: ({ pageParam, signal }) =>
       get<ChallanOut[]>(`/challan/challans${buildChallanListQuery(filters, pageParam)}`, signal),
     getNextPageParam: (lastPage, allPages) =>
-      lastPage.length === CHALLAN_PAGE_SIZE
+      // Only offer another page when the last one came back EXACTLY full and was
+      // non-empty. A short OR empty page means the end, so we never chase one
+      // wasted empty fetch past the last row (e.g. a total that is a multiple of
+      // the page size still stops cleanly on the following empty page).
+      lastPage.length > 0 && lastPage.length === CHALLAN_PAGE_SIZE
         ? allPages.reduce((total, page) => total + page.length, 0)
         : undefined,
   });
@@ -303,6 +314,25 @@ export function useGenerateBatch(): UseMutationResult<
   return useMutation<BatchOut, Error, { batchId: number; series: string }>({
     mutationFn: ({ batchId, series }) =>
       post<BatchOut>(`/challan/batches/${batchId}/generate`, { series }),
+    onSuccess: (batch) => {
+      qc.setQueryData(challanKeys.batch(batch.id), batch);
+      void qc.invalidateQueries({ queryKey: ['challan', 'batches'] });
+    },
+  });
+}
+
+/**
+ * Reconcile a batch STUCK in GENERATING (e.g. a crash/deploy mid-run) back to
+ * FAILED so it can be retried: issued challans are kept, un-issued reservations
+ * voided (server-side). ADMIN only. Returns the updated batch; on success we
+ * seed its cache and refresh the recent-batches list so the row leaves
+ * GENERATING and its "Retry generation" action becomes available.
+ */
+export function useRecoverBatch(): UseMutationResult<BatchOut, Error, { batchId: number }> {
+  const { post } = useApi();
+  const qc = useQueryClient();
+  return useMutation<BatchOut, Error, { batchId: number }>({
+    mutationFn: ({ batchId }) => post<BatchOut>(`/challan/batches/${batchId}/recover`, {}),
     onSuccess: (batch) => {
       qc.setQueryData(challanKeys.batch(batch.id), batch);
       void qc.invalidateQueries({ queryKey: ['challan', 'batches'] });

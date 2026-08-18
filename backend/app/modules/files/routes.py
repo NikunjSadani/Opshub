@@ -46,6 +46,15 @@ def _may_download(user: User, row: StoredFile) -> bool:
     return row.module_key is not None and can_access_module(user, row.module_key)
 
 
+def _may_upload(user: User) -> bool:
+    """Gate the upload endpoint: an active caller may upload only if they hold at
+    least one module grant (Admins access all modules, so they always qualify).
+    A user with ZERO grants has no business stashing blobs in the app."""
+    if not user.active:
+        return False
+    return user.role == Role.ADMIN or bool(user.module_access)
+
+
 @router.post("/upload")
 def upload_file(
     user: Annotated[User, Depends(current_user)],
@@ -54,6 +63,14 @@ def upload_file(
     module_key: Annotated[str | None, Form()] = None,
 ) -> dict[str, object]:
     """Accept a multipart file (bounded), persist the bytes, record metadata, audit it."""
+    # Authorization: a caller with no module access at all cannot upload; and a
+    # client-supplied module_key must be one this caller may access (no stamping
+    # a blob into a module they don't hold). 403 on either failure.
+    if not _may_upload(user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "no module access")
+    if module_key is not None and not can_access_module(user, module_key):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "no access to that module")
+
     max_bytes = get_settings().max_upload_bytes
     data = bytearray()
     while chunk := file.file.read(_UPLOAD_CHUNK):
