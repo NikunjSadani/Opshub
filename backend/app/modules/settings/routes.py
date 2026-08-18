@@ -1,10 +1,12 @@
-"""Settings CRUD routes.
+"""Settings CRUD routes — governed by the settings registry (see `registry.py`).
 
-  GET  /settings        -> list all Setting rows (any authenticated user)
-  GET  /settings/{key}  -> one Setting (404 if missing)
-  PUT  /settings/{key}  -> ADMIN-only upsert (rbac action "settings.edit"), audited
+  GET  /settings        -> settings the caller may read (visibility-filtered)
+  GET  /settings/{key}  -> one Setting (404 if missing OR not visible to the caller)
+  PUT  /settings/{key}  -> ADMIN-only upsert of a DECLARED key (audited)
 
-Mounts at `/api/v1` in `app.main`, giving `/api/v1/settings...`.
+Reads are gated by each key's declared visibility (unknown/legacy keys fail closed to
+admin-only); writes are restricted to registry keys so a secret can never enter this
+store. Mounts at `/api/v1` in `app.main`, giving `/api/v1/settings...`.
 """
 from __future__ import annotations
 
@@ -17,12 +19,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.modules.settings import registry
 from app.platform import audit
 from app.platform.auth import current_user
-from app.platform.models import Setting, User
+from app.platform.models import Role, Setting, User
 from app.platform.rbac import can
 
 router = APIRouter()
+
+
+def _is_admin(user: User) -> bool:
+    # Match rbac.can(): an inactive account is NEVER admin, even with a still-valid
+    # token — defense-in-depth so read-visibility doesn't rely solely on the upstream
+    # auth gate rejecting inactive users.
+    return user.active and user.role == Role.ADMIN
 
 
 class SettingOut(BaseModel):
@@ -43,20 +53,25 @@ class SettingUpdate(BaseModel):
 
 @router.get("/settings", response_model=list[SettingOut])
 def list_settings(
-    _user: Annotated[User, Depends(current_user)],
+    user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> list[Setting]:
-    """All settings (any authenticated user may read)."""
-    return list(db.execute(select(Setting).order_by(Setting.key)).scalars())
+    """Settings the caller may read — visibility-filtered (unknown keys admin-only)."""
+    is_admin = _is_admin(user)
+    rows = db.execute(select(Setting).order_by(Setting.key)).scalars()
+    return [s for s in rows if registry.can_read(s.key, is_admin=is_admin)]
 
 
 @router.get("/settings/{key}", response_model=SettingOut)
 def get_setting(
     key: str,
-    _user: Annotated[User, Depends(current_user)],
+    user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> Setting:
-    """One setting by key (404 if it does not exist)."""
+    """One setting by key. 404 if it does not exist OR the caller may not read it
+    (a uniform 404 so a hidden key's existence isn't leaked to a non-admin)."""
+    if not registry.can_read(key, is_admin=_is_admin(user)):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "setting not found")
     setting = db.get(Setting, key)
     if setting is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "setting not found")
@@ -70,9 +85,19 @@ def upsert_setting(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> Setting:
-    """Create or update a setting. ADMIN-only; every write is audited."""
+    """Create or update a DECLARED setting. ADMIN-only; every write is audited.
+
+    A key not in the registry is rejected (422) — settings must be declared, so a
+    secret can never be smuggled into this world-adjacent store; it belongs in Secret
+    Manager instead.
+    """
     if not can(user, "settings.edit"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "settings.edit requires ADMIN")
+    if not registry.is_writable(key):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"unknown setting '{key}' — settings must be declared in the registry "
+            "(secrets belong in Secret Manager, not here)")
 
     setting = db.get(Setting, key)
     if setting is None:

@@ -17,7 +17,11 @@ from sqlalchemy.pool import StaticPool
 from app.db import Base, get_db
 from app.modules.settings.routes import router
 from app.platform.auth import current_user
-from app.platform.models import AuditLog, Role, User
+from app.platform.models import AuditLog, Role, Setting, User
+
+# A real, declared, PUBLIC setting (see settings/registry.py). Non-secret operational
+# config the UI may read; the only key the challan engine actually consumes today.
+EWAY = "eway_threshold"
 
 _engine = create_engine(
     "sqlite://",
@@ -29,6 +33,8 @@ _TestSession = sessionmaker(bind=_engine, autoflush=False, autocommit=False, fut
 
 ADMIN = User(id=1, firebase_uid="admin-uid", email="admin@x.com", role=Role.ADMIN, active=True)
 OPS = User(id=2, firebase_uid="ops-uid", email="ops@x.com", role=Role.OPERATIONS, active=True)
+INACTIVE_ADMIN = User(
+    id=3, firebase_uid="ex-admin", email="ex@x.com", role=Role.ADMIN, active=False)
 
 
 def _override_get_db() -> Iterator[Session]:
@@ -59,53 +65,79 @@ def _as(app: FastAPI, user: User) -> TestClient:
     return TestClient(app)
 
 
-def test_admin_put_creates_then_reads_back(app: FastAPI) -> None:
+def test_admin_put_declared_key_creates_then_reads_back(app: FastAPI) -> None:
     client = _as(app, ADMIN)
-    r = client.put("/api/v1/settings/numbering.prefix", json={"value": {"dc": "DC-2026"}})
+    r = client.put(f"/api/v1/settings/{EWAY}", json={"value": 5000000})
     assert r.status_code == 200
-    assert r.json()["value"] == {"dc": "DC-2026"}
+    assert r.json()["value"] == 5000000
 
-    r2 = client.get("/api/v1/settings/numbering.prefix")
+    r2 = client.get(f"/api/v1/settings/{EWAY}")
     assert r2.status_code == 200
     body = r2.json()
-    assert body["key"] == "numbering.prefix"
-    assert body["value"] == {"dc": "DC-2026"}
+    assert body["key"] == EWAY and body["value"] == 5000000
     assert "updated_at" in body
 
 
 def test_admin_put_updates_existing(app: FastAPI) -> None:
     client = _as(app, ADMIN)
-    client.put("/api/v1/settings/gst.rate", json={"value": 18})
-    r = client.put("/api/v1/settings/gst.rate", json={"value": 12})
-    assert r.status_code == 200
-    assert r.json()["value"] == 12
-    assert client.get("/api/v1/settings/gst.rate").json()["value"] == 12
+    client.put(f"/api/v1/settings/{EWAY}", json={"value": 100000})
+    r = client.put(f"/api/v1/settings/{EWAY}", json={"value": 200000})
+    assert r.status_code == 200 and r.json()["value"] == 200000
+    assert client.get(f"/api/v1/settings/{EWAY}").json()["value"] == 200000
 
 
-def test_list_settings(app: FastAPI) -> None:
-    client = _as(app, ADMIN)
-    client.put("/api/v1/settings/a", json={"value": 1})
-    client.put("/api/v1/settings/b", json={"value": "two"})
-    r = _as(app, OPS).get("/api/v1/settings")
-    assert r.status_code == 200
-    keys = {row["key"] for row in r.json()}
-    assert {"a", "b"} <= keys
+def test_put_unknown_key_rejected_422(app: FastAPI) -> None:
+    # The governance guarantee: a non-declared key (e.g. a smuggled secret) can't be
+    # written to this store at all — even by an admin.
+    r = _as(app, ADMIN).put("/api/v1/settings/smtp_password", json={"value": "hunter2"})
+    assert r.status_code == 422
+    with _TestSession() as db:
+        assert db.get(Setting, "smtp_password") is None  # nothing persisted
+
+
+def test_public_setting_readable_by_non_admin(app: FastAPI) -> None:
+    _as(app, ADMIN).put(f"/api/v1/settings/{EWAY}", json={"value": 5000000})
+    r = _as(app, OPS).get(f"/api/v1/settings/{EWAY}")
+    assert r.status_code == 200 and r.json()["value"] == 5000000
+
+
+def test_legacy_unknown_key_is_admin_only(app: FastAPI) -> None:
+    # A row whose key isn't declared (a legacy/stray value) FAILS CLOSED: invisible to a
+    # non-admin (single 404 + absent from the list), readable only by an admin.
+    with _TestSession() as db:
+        db.add(Setting(key="legacy_stray", value="x"))
+        db.commit()
+    ops = _as(app, OPS)
+    assert ops.get("/api/v1/settings/legacy_stray").status_code == 404
+    assert "legacy_stray" not in {row["key"] for row in ops.get("/api/v1/settings").json()}
+    admin = _as(app, ADMIN)
+    assert admin.get("/api/v1/settings/legacy_stray").status_code == 200
+    assert "legacy_stray" in {row["key"] for row in admin.get("/api/v1/settings").json()}
+
+
+def test_inactive_admin_is_not_treated_as_admin(app: FastAPI) -> None:
+    # Defense-in-depth: an inactive account is never admin, so it can't read a hidden
+    # key even if a stale token reached the route (the upstream auth gate 403s first).
+    with _TestSession() as db:
+        db.add(Setting(key="legacy_stray", value="x"))
+        db.commit()
+    assert _as(app, INACTIVE_ADMIN).get("/api/v1/settings/legacy_stray").status_code == 404
 
 
 def test_get_missing_is_404(app: FastAPI) -> None:
-    r = _as(app, OPS).get("/api/v1/settings/nope")
-    assert r.status_code == 404
+    # A declared-but-unset key is a plain not-found for an admin.
+    assert _as(app, ADMIN).get(f"/api/v1/settings/{EWAY}").status_code == 404
 
 
 def test_non_admin_put_forbidden(app: FastAPI) -> None:
-    r = _as(app, OPS).put("/api/v1/settings/gst.rate", json={"value": 5})
+    r = _as(app, OPS).put(f"/api/v1/settings/{EWAY}", json={"value": 5})
     assert r.status_code == 403
-    # nothing was written
-    assert _as(app, ADMIN).get("/api/v1/settings/gst.rate").status_code == 404
+    with _TestSession() as db:
+        assert db.get(Setting, EWAY) is None  # nothing written
 
 
 def test_admin_put_writes_audit_row(app: FastAPI) -> None:
-    _as(app, ADMIN).put("/api/v1/settings/theme", json={"value": "dark"})
+    _as(app, ADMIN).put(f"/api/v1/settings/{EWAY}", json={"value": 5000000})
     with _TestSession() as db:
         rows = list(
             db.execute(select(AuditLog).where(AuditLog.action == "settings.edit")).scalars()
@@ -113,6 +145,6 @@ def test_admin_put_writes_audit_row(app: FastAPI) -> None:
     assert len(rows) == 1
     row = rows[0]
     assert row.entity == "setting"
-    assert row.entity_id == "theme"
+    assert row.entity_id == EWAY
     assert row.actor_uid == "admin-uid"
-    assert row.detail == {"value": "dark"}
+    assert row.detail == {"value": 5000000}
