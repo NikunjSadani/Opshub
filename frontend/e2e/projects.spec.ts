@@ -24,6 +24,8 @@ test.describe('Projects', () => {
     await projectDialog.getByLabel('Name').fill('E2E Project');
     await projectDialog.getByRole('button', { name: 'Create project' }).click();
 
-    await expect(page.getByText('ZZZ-001')).toBeVisible();
+    // Target the register cell, not getByText — a success toast also contains the
+    // code, so a bare text match is strict-mode-ambiguous while the toast is visible.
+    await expect(page.getByRole('cell', { name: 'ZZZ-001' })).toBeVisible();
   });
 });
