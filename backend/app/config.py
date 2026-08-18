@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     dev_auth: bool = False
     dev_auth_uid: str = "dev-admin"
 
+    # --- stub PDF renderer (LOCAL ONLY) ---
+    # When True AND env=='local', challan generation uses a tiny native-free PDF
+    # stub instead of WeasyPrint (which is container-only), so the full
+    # generate -> register -> void lifecycle runs locally / in the E2E harness.
+    # Double-guarded on env below; a non-local env ALWAYS uses WeasyPrint. Default OFF.
+    stub_render: bool = False
+
     # --- uploads ---
     max_upload_bytes: int = 50 * 1024 * 1024  # 50 MB cap (DoS guard)
 

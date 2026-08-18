@@ -1,0 +1,46 @@
+import { test, expect } from '@playwright/test';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const TEMPLATE = join(dirname(fileURLToPath(import.meta.url)), 'fixtures', 'template.xlsx');
+
+// The headline statutory flow, end-to-end through the real SPA + backend: upload the
+// template (its example rows are valid against the e2e-bootstrapped master data) ->
+// validate -> reserve+generate (stub PDF renderer) -> the register shows the issued
+// challans -> void one. Proves the whole lifecycle without container-only WeasyPrint.
+test.describe('Challan lifecycle', () => {
+  test('upload -> validate -> generate -> register -> void', async ({ page }) => {
+    await page.goto('/m/document_automation/new');
+
+    // Upload + validate.
+    await page.setInputFiles('#challan-file', TEMPLATE);
+    await page.getByRole('button', { name: 'Upload & validate' }).click();
+
+    // Validated -> the Generate action for the 2 example challans is offered.
+    const generate = page.getByRole('button', { name: /Generate 2 challans?/ });
+    await expect(generate).toBeVisible();
+    await generate.click();
+
+    // Generation is async; the stub renderer makes it fast. Completion = the batch's
+    // ZIP artifact becomes downloadable.
+    await expect(page.getByRole('button', { name: 'Download ZIP' })).toBeEnabled({
+      timeout: 20_000,
+    });
+
+    // The register shows the first issued challan.
+    await page.goto('/m/document_automation/register');
+    const firstNo = /GIF\/DC\/26-27\/L\/000001/;
+    const issuedRow = page.getByRole('row', { name: firstNo });
+    await expect(issuedRow).toBeVisible();
+    await expect(issuedRow.getByText('ISSUED')).toBeVisible();
+
+    // Void it (admin) with a reason.
+    await issuedRow.getByRole('button', { name: 'Void' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Reason').fill('E2E void test');
+    await dialog.getByRole('button', { name: 'Void challan' }).click();
+
+    // Its status flips to VOID.
+    await expect(page.getByRole('row', { name: firstNo }).getByText('VOID')).toBeVisible();
+  });
+});

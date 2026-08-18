@@ -33,3 +33,8 @@ _files/
 backend/_files/
 *.db-wal
 *.db-shm
+
+# Playwright E2E (artifacts + generated fixtures)
+frontend/test-results/
+frontend/playwright-report/
+frontend/e2e/fixtures/

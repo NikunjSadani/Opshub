@@ -226,6 +226,38 @@ class WeasyPrintRenderer:
         return bytes(HTML(string=html, url_fetcher=_only_data_urls).write_pdf())
 
 
+class StubRenderer:
+    """A native-free `Renderer` for LOCAL dev / the E2E harness only.
+
+    WeasyPrint is container-only, so it can't render on a Windows dev box. This
+    emits a minimal but VALID single-page PDF (via pypdf, already a dependency) so
+    the full generate -> issue -> register -> void lifecycle can be exercised
+    locally without the native library. It is NEVER selected in a non-local env
+    (see `get_renderer`), so production always renders the faithful document.
+    """
+
+    def render_pdf(self, html: str) -> bytes:
+        from pypdf import PdfWriter  # lazy, but always installed (used by merge_pdfs)
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=595, height=842)  # A4 points
+        buf = io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+
+def get_renderer() -> Renderer:
+    """Select the challan renderer. The `StubRenderer` is used ONLY in a local env
+    with `stub_render` enabled (double-guarded, mirroring the dev-auth shim); every
+    other env — staging/prod — ALWAYS uses `WeasyPrintRenderer` for the real PDF."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    if settings.env == "local" and settings.stub_render:
+        return StubRenderer()
+    return WeasyPrintRenderer()
+
+
 def zip_files(named: list[tuple[str, bytes]]) -> bytes:
     """Build a ZIP archive from `(filename, bytes)` pairs and return its bytes."""
     buffer = io.BytesIO()

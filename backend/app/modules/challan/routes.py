@@ -223,7 +223,7 @@ def _generate_worker(batch_id: int, series: str, actor_uid: str | None) -> None:
     try:
         batch = db.get(ChallanBatch, batch_id)
         if batch is not None:
-            service.generate(db, batch, render.WeasyPrintRenderer(),
+            service.generate(db, batch, render.get_renderer(),
                              series=series, actor_uid=actor_uid)
     finally:
         db.close()
