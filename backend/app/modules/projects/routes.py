@@ -33,6 +33,13 @@ router = APIRouter()
 MODULE_KEY = "projects"
 
 
+def _escape_like(term: str) -> str:
+    r"""Escape LIKE wildcards so a user-typed `%`/`_` matches literally (paired with
+    `escape="\\"` on the `.ilike()`). Without this a literal `%` in `q` matches every
+    row. The backslash itself is escaped first so it stays the escape char."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _require_module(user: User) -> None:
     if not can_access_module(user, MODULE_KEY):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "no access to projects")
@@ -187,8 +194,10 @@ def list_projects(
     if status_filter is not None:
         stmt = stmt.where(Project.status == status_filter)
     if q:
-        like = f"%{q.strip()}%"
-        stmt = stmt.where(Project.name.ilike(like) | Project.code.ilike(like))
+        like = f"%{_escape_like(q.strip())}%"
+        stmt = stmt.where(
+            Project.name.ilike(like, escape="\\") | Project.code.ilike(like, escape="\\")
+        )
     stmt = stmt.limit(limit).offset(offset)
     return [_project_out(p) for p in db.execute(stmt).scalars()]
 

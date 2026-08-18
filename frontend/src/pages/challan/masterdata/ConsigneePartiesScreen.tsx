@@ -17,6 +17,7 @@ import {
   useToast,
 } from '../../../ui';
 import { ApiError } from '../../../api/client';
+import { useDebouncedValue } from '../../../hooks/useDebouncedValue';
 import { parseApiError } from '../../../api/masterdata';
 import {
   useConsigneePartiesQuery,
@@ -82,7 +83,9 @@ export function ConsigneePartiesScreen() {
   const isAdmin = user?.role === 'ADMIN';
 
   const [q, setQ] = useState('');
-  const list = useConsigneePartiesQuery(q);
+  // Debounce the search that feeds the query key so each keystroke does not fire
+  // its own request; the list refetches ~300ms after typing settles.
+  const list = useConsigneePartiesQuery(useDebouncedValue(q));
   const create = useCreateConsigneeParty();
   const update = useUpdateConsigneeParty();
 

@@ -18,6 +18,7 @@ import {
   useToast,
 } from '../../ui';
 import { useAuth } from '../../auth/AuthProvider';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import {
   PROJECT_STATUSES,
   useClientsQuery,
@@ -199,7 +200,9 @@ export function ProjectsList() {
   const clientsQuery = useClientsQuery();
   const clients = clientsQuery.data ?? [];
 
-  const filters: ProjectFilters = { client_id: clientId, status, q };
+  // Debounce the free-text search that feeds the query key (client/status are
+  // selects, applied immediately) so each keystroke does not fire its own request.
+  const filters: ProjectFilters = { client_id: clientId, status, q: useDebouncedValue(q) };
   const query = useProjectsQuery(filters);
   const rows = query.data ?? [];
 

@@ -274,6 +274,23 @@ def test_q_search(client: TestClient) -> None:
     assert [x["name"] for x in by_gstin] == ["Acme Foods"]
 
 
+def test_q_search_escapes_like_wildcards(client: TestClient) -> None:
+    """F6: a literal `%`/`_` in `q` must be matched LITERALLY, not as a LIKE
+    wildcard — a bare `%` must NOT match every row."""
+    client.post(
+        "/api/v1/masterdata/consignee-parties",
+        json={"gstin": GSTIN_A, "name": "Acme Foods"},
+    )
+    client.post(
+        "/api/v1/masterdata/consignee-parties",
+        json={"gstin": GSTIN_B, "name": "Beta Traders"},
+    )
+    # No name/gstin contains a literal '%', so an escaped '%' matches nothing.
+    assert client.get("/api/v1/masterdata/consignee-parties?q=%25").json() == []
+    # '_' is likewise literal, not a single-char wildcard.
+    assert client.get("/api/v1/masterdata/consignee-parties?q=_").json() == []
+
+
 # ------------------------------------------- audit fixes (gstin<->state, no-op)
 
 def test_state_mismatch_rejected_on_create(db: Session) -> None:

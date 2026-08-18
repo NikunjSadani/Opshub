@@ -128,6 +128,24 @@ def test_soft_disable_consignor(client: TestClient) -> None:
     assert active_rows == []
 
 
+def test_consignor_list_respects_limit(client: TestClient) -> None:
+    """F5: the list endpoint is capped by `limit` (it no longer returns the full
+    table). Ordering is stable, so the cap returns a deterministic prefix."""
+    for name, gstin in [
+        ("Alpha Depot", "27AAAAA0000A1Z2"),
+        ("Bravo Depot", "29AAAAA0000A1ZY"),
+        ("Charlie Depot", "27AAPFU0939F1ZV"),
+    ]:
+        assert client.post(
+            "/api/v1/masterdata/consignor",
+            json={"name": name, "gstin": gstin, "state": "WB"},
+        ).status_code == 201
+    rows = client.get("/api/v1/masterdata/consignor?limit=2").json()
+    assert [x["name"] for x in rows] == ["Alpha Depot", "Bravo Depot"]
+    # limit is bounded — over the ceiling 422s rather than returning everything.
+    assert client.get("/api/v1/masterdata/consignor?limit=99999").status_code == 422
+
+
 # ------------------------------------------------------------------ consignee
 
 def test_consignee_brand_state_unique(client: TestClient) -> None:

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthProvider';
 
 function initials(name: string): string {
@@ -32,14 +32,18 @@ export function TopBar() {
 
   return (
     <header className="flex h-14 items-center justify-between border-b border-slate-200 bg-white px-4">
-      <div className="flex items-center gap-2">
+      <Link
+        to="/"
+        aria-label="Gifsy OpsHub home"
+        className="flex items-center gap-2 rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500/40"
+      >
         <span className="grid h-7 w-7 place-items-center rounded-md bg-brand-600 text-sm font-bold text-white">
           G
         </span>
         <span className="text-sm font-semibold tracking-tight text-slate-900">
           Gifsy OpsHub
         </span>
-      </div>
+      </Link>
 
       {user && (
         <div className="relative" ref={menuRef}>

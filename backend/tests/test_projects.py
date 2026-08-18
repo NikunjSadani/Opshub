@@ -204,6 +204,18 @@ def test_project_filters(client: TestClient) -> None:
     assert [x["code"] for x in allrows] == ["TAT-001", "BRI-001"]
 
 
+def test_project_q_escapes_like_wildcards(client: TestClient) -> None:
+    """F6: a literal `%`/`_` in `q` is matched LITERALLY, not as a LIKE wildcard —
+    a bare `%` must NOT match every project."""
+    bri = _new_client(client, "Britannia", "BRI")
+    client.post("/api/v1/projects", json={"client_id": bri, "name": "Alpha Launch"})
+    client.post("/api/v1/projects", json={"client_id": bri, "name": "Beta Rollout"})
+    # No name/code contains a literal '%', so an escaped '%' matches nothing.
+    assert client.get("/api/v1/projects?q=%25").json() == []
+    # '_' is likewise literal, not a single-char wildcard.
+    assert client.get("/api/v1/projects?q=_").json() == []
+
+
 # --------------------------------------------------------------------- audit
 
 def test_writes_are_audited(client: TestClient) -> None:

@@ -786,6 +786,43 @@ def test_sweep_stuck_batches_resets_only_stale_generating(env: tuple[Session, st
     assert batch.id in ids and batch.status == BatchStatus.FAILED.value
 
 
+def test_group_total_over_int8_is_a_validation_error(env: tuple[Session, str]) -> None:
+    """F4: a group whose summed line amount overflows the int8 `total_paise` column
+    is rejected at VALIDATION (before any number is reserved), not at generate time
+    where the INSERT would raise and void already-reserved statutory numbers.
+
+    Each cell is capped at _MAX_MONEY_PAISE (1e15); enough near-max lines sum past
+    int8's ceiling (2**63-1 ~ 9.22e18). Rate is blank so the tax-inclusive amount
+    sanity check is skipped and only the group-total overflow fires."""
+    max_int8 = 2**63 - 1
+    per_cell = 10**15  # _MAX_MONEY_PAISE, the highest a single amount cell may carry
+    n_lines = max_int8 // per_cell + 2  # sum = (n)*1e15 > int8 ceiling
+    assert n_lines * per_cell > max_int8
+    amount = f"{per_cell // 100}.00"  # paise -> rupee string
+    rows = [
+        schema.RawRow(
+            row_number=i + 2,
+            cells=_row("G1", "Store A", f"Item {i}", "1", "", amount),
+        )
+        for i in range(n_lines)
+    ]
+    result = service.validate(db=env[0], rows=rows)
+    assert not result.ok
+    assert any(
+        e.column == "amount" and "too large" in e.message for e in result.errors
+    ), [(e.column, e.message) for e in result.errors[:3]]
+
+
+def test_group_total_within_int8_validates(env: tuple[Session, str]) -> None:
+    """F4 guard: a single large-but-in-range priced line still validates (the
+    overflow check must not reject a legitimate near-ceiling total)."""
+    amount = f"{(10**15) // 100}.00"  # one cell at the per-cell cap, well under int8
+    rows = [schema.RawRow(
+        row_number=2, cells=_row("G1", "Store A", "Item", "1", "", amount))]
+    result = service.validate(db=env[0], rows=rows)
+    assert result.ok, [(e.column, e.message) for e in result.errors]
+
+
 def test_submit_decisions_update_master_requires_authorization(
     env: tuple[Session, str]
 ) -> None:

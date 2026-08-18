@@ -78,6 +78,12 @@ MODULE_KEY = "document_automation"
 # never falsely rejected by a row limit.
 MAX_BATCH_ROWS = 50000
 MAX_BATCH_CHALLANS = 2000
+# Postgres int8 (BigInteger) ceiling. Per-CELL money is capped in parsing
+# (_MAX_MONEY_PAISE), but a group's SUM of line amounts (Challan.total_paise) is
+# otherwise unbounded — enough near-max lines overflow the int8 column and raise at
+# INSERT, FAILING the batch and voiding numbers on an input the validator accepted.
+# So we reject an overflowing group total at VALIDATION, before any number is reserved.
+_MAX_INT8 = 2**63 - 1  # 9,223,372,036,854,775,807
 _AMOUNT_TOL_CAP_PAISE = 50000  # Rs 500 — absolute ceiling on the amount-sanity band
 # A GENERATING batch that hasn't advanced its progress heartbeat (`updated_at`) for
 # this long looks genuinely stuck (its worker died) and may be recovered. Set well
@@ -166,6 +172,7 @@ def validate(
     # same GSTIN must carry the same details (error), and a known GSTIN whose details
     # differ from the stored golden record yields CONTRADICTIONS to resolve.
     clean_rows = [r for r in rows if r.row_number not in bad]
+    _group_total_overflow_errors(clean_rows, errors)
     _consignee_consistency_errors(clean_rows, errors)
     contradictions = _detect_contradictions(db, clean_rows, errors)
     warnings.extend(_duplicate_register_warnings(db, clean_rows, exclude_batch_id))
@@ -426,6 +433,35 @@ def _amount_presence_consistency(rows: list[RawRow], errors: list[RowError]) -> 
                         row.row_number, "amount",
                         f"challan '{key}' mixes priced and value-free lines; "
                         "every line must have an amount or none must"))
+
+
+def _group_total_overflow_errors(rows: list[RawRow], errors: list[RowError]) -> None:
+    """A group's summed line amount must fit the int8 `total_paise` column.
+
+    Each cell is already capped (`_MAX_MONEY_PAISE`), but a group with enough
+    near-max priced lines sums past int8's ceiling, which would raise at INSERT and
+    FAIL the batch AFTER numbers were reserved (burning statutory numbers). Reject
+    the overflow here, at validation, with a clear row error on the group's first
+    priced row — before any number is reserved.
+    """
+    totals: dict[str, int] = {}
+    first_row: dict[str, int] = {}
+    for row in rows:
+        key = row.cells.get("challan_group", "").strip()
+        raw = row.cells.get("amount", "").strip()
+        if not key or not raw:
+            continue
+        amount = parsing.parse_paise(raw)
+        if amount is None:
+            continue  # a malformed amount is already flagged by structural checks
+        totals[key] = totals.get(key, 0) + amount
+        first_row.setdefault(key, row.row_number)
+    for key, total in totals.items():
+        if total > _MAX_INT8:
+            errors.append(RowError(
+                first_row[key], "amount",
+                f"challan '{key}' total amount is too large; the summed line amount "
+                "exceeds the maximum a challan can carry"))
 
 
 def _amount_sanity(row: RawRow, hsn: HsnCode, errors: list[RowError]) -> None:

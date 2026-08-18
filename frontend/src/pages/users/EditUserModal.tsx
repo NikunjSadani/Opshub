@@ -163,6 +163,7 @@ export function EditUserModal({
             size="sm"
             onClick={toggleActive}
             disabled={busy}
+            aria-pressed={active}
           >
             {active ? 'Disable' : 'Enable'}
           </Button>

@@ -48,6 +48,9 @@ export function Register() {
   const [dateTo, setDateTo] = useState('');
   const [downloading, setDownloading] = useState(false);
   const [exportTruncated, setExportTruncated] = useState(false);
+  // Which row's PDF download is in flight, so a double-click can't start two
+  // downloads of the same challan.
+  const [downloadingPdfId, setDownloadingPdfId] = useState<number | null>(null);
 
   const filters: ChallanFilters = { series, fy, status, date_from: dateFrom, date_to: dateTo };
   // Debounce the filters that feed the query key so each keystroke in Series /
@@ -123,11 +126,14 @@ export function Register() {
   }
 
   async function onDownloadPdf(c: ChallanOut) {
-    if (c.pdf_file_id == null) return;
+    if (c.pdf_file_id == null || downloadingPdfId != null) return;
+    setDownloadingPdfId(c.id);
     try {
       await download(c.pdf_file_id, `${c.number.replace(/\//g, '-')}.pdf`);
     } catch (err) {
       toast.error(errorMessage(err));
+    } finally {
+      setDownloadingPdfId(null);
     }
   }
 
@@ -255,6 +261,7 @@ export function Register() {
                         size="sm"
                         onClick={() => onDownloadPdf(c)}
                         disabled={c.pdf_file_id == null}
+                        loading={downloadingPdfId === c.id}
                       >
                         PDF
                       </Button>

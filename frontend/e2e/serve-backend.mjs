@@ -9,7 +9,11 @@ import { rmSync } from 'node:fs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const backend = join(here, '..', '..', 'backend');
-const py = join(backend, '.venv', 'Scripts', 'python.exe');
+// Python executable: honor an explicit override (CI sets E2E_PYTHON=python after a
+// system `pip install`), else the local Windows venv, else a PATH `python`.
+const py =
+  process.env.E2E_PYTHON ||
+  (process.platform === 'win32' ? join(backend, '.venv', 'Scripts', 'python.exe') : 'python');
 
 const env = {
   ...process.env,

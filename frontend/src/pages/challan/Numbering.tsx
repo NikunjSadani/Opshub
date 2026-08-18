@@ -20,6 +20,7 @@ import {
   type AllocationFilters,
   type AllocationStatus,
 } from '../../api/numbering';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { ALLOCATION_STATUS_TONE } from './challanFormat';
 
 const NUM = new Intl.NumberFormat('en-IN');
@@ -60,8 +61,14 @@ export function Numbering() {
   const [fy, setFy] = useState('');
   const [status, setStatus] = useState<AllocationStatus | ''>('');
 
-  const filters: AllocationFilters = { series, fy, status };
-  // Changing any filter changes the query key, so paging naturally resets to page 0.
+  // Debounce the text filters (Status is a select, applied immediately) so each
+  // keystroke does not fire its own request. Changing any filter changes the
+  // query key, so paging naturally resets to page 0.
+  const filters: AllocationFilters = {
+    series: useDebouncedValue(series),
+    fy: useDebouncedValue(fy),
+    status,
+  };
   const query = useAllocationsQuery(filters);
   const rows = query.data?.pages.flat() ?? [];
 

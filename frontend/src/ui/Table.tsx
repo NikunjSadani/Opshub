@@ -19,7 +19,7 @@ export function THead({ children }: { children: ReactNode }) {
 }
 
 export function Th({ className = '', children }: { className?: string; children?: ReactNode }) {
-  return <th className={`px-3 py-2 font-semibold ${className}`}>{children}</th>;
+  return <th scope="col" className={`px-3 py-2 font-semibold ${className}`}>{children}</th>;
 }
 
 export function Tr({ className = '', children }: { className?: string; children: ReactNode }) {

@@ -14,7 +14,7 @@ function groupByNav(modules: ModuleDescriptor[]): [string, ModuleDescriptor[]][]
 }
 
 export function Sidebar() {
-  const { data: modules, isLoading, isError } = useModules();
+  const { data: modules, isLoading, isError, refetch } = useModules();
   const { user } = useAuth();
   const isAdmin = user?.role === 'ADMIN';
 
@@ -37,7 +37,16 @@ export function Sidebar() {
           <p className="px-3 text-xs text-slate-400">Loading modules…</p>
         )}
         {isError && (
-          <p className="px-3 text-xs text-rose-500">Failed to load modules</p>
+          <div className="px-3 text-xs text-rose-500">
+            <p>Failed to load modules</p>
+            <button
+              type="button"
+              onClick={() => void refetch()}
+              className="mt-1 font-medium text-brand-600 hover:text-brand-700"
+            >
+              Try again
+            </button>
+          </div>
         )}
 
         {modules &&

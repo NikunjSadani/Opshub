@@ -47,6 +47,13 @@ def _clean_text(v: str) -> str:
     return collapse_ws(v)
 
 
+def _escape_like(term: str) -> str:
+    r"""Escape LIKE wildcards so a user-typed `%`/`_` matches literally (paired with
+    `escape="\\"` on the `.like()`). Without this a literal `%` in `q` matches every
+    row. The backslash itself is escaped first so it stays the escape char."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _check_gstin(v: str) -> str:
     if not valid_gstin(v):
         raise ValueError("GSTIN is invalid (bad state code or check digit)")
@@ -198,12 +205,13 @@ def list_consignor(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
     active: Annotated[bool | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
 ) -> list[Consignor]:
     _require_read(user)
-    stmt = select(Consignor).order_by(Consignor.name)
+    stmt = select(Consignor).order_by(Consignor.name, Consignor.id)
     if active is not None:
         stmt = stmt.where(Consignor.active == active)
-    return list(db.execute(stmt).scalars())
+    return list(db.execute(stmt.limit(limit)).scalars())
 
 
 @router.post("/masterdata/consignor", response_model=ConsignorOut, status_code=201)
@@ -270,16 +278,17 @@ def list_consignee(
     brand: Annotated[str | None, Query(max_length=120)] = None,
     state: Annotated[str | None, Query(max_length=60)] = None,
     active: Annotated[bool | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
 ) -> list[Consignee]:
     _require_read(user)
-    stmt = select(Consignee).order_by(Consignee.brand, Consignee.state)
+    stmt = select(Consignee).order_by(Consignee.brand, Consignee.state, Consignee.id)
     if brand:
         stmt = stmt.where(Consignee.brand == brand)
     if state:
         stmt = stmt.where(Consignee.state == state)
     if active is not None:
         stmt = stmt.where(Consignee.active == active)
-    return list(db.execute(stmt).scalars())
+    return list(db.execute(stmt.limit(limit)).scalars())
 
 
 @router.post("/masterdata/consignee", response_model=ConsigneeOut, status_code=201)
@@ -353,12 +362,13 @@ def list_hsn(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
     active: Annotated[bool | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
 ) -> list[HsnCode]:
     _require_read(user)
-    stmt = select(HsnCode).order_by(HsnCode.hsn)
+    stmt = select(HsnCode).order_by(HsnCode.hsn, HsnCode.id)
     if active is not None:
         stmt = stmt.where(HsnCode.active == active)
-    return list(db.execute(stmt).scalars())
+    return list(db.execute(stmt.limit(limit)).scalars())
 
 
 @router.post("/masterdata/hsn", response_model=HsnOut, status_code=201)
@@ -428,12 +438,13 @@ def list_series(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
     active: Annotated[bool | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
 ) -> list[Series]:
     _require_read(user)
-    stmt = select(Series).order_by(Series.letter)
+    stmt = select(Series).order_by(Series.letter, Series.id)
     if active is not None:
         stmt = stmt.where(Series.active == active)
-    return list(db.execute(stmt).scalars())
+    return list(db.execute(stmt.limit(limit)).scalars())
 
 
 @router.post("/masterdata/series", response_model=SeriesOut, status_code=201)
@@ -573,10 +584,10 @@ def list_consignee_parties(
     if q:
         term = collapse_ws(q).lower()
         if term:
-            like = f"%{term}%"
+            like = f"%{_escape_like(term)}%"
             stmt = stmt.where(
-                func.lower(ConsigneeParty.gstin).like(like)
-                | func.lower(ConsigneeParty.name).like(like)
+                func.lower(ConsigneeParty.gstin).like(like, escape="\\")
+                | func.lower(ConsigneeParty.name).like(like, escape="\\")
             )
     stmt = stmt.limit(limit).offset(offset)
     return list(db.execute(stmt).scalars())

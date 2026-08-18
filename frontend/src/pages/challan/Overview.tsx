@@ -13,6 +13,7 @@ import {
   Td,
 } from '../../ui';
 import { useChallanSummaryQuery, type ChallanSummaryFilters } from '../../api/challan';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { formatPaise } from './challanFormat';
 
 interface StatTile {
@@ -41,7 +42,12 @@ export function Overview() {
   const [series, setSeries] = useState('');
   const [fy, setFy] = useState('');
 
-  const filters: ChallanSummaryFilters = { series, fy };
+  // Debounce the text filters that feed the query key so each keystroke does not
+  // fire its own request; the summary refetches ~300ms after typing settles.
+  const filters: ChallanSummaryFilters = {
+    series: useDebouncedValue(series),
+    fy: useDebouncedValue(fy),
+  };
   const query = useChallanSummaryQuery(filters);
 
   return (

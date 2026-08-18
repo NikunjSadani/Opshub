@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom';
 import { useModules } from '../api/client';
+import { ErrorState } from '../ui';
 import type { ModuleDescriptor } from '../types/modules';
 
 function ModuleTile({ module }: { module: ModuleDescriptor }) {
@@ -40,7 +41,7 @@ function ModuleTile({ module }: { module: ModuleDescriptor }) {
 }
 
 export function Dashboard() {
-  const { data: modules, isLoading, isError, error } = useModules();
+  const { data: modules, isLoading, isError, error, refetch } = useModules();
 
   return (
     <div>
@@ -53,9 +54,9 @@ export function Dashboard() {
         <p className="mt-8 text-sm text-slate-400">Loading modules…</p>
       )}
       {isError && (
-        <p className="mt-8 text-sm text-rose-600">
-          Could not load modules: {error?.message}
-        </p>
+        <div className="mt-8">
+          <ErrorState error={error} onRetry={() => void refetch()} />
+        </div>
       )}
 
       {modules && modules.length === 0 && (

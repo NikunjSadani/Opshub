@@ -28,6 +28,14 @@ export function Modal({
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
+  // Keep the latest onClose/busy in refs so the focus+keydown effect can read them
+  // WITHOUT depending on their identity — otherwise a parent re-render (e.g. every
+  // keystroke in a controlled field, which changes an inline onClose's identity)
+  // would re-run the effect and yank focus back to the first field mid-typing.
+  const onCloseRef = useRef(onClose);
+  const busyRef = useRef(busy);
+  onCloseRef.current = onClose;
+  busyRef.current = busy;
 
   // Guarded close: no-op while a mutation is running.
   const requestClose = () => {
@@ -47,7 +55,7 @@ export function Modal({
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.stopPropagation();
-        if (!busy) onClose();
+        if (!busyRef.current) onCloseRef.current();
         return;
       }
       if (e.key === 'Tab' && dialog) {
@@ -72,7 +80,10 @@ export function Modal({
       document.removeEventListener('keydown', onKey, true);
       openerRef.current?.focus?.();
     };
-  }, [open, busy, onClose]);
+    // Depend ONLY on `open`: focus-in + trap are set up once per open, torn down on
+    // close. onClose/busy are read via refs above, so their identity can't re-trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   if (!open) return null;
   return (

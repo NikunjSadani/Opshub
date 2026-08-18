@@ -17,6 +17,7 @@ import {
   ConfirmDialog,
   useToast,
 } from '../../../ui';
+import { useDebouncedValue } from '../../../hooks/useDebouncedValue';
 import {
   parseApiError,
   useMasterList,
@@ -81,9 +82,12 @@ export function EntityManager<TRow, TInput>({
     Object.fromEntries(filterKeys.map((k) => [k, ''])),
   );
 
+  // Debounce the free-text filters that feed the query key so each keystroke does
+  // not fire its own request (the Status select is applied immediately).
+  const debouncedExtra = useDebouncedValue(extra);
   const params: Record<string, string | undefined> = {
     active: activeFilter === 'all' ? undefined : activeFilter,
-    ...extra,
+    ...debouncedExtra,
   };
 
   const list = useMasterList<TRow>(kind, params);

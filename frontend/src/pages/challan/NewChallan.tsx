@@ -80,6 +80,9 @@ export function NewChallan() {
 
   const [file, setFile] = useState<File | null>(null);
   const [uploaded, setUploaded] = useState<BatchOut | null>(null);
+  // Which artifact download is in flight (keyed by file id), so a double-click
+  // can't start the same download twice.
+  const [downloadingId, setDownloadingId] = useState<number | null>(null);
   const [series, setSeries] = useState('L');
   const [activeBatchId, setActiveBatchId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -168,11 +171,14 @@ export function NewChallan() {
   }
 
   async function onDownload(fileId: number | null, fallback: string) {
-    if (fileId == null) return;
+    if (fileId == null || downloadingId != null) return;
+    setDownloadingId(fileId);
     try {
       await download(fileId, fallback);
     } catch (err) {
       toast.error(errorMessage(err));
+    } finally {
+      setDownloadingId(null);
     }
   }
 
@@ -291,6 +297,7 @@ export function NewChallan() {
                     <Button
                       variant="secondary"
                       size="sm"
+                      loading={downloadingId === uploaded.error_report_file_id}
                       onClick={() =>
                         onDownload(
                           uploaded.error_report_file_id,
@@ -325,6 +332,7 @@ export function NewChallan() {
                     onDownload(uploaded.error_report_file_id, `batch-${uploaded.id}-errors.csv`)
                   }
                   disabled={uploaded.error_report_file_id == null}
+                  loading={downloadingId === uploaded.error_report_file_id}
                 >
                   Download error report
                 </Button>
@@ -424,6 +432,7 @@ export function NewChallan() {
                     <Button
                       onClick={() => onDownload(batch.zip_file_id, `batch-${batch.id}.zip`)}
                       disabled={batch.zip_file_id == null}
+                      loading={downloadingId === batch.zip_file_id}
                     >
                       Download ZIP
                     </Button>
@@ -431,6 +440,7 @@ export function NewChallan() {
                       variant="secondary"
                       onClick={() => onDownload(batch.merged_pdf_file_id, `batch-${batch.id}.pdf`)}
                       disabled={batch.merged_pdf_file_id == null}
+                      loading={downloadingId === batch.merged_pdf_file_id}
                     >
                       Download merged PDF
                     </Button>
@@ -528,6 +538,7 @@ export function NewChallan() {
                           key={l.label}
                           variant="ghost"
                           size="sm"
+                          loading={downloadingId === l.fileId}
                           onClick={() => onDownload(l.fileId, l.name)}
                         >
                           {l.label}

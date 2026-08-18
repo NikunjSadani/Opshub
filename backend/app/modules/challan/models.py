@@ -22,6 +22,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -119,8 +120,14 @@ class ChallanBatchDecision(Base):
 
 class Challan(Base):
     __tablename__ = "challan"
+    # The composite serves the duplicate-register warning query (consignee_gstin IN
+    # (...) AND challan_date IN (...) AND status='ISSUED') on the synchronous upload
+    # path; the standalone `challan_date` index (declared inline below) serves the
+    # date-range register filter + /challan/summary. Without these the register
+    # full-scans as it grows.
     __table_args__ = (
         CheckConstraint("status in ('ISSUED', 'VOID')", name="ck_challan_status"),
+        Index("ix_challan_consignee_gstin_challan_date", "consignee_gstin", "challan_date"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -131,7 +138,7 @@ class Challan(Base):
     series: Mapped[str] = mapped_column(String(8))
     fy: Mapped[str] = mapped_column(String(7), index=True)
     number_int: Mapped[int] = mapped_column(Integer)
-    challan_date: Mapped[date] = mapped_column(Date)
+    challan_date: Mapped[date] = mapped_column(Date, index=True)
     # The referenced project's human id (e.g. "BRI-001"), validated ACTIVE at
     # generation and snapshotted here so the register/print never re-resolve it.
     project_code: Mapped[str] = mapped_column(String(24), default="", index=True)

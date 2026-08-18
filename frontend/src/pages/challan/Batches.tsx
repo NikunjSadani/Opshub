@@ -39,6 +39,9 @@ export function Batches() {
   // Which NEEDS_REVIEW batch (if any) has its inline review panel expanded, so a
   // batch stuck in review is resolvable here — not only inside the upload session.
   const [reviewingId, setReviewingId] = useState<number | null>(null);
+  // Which artifact download is in flight (keyed by file id), so a double-click
+  // can't start the same download twice.
+  const [downloadingId, setDownloadingId] = useState<number | null>(null);
 
   // Retrying a FAILED (possibly partially-issued) batch re-runs generation for
   // its un-issued challans without a re-upload — the only safe way to finish it
@@ -50,11 +53,14 @@ export function Batches() {
   const [retryError, setRetryError] = useState<string | undefined>();
 
   async function onDownload(fileId: number | null, fallback: string) {
-    if (fileId == null) return;
+    if (fileId == null || downloadingId != null) return;
+    setDownloadingId(fileId);
     try {
       await download(fileId, fallback);
     } catch (err) {
       toast.error(errorMessage(err));
+    } finally {
+      setDownloadingId(null);
     }
   }
 
@@ -197,6 +203,7 @@ export function Batches() {
                             key={l.label}
                             variant="ghost"
                             size="sm"
+                            loading={downloadingId === l.fileId}
                             onClick={() => onDownload(l.fileId, l.name)}
                           >
                             {l.label}
