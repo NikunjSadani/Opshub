@@ -137,3 +137,21 @@ def test_sweep_respects_older_than_hours_body(
         db.close()
     finally:
         get_settings.cache_clear()
+
+
+def test_sweep_rejects_window_below_floor(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The 6h floor: a caller can't set a window short enough to race a live batch's
+    # not-yet-issued reservations (a maximal batch can render for >1h).
+    get_settings.cache_clear()
+    monkeypatch.setenv("SWEEP_SECRET", "s3cret")
+    try:
+        r = client.post(
+            "/api/v1/numbering/sweep",
+            headers={"X-Sweep-Secret": "s3cret"},
+            json={"older_than_hours": 1},
+        )
+        assert r.status_code == 422  # below ge=6
+    finally:
+        get_settings.cache_clear()

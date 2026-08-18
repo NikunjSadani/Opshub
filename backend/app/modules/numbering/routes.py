@@ -78,7 +78,13 @@ class VoidBody(BaseModel):
 
 
 class SweepBody(BaseModel):
-    older_than_hours: int = Field(default=24, ge=1, le=8760)
+    # Floor is 6h — safely above the worst-case render of a maximal batch (≤2000
+    # challans), so this generic reservation-sweep can never void the not-yet-issued
+    # tail of a LIVE batch (which keys off `reserved_at`, stamped once at reserve time,
+    # not a progress heartbeat). Stuck-batch reservations are already reclaimed far
+    # sooner by the batch sweep (60min heartbeat) + `_fail_generation`; this only mops
+    # up TRUE orphans (a reserve with no surviving batch), for which 6h+ is ample.
+    older_than_hours: int = Field(default=24, ge=6, le=8760)
 
 
 class SweepOut(BaseModel):
