@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import { useModules } from '../api/client';
+import { useAuth } from '../auth/AuthProvider';
 import type { ModuleDescriptor } from '../types/modules';
 
 function groupByNav(modules: ModuleDescriptor[]): [string, ModuleDescriptor[]][] {
@@ -14,6 +15,8 @@ function groupByNav(modules: ModuleDescriptor[]): [string, ModuleDescriptor[]][]
 
 export function Sidebar() {
   const { data: modules, isLoading, isError } = useModules();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'ADMIN';
 
   return (
     <aside className="hidden w-60 shrink-0 border-r border-slate-200 bg-white md:block">
@@ -75,6 +78,30 @@ export function Sidebar() {
               </div>
             </div>
           ))}
+
+        {/* Admin-only surfaces. Hidden for non-admins (the backend enforces the
+            real gate); showing a tile they can't use would be a dead-end. */}
+        {isAdmin && (
+          <div>
+            <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+              Administration
+            </p>
+            <div className="flex flex-col gap-0.5">
+              <NavLink
+                to="/admin/users"
+                className={({ isActive }) =>
+                  `rounded-md px-3 py-2 text-sm font-medium ${
+                    isActive
+                      ? 'bg-brand-50 text-brand-700'
+                      : 'text-slate-700 hover:bg-slate-100'
+                  }`
+                }
+              >
+                Users
+              </NavLink>
+            </div>
+          </div>
+        )}
       </nav>
     </aside>
   );

@@ -19,6 +19,7 @@ from app.modules.masterdata.routes import router as masterdata_router
 from app.modules.numbering.routes import router as numbering_router
 from app.modules.projects.routes import router as projects_router
 from app.modules.settings.routes import router as settings_router
+from app.modules.users.routes import router as users_router
 from app.platform.module_registry import REGISTRY, ModuleSpec, register_module
 
 # --- user-facing modules (drive nav + per-user module access) ---
@@ -59,6 +60,9 @@ def create_app() -> FastAPI:
     app.include_router(numbering_router, prefix="/api/v1", tags=["numbering"])
     app.include_router(projects_router, prefix="/api/v1", tags=["projects"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
+    # User Management — a platform primitive (admin-managed accounts + module
+    # grants); NOT a nav ModuleSpec, mounted like files/settings above.
+    app.include_router(users_router, prefix="/api/v1", tags=["users"])
     _mount_spa(app, settings.static_dir)
     return app
 

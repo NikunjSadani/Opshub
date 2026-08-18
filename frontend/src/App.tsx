@@ -15,6 +15,8 @@ import { ModulePlaceholder } from './pages/ModulePlaceholder';
 import { NotFound } from './pages/NotFound';
 import { ChallanModule } from './pages/challan/ChallanModule';
 import { ProjectsModule } from './pages/projects/ProjectsModule';
+import { UsersModule } from './pages/users/UsersModule';
+import { RequireRole } from './auth/RequireRole';
 import { ToastProvider } from './ui';
 
 export function createQueryClient(): QueryClient {
@@ -61,6 +63,20 @@ export function AppRoutes() {
         */}
         <Route path="/m/document_automation/*" element={<ChallanModule />} />
         <Route path="/m/projects/*" element={<ProjectsModule />} />
+        {/*
+          User Management is a genuinely role-scoped admin surface (unlike the
+          per-user module grants above), so it's gated by RequireRole. The
+          backend enforces ADMIN on every /users call; this just avoids a
+          dead-end for a non-admin who hits the URL directly.
+        */}
+        <Route
+          path="/admin/users"
+          element={
+            <RequireRole allow={['ADMIN']}>
+              <UsersModule />
+            </RequireRole>
+          }
+        />
         <Route path="/m/:key" element={<ModulePlaceholder />} />
       </Route>
       <Route path="*" element={<NotFound />} />
