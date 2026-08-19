@@ -1,0 +1,24 @@
+{
+  "fixture_id": "h1_supplier_gstin_above_billto",
+  "supply_type": "intra",
+  "n_lines": 1,
+  "page_count": 1,
+  "needs_ocr": false,
+  "review_needed": false,
+  "column_order": [
+    "description",
+    "hsn",
+    "qty",
+    "unit",
+    "rate",
+    "taxable",
+    "gst",
+    "cgst",
+    "sgst",
+    "igst",
+    "total"
+  ],
+  "notes": "H1 guard: intra-state, supplier GSTIN sits just ABOVE 'Bill To' with NO gap; buyer must be taken strictly below the anchor (else a silent supplier⇄buyer swap).",
+  "generator": "app.modules.expense.eval.synth.build_invoice_pdf (rl_config.invariant)",
+  "schema_version": "gst_invoice/1.0.0"
+}

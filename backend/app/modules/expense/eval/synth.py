@@ -97,6 +97,16 @@ class InvoiceSpec:
     two_page: bool = False
     page_break_after: int = 0     # rows on page 1 before a forced break (0 → auto/none)
     scanned: bool = False
+    # --- adversarial shape knobs (regression fixtures) --------------------------------------
+    tight_header: bool = False    # remove the supplier↔buyer gap so the SUPPLIER GSTIN sits
+    #                               just ABOVE "Bill To" (H1: silent supplier⇄buyer swap bait)
+    borderless: bool = False      # draw the item table with NO rules + RIGHT-aligned money, so
+    #                               extract_tables() fails and the word-geometry fallback runs
+    #                               against real right-aligned money columns (H2)
+    accounting_negatives: bool = False   # render negative money as "(0.30)" accounting parens
+    #                                       instead of "-0.30" (M3: signed paren parsing)
+    header_labels: dict[str, str] = field(default_factory=dict)  # per-key header label override
+    #                               (M6: relabel the taxable column "Amount" beside a "Total")
     _title: str = field(default="Tax Invoice", repr=False)
 
 
@@ -261,6 +271,15 @@ def _rupees(paise: int) -> str:
     return f"{sign}{p // 100:,}.{p % 100:02d}"
 
 
+def _money_str(paise: int, accounting: bool) -> str:
+    """Render money for a cell/total line. With ``accounting`` a negative prints in
+    parentheses ``(0.30)`` (the common ledger convention) instead of ``-0.30``."""
+    if accounting and paise < 0:
+        p = abs(paise)
+        return f"({p // 100:,}.{p % 100:02d})"
+    return _rupees(paise)
+
+
 # A realistic GST line-item table names taxable value and each tax head in its OWN column
 # (CGST / SGST for intra-state, IGST for inter-state — the not-applicable heads print 0.00).
 # The header labels here are what the extractor resolves columns BY (never by index), so they
@@ -330,8 +349,11 @@ def _draw_header_block(c: canvas.Canvas, spec: InvoiceSpec, y: float, continued:
     _line(spec.supplier_address)
     _line(f"GSTIN: {spec.supplier_gstin}")
     # A clear separation before the buyer block so the buyer GSTIN — not the supplier's —
-    # is the one nearest the "Bill To" anchor the extractor keys the buyer off.
-    y -= 10 * mm
+    # is the one nearest the "Bill To" anchor the extractor keys the buyer off. With
+    # ``tight_header`` this gap is REMOVED, so the supplier GSTIN sits just above "Bill To"
+    # (the Euclidean-nearest token) — the exact bait for the silent supplier⇄buyer swap (H1).
+    if not spec.tight_header:
+        y -= 10 * mm
     _line(f"Bill To: {spec.buyer_name}")
     _line(spec.buyer_address)
     _line(f"GSTIN: {spec.buyer_gstin}")
@@ -344,13 +366,22 @@ def _draw_header_block(c: canvas.Canvas, spec: InvoiceSpec, y: float, continued:
     return float(y - 2 * mm)
 
 
-def _column_x(cols: tuple[str, ...]) -> list[float]:
+def _column_x(cols: tuple[str, ...], borderless: bool = False) -> list[float]:
     usable = _PAGE_W - 2 * _MARGIN
     # Description gets the widest column; the rest split evenly but stay wide enough that a
     # 9-char money value ("16,500.00") and the header labels never overflow into (and
     # interleave with) the neighbouring cell — overflow is what corrupts edge-based table
-    # detection.
-    weights = [2.0 if k == "description" else 1.0 for k in cols]
+    # detection. In the BORDERLESS layout the money columns (whose header + value are both
+    # right-aligned) are widened so a wide label like "Taxable Value" clears its left
+    # neighbour instead of colliding into one run.
+    def _weight(k: str) -> float:
+        if k == "description":
+            return 2.2 if borderless else 2.0
+        if borderless and k in _MONEY_KEYS:
+            return 1.6
+        return 0.9 if borderless else 1.0
+
+    weights = [_weight(k) for k in cols]
     total = sum(weights)
     xs: list[float] = []
     x = _MARGIN
@@ -369,8 +400,22 @@ _CELL_TX = 1.5          # x inset so text clears the left column rule
 _CELL_TY = 1.8 * mm     # baseline inset above the row's bottom rule
 
 
-def _draw_grid_table(c: canvas.Canvas, cols: tuple[str, ...], xs: list[float],
-                     page_lines: list[_ComputedLine], y_top: float) -> float:
+# Money columns carry right-aligned figures on a real invoice (H2 borderless fixture).
+_MONEY_KEYS = frozenset({"rate", "taxable", "cgst", "sgst", "igst", "total"})
+
+# Borderless right-aligned money is inset further from its column's right edge than the text
+# inset, so a wide value never butts up against the next (left-aligned) cell within
+# pdfplumber's word tolerance and get glued into one token.
+_MONEY_INSET = 7.0
+
+
+def _header_label(spec: InvoiceSpec, key: str) -> str:
+    """The rendered header label for a column key, honouring per-spec overrides (M6)."""
+    return spec.header_labels.get(key, _COLUMNS[key])
+
+
+def _draw_grid_table(c: canvas.Canvas, spec: InvoiceSpec, cols: tuple[str, ...],
+                     xs: list[float], page_lines: list[_ComputedLine], y_top: float) -> float:
     """Render the header + this page's item rows as a RULED (bordered) table.
 
     Draws the full grid — a horizontal rule between every row and a vertical rule at every
@@ -390,7 +435,7 @@ def _draw_grid_table(c: canvas.Canvas, cols: tuple[str, ...], xs: list[float],
     c.setFont("Helvetica-Bold", 7)
     header_base = y_top - _ROW_H + _CELL_TY
     for key, x in zip(cols, xs, strict=True):
-        c.drawString(x + _CELL_TX, header_base, _COLUMNS[key])
+        c.drawString(x + _CELL_TX, header_base, _header_label(spec, key))
 
     c.setFont("Helvetica", 7)
     for ri, cl in enumerate(page_lines, start=1):
@@ -398,6 +443,39 @@ def _draw_grid_table(c: canvas.Canvas, cols: tuple[str, ...], xs: list[float],
         for key, x in zip(cols, xs, strict=True):
             c.drawString(x + _CELL_TX, base, _cell(cl, key))
     return float(bottom)
+
+
+def _draw_borderless_table(c: canvas.Canvas, spec: InvoiceSpec, cols: tuple[str, ...],
+                           xs: list[float], page_lines: list[_ComputedLine],
+                           y_top: float) -> float:
+    """Render the header + item rows as a BORDERLESS grid with RIGHT-aligned money (H2).
+
+    No rules are drawn, so `pdfplumber.extract_tables()` finds no grid and the extractor falls
+    back to word geometry. Text columns are left-aligned; money columns (and their headers)
+    are RIGHT-aligned to the column's right edge — the real-invoice layout that made the old
+    left-edge banding misfile a value into the next column. Returns the y just below the rows.
+    """
+    right = _PAGE_W - _MARGIN
+    edges = [*xs[1:], right]                       # right edge of each column
+    header_base = y_top - _ROW_H + _CELL_TY
+    c.setFont("Helvetica-Bold", 7)
+    for key, x_left, x_right in zip(cols, xs, edges, strict=True):
+        label = _header_label(spec, key)
+        if key in _MONEY_KEYS:
+            c.drawRightString(x_right - _MONEY_INSET, header_base, label)
+        else:
+            c.drawString(x_left + _CELL_TX, header_base, label)
+
+    c.setFont("Helvetica", 7)
+    for ri, cl in enumerate(page_lines, start=1):
+        base = y_top - (ri + 1) * _ROW_H + _CELL_TY
+        for key, x_left, x_right in zip(cols, xs, edges, strict=True):
+            val = _cell(cl, key)
+            if key in _MONEY_KEYS:
+                c.drawRightString(x_right - _MONEY_INSET, base, val)
+            else:
+                c.drawString(x_left + _CELL_TX, base, val)
+    return float(y_top - (1 + len(page_lines)) * _ROW_H)
 
 
 def _draw_totals_block(
@@ -418,11 +496,11 @@ def _draw_totals_block(
     ]
     for label, val in rows:
         c.drawString(x_label, y, label)
-        c.drawRightString(x_val, y, _rupees(val))
+        c.drawRightString(x_val, y, _money_str(val, spec.accounting_negatives))
         y -= 5 * mm
     c.setFont("Helvetica-Bold", 10)
     c.drawString(x_label, y, "Grand Total")
-    c.drawRightString(x_val, y, _rupees(totals["grand_total_paise"]))
+    c.drawRightString(x_val, y, _money_str(totals["grand_total_paise"], spec.accounting_negatives))
     y -= 6 * mm
     if spec.amount_in_words:
         c.setFont("Helvetica-Oblique", 9)
@@ -460,7 +538,7 @@ def build_invoice_pdf(spec: InvoiceSpec) -> tuple[bytes, dict[str, object]]:
 
     lines, totals = _compute(spec)
     cols = spec.column_order
-    xs = _column_x(cols)
+    xs = _column_x(cols, borderless=spec.borderless)
 
     # Decide the split point for a two-page invoice.
     split = len(lines)
@@ -474,7 +552,10 @@ def build_invoice_pdf(spec: InvoiceSpec) -> tuple[bytes, dict[str, object]]:
     for pi, page_lines in enumerate(pages):
         y = _PAGE_H - _MARGIN
         y = _draw_header_block(c, spec, y, continued=(pi > 0))
-        y = _draw_grid_table(c, cols, xs, page_lines, y)
+        if spec.borderless:
+            y = _draw_borderless_table(c, spec, cols, xs, page_lines, y)
+        else:
+            y = _draw_grid_table(c, spec, cols, xs, page_lines, y)
         is_last = pi == page_count - 1
         if is_last:
             if spec.discount_subtotal:

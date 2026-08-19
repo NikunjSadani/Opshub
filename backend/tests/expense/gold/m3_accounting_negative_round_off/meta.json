@@ -1,0 +1,24 @@
+{
+  "fixture_id": "m3_accounting_negative_round_off",
+  "supply_type": "intra",
+  "n_lines": 1,
+  "page_count": 1,
+  "needs_ocr": false,
+  "review_needed": false,
+  "column_order": [
+    "description",
+    "hsn",
+    "qty",
+    "unit",
+    "rate",
+    "taxable",
+    "gst",
+    "cgst",
+    "sgst",
+    "igst",
+    "total"
+  ],
+  "notes": "M3 guard: a negative round-off printed as accounting parentheses '(0.30)'; the money tokenizer must read the parenthesised sign (−₹0.30), not grab the first token (+₹0.30).",
+  "generator": "app.modules.expense.eval.synth.build_invoice_pdf (rl_config.invariant)",
+  "schema_version": "gst_invoice/1.0.0"
+}

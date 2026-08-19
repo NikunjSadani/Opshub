@@ -1,0 +1,24 @@
+{
+  "fixture_id": "h2_borderless_right_aligned",
+  "supply_type": "inter",
+  "n_lines": 2,
+  "page_count": 1,
+  "needs_ocr": false,
+  "review_needed": false,
+  "column_order": [
+    "description",
+    "hsn",
+    "qty",
+    "unit",
+    "rate",
+    "taxable",
+    "gst",
+    "cgst",
+    "sgst",
+    "igst",
+    "total"
+  ],
+  "notes": "H2 guard: borderless grid (no rules) with RIGHT-aligned money + a multi-word 'Taxable Value' header; needs nearest-center bucketing + multi-word header spans.",
+  "generator": "app.modules.expense.eval.synth.build_invoice_pdf (rl_config.invariant)",
+  "schema_version": "gst_invoice/1.0.0"
+}

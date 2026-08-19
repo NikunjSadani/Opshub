@@ -33,6 +33,7 @@ from decimal import Decimal
 import pdfplumber
 from pypdf import PdfReader
 
+from app.modules.challan.parsing import _ILLEGAL_CTRL, _MAX_MONEY_PAISE
 from app.modules.challan.parsing import parse_paise as _grouped_paise
 from app.modules.challan.parsing import parse_qty as _grouped_qty
 from app.modules.expense.canonical import (
@@ -74,8 +75,11 @@ _CONF_WEAK = 0.50    # positional / weak-sourced / arithmetic-fails / checksum-f
 # a literal 'Z', a check char. Checksum validity is a separate `valid_gstin` call.
 _GSTIN_RE = re.compile(r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]\b")
 
-# A signed, optionally thousands-grouped rupee token inside free text (₹/Rs. stripped first).
-_MONEY_RE = re.compile(r"[-+]?[0-9][0-9,]*(?:\.[0-9]+)?")
+# A clean, thousands-grouped rupee CORE (no sign, no leftover chars) — the WHOLE cell must
+# match after sign/paren/currency stripping, so a malformed money cell (trailing sign, a
+# European decimal comma, a fullwidth comma, leftover glyphs) is rejected rather than
+# silently truncated to its first numeric token.
+_ASCII_MONEY_RE = re.compile(r"[0-9][0-9,]*(?:\.[0-9]+)?")
 _NUM_RE = re.compile(r"[-+]?[0-9][0-9,]*(?:\.[0-9]+)?")
 
 # Currency ornaments that precede a money token in a PDF cell/label.
@@ -131,19 +135,42 @@ class _Gstin:
 
 
 def _money_to_paise(text: str | None) -> int | None:
-    """Currency-tolerant free-text → integer paise, reusing the challan grouping discipline.
+    """Currency-tolerant free-text → SIGNED integer paise, validating the WHOLE cell.
 
-    Strips ₹/Rs./INR ornaments, extracts the first signed numeric token, then defers to
-    `challan.parsing.parse_paise` (Decimal × 100 ROUND_HALF_UP + grouping validation). Junk
-    → None, never a raise.
+    Strips ₹/Rs./INR ornaments, then peels an explicit sign — accounting parentheses
+    ``(1,180.00)`` and a trailing ``1,180.00-`` both mean NEGATIVE — before requiring the
+    remaining core to be a clean thousands-grouped number with NOTHING left over. Unlike a
+    first-token grab, this makes a malformed cell (a European decimal comma ``1.234,50``, a
+    fullwidth comma, a stray glyph) fail closed to ``None`` instead of a silently-wrong value.
+    The core then defers to `challan.parsing.parse_paise` (Decimal × 100 ROUND_HALF_UP +
+    grouping validation), and the result is CLAMPED to the challan money ceiling
+    (`_MAX_MONEY_PAISE`) so an absurd/overflowing figure becomes None (never an int8 persist
+    overflow). Junk → None, never a raise.
     """
     if text is None:
         return None
-    cleaned = _CURRENCY_RE.sub(" ", text)
-    m = _MONEY_RE.search(cleaned)
-    if m is None:
+    s = _CURRENCY_RE.sub(" ", text).strip()
+    if not s:
         return None
-    return _grouped_paise(m.group(0))
+    negative = False
+    if s.startswith("(") and s.endswith(")"):     # accounting negative
+        negative = not negative
+        s = s[1:-1].strip()
+    if s[:1] in "+-":                              # leading sign
+        negative ^= (s[0] == "-")
+        s = s[1:].strip()
+    if s[-1:] in "+-":                             # trailing sign (e.g. "1,180.00-")
+        negative ^= (s[-1] == "-")
+        s = s[:-1].strip()
+    if " " in s or _ASCII_MONEY_RE.fullmatch(s) is None:
+        return None                               # leftover junk / EU comma / fullwidth → None
+    paise = _grouped_paise(s)                      # grouping validation (Indian/Western)
+    if paise is None:
+        return None
+    paise = -paise if negative else paise
+    if abs(paise) > _MAX_MONEY_PAISE:              # clamp: out-of-range → None/MISSING
+        return None
+    return paise
 
 
 def _num_or_none(text: str | None) -> Decimal | None:
@@ -218,7 +245,7 @@ def _words_of_page(page: object, page_no: int) -> list[_Word]:
     for w in page.extract_words(use_text_flow=False):  # type: ignore[attr-defined]
         try:
             out.append(_Word(
-                text=str(w["text"]),
+                text=_ILLEGAL_CTRL.sub("", str(w["text"])),
                 x0=float(w["x0"]), x1=float(w["x1"]),
                 top=float(w["top"]), bottom=float(w["bottom"]),
                 page=page_no,
@@ -300,8 +327,10 @@ _TOTAL_SGST_RE = re.compile(r"\bSGST\b\s*[:\-]?\s*([₹]?\s*[-+]?[0-9][0-9,]*(?:
                             re.IGNORECASE)
 _TOTAL_IGST_RE = re.compile(r"\bIGST\b\s*[:\-]?\s*([₹]?\s*[-+]?[0-9][0-9,]*(?:\.[0-9]+)?)",
                             re.IGNORECASE)
+# Round-off is the one signed total; capture an optional accounting-parenthesised value
+# ("(0.30)" == −₹0.30) WITH its parens so `_money_to_paise` can read the sign (M3).
 _ROUND_OFF_RE = re.compile(r"Round(?:ing)?\s*[- ]?\s*Off\s*[:\-]?\s*"
-                           r"([₹]?\s*[-+]?[0-9][0-9,]*(?:\.[0-9]+)?)", re.IGNORECASE)
+                           r"(\(?\s*[₹]?\s*[-+]?[0-9][0-9,]*(?:\.[0-9]+)?\s*\)?)", re.IGNORECASE)
 _GRAND_TOTAL_RE = re.compile(
     r"(?:Grand\s*Total|Invoice\s*Total|Total\s*(?:Invoice\s*)?Amount|Amount\s*Payable|"
     r"Net\s*Payable)\s*[:\-]?\s*([₹]?\s*[-+]?[0-9][0-9,]*(?:\.[0-9]+)?)", re.IGNORECASE)
@@ -326,15 +355,21 @@ _COLUMN_SYNONYMS: dict[str, tuple[str, ...]] = {
     "sgst_paise": ("sgst amount", "sgst amt", "sgst", "utgst"),
     "igst_paise": ("igst amount", "igst amt", "igst"),
     "taxable_paise": ("taxable value", "taxable amount", "taxable", "net amount",
-                      "assessable value", "value"),
-    "line_total_paise": ("total amount", "line total", "total value", "amount", "total"),
+                      "assessable value", "amount", "value"),
+    "line_total_paise": ("total amount", "line total", "total value", "grand total", "total"),
 }
 
-# A row whose leading cell names one of these is a sub-total / tax / summary row, NOT an item.
-_NON_ITEM_KEYS = (
+# Summary-row detection (M6/L7). A row is a sub-total / tax / summary row — NOT a real item —
+# only when its FIRST cell is precisely one of these labels, so a genuine product whose name
+# merely BEGINS with a keyword ("Total Station Survey Kit", "Discount Voucher") is kept.
+#   * EXACT set: the whole first cell (trailing ':' tolerated) equals the label.
+#   * PREFIX set: genuine ledger-adjustment / words rows that legitimately carry trailing text.
+_NON_ITEM_EXACT: frozenset[str] = frozenset({
     "sub total", "subtotal", "sub-total", "total", "grand total", "discount", "round off",
-    "rounding", "cgst", "sgst", "igst", "taxable value", "add:", "less:", "amount in words",
-)
+    "round-off", "rounding", "rounding off", "cgst", "sgst", "igst", "utgst",
+    "taxable value", "total taxable value", "total taxable",
+})
+_NON_ITEM_PREFIX: tuple[str, ...] = ("add:", "less:", "amount in words", "amount chargeable")
 
 
 def _map_headers(header: list[str]) -> dict[str, int]:
@@ -401,10 +436,20 @@ class _RawLine:
     line_total: int | None
 
 
+def _is_summary_first_cell(raw_first: str) -> bool:
+    """True iff a row's FIRST cell is precisely a summary/tax label (anchored, not a prefix
+    of a real product name)."""
+    key = match_key(raw_first or "")
+    if not key:
+        return False
+    if key.rstrip(":").strip() in _NON_ITEM_EXACT:
+        return True
+    return any(key.startswith(p) for p in _NON_ITEM_PREFIX)
+
+
 def _is_item_row(raw_first: str, r: _RawLine) -> bool:
     """Keep a row only if it isn't a summary row and carries real item money."""
-    key = match_key(raw_first or "")
-    if key and any(key.startswith(nk) or key == nk for nk in _NON_ITEM_KEYS):
+    if _is_summary_first_cell(raw_first):
         return False
     # Needs at least a description or HSN AND at least one money figure to be an item.
     has_desc = bool((r.description or "").strip()) or bool((r.hsn or "").strip())
@@ -471,26 +516,77 @@ def _group_word_rows(words: list[_Word], y_tol: float = 3.0) -> list[list[_Word]
     return rows
 
 
-def _column_bounds(header_x: list[float]) -> list[float]:
-    """Column split points = the LEFT EDGE of each column from the second onward.
+def _word_column(text: str) -> str | None:
+    """The canonical column a SINGLE header word names (best synonym), or None if generic.
 
-    Cells are left-aligned at their column's left edge, so a word belongs to the last column
-    whose left edge is at-or-left of it. Splitting on left edges (not midpoints) keeps a wide
-    free-text column — whose words can start well right of its own left edge — from spilling
-    into the narrower neighbour on its right.
+    Uses the same exact/word-boundary/substring ladder as `_map_headers`, so it agrees with
+    how a resolved header cell is mapped. This lets a multi-word label be folded only when its
+    trailing word reinforces the SAME column (a generic "Value" after "Taxable"), never when
+    it names a DIFFERENT one (a "Rate" after "Unit").
     """
-    return sorted(header_x)[1:]
-
-
-def _band_of(x: float, bounds: list[float]) -> int:
-    """The column index whose x-band contains `x` (0 == left of the first split point)."""
-    j = 0
-    for b in bounds:
-        if x >= b:
-            j += 1
-        else:
+    key = match_key(text)
+    if not key:
+        return None
+    best: str | None = None
+    best_score = 0
+    best_rank = 1 << 30
+    for canonical, synonyms in _COLUMN_SYNONYMS.items():
+        for rank, syn in enumerate(synonyms):
+            if key == syn:
+                score = 3
+            elif re.search(rf"\b{re.escape(syn)}\b", key):
+                score = 2
+            elif syn in key:
+                score = 1
+            else:
+                continue
+            if (score, -rank) > (best_score, -best_rank):
+                best, best_score, best_rank = canonical, score, rank
             break
-    return j
+    return best
+
+
+@dataclass
+class _HeaderCell:
+    text: str
+    center: float
+
+
+def _header_cells(header: list[_Word]) -> list[_HeaderCell]:
+    """Segment a header row's words into COLUMN CELLS, folding a multi-word label ("Taxable
+    Value") into ONE span so it isn't split into two phantom columns.
+
+    A cell grows to include the next word only while that word is GENERIC (maps to no column)
+    or reinforces the SAME canonical column the cell already names — so "Taxable" + "Value"
+    fold together (both → taxable) while "Unit" + "Rate" stay apart (unit vs unit-rate). This
+    is alignment-independent: it never relies on inter-word gaps, which collapse when money
+    headers are right-aligned. Each cell's `center` is its span midpoint; data words are later
+    bucketed to the NEAREST center, so a right-aligned value files under its own column.
+    """
+    words = sorted(header, key=lambda w: w.x0)
+    cells: list[_HeaderCell] = []
+    i = 0
+    while i < len(words):
+        group = [words[i]]
+        col = _word_column(words[i].text)
+        i += 1
+        while i < len(words):
+            nxt = _word_column(words[i].text)
+            if nxt is not None and nxt != col:
+                break
+            if col is None:
+                col = nxt
+            group.append(words[i])
+            i += 1
+        text = " ".join(w.text for w in group)
+        center = (min(w.x0 for w in group) + max(w.x1 for w in group)) / 2.0
+        cells.append(_HeaderCell(text=text, center=center))
+    return cells
+
+
+def _nearest_cell(x_center: float, cells: list[_HeaderCell]) -> int:
+    """Index of the header cell whose center is nearest `x_center`."""
+    return min(range(len(cells)), key=lambda j: abs(cells[j].center - x_center))
 
 
 def _words_table(words: list[_Word]) -> list[list[list[str]]]:
@@ -498,11 +594,12 @@ def _words_table(words: list[_Word]) -> list[list[list[str]]]:
 
     A borderless invoice carries no edges for pdfplumber's table detector, so we rebuild the
     grid geometrically: per page, group words into rows, find the header row by column-synonym
-    match (never by index), derive column x-bands from the header words' x-positions, then
-    bucket every following row's words into those bands by their x0. The output has the same
-    shape `extract_tables()` returns, so `_parse_tables` maps columns + drops the
-    sub-total/tax/summary rows exactly as it does for a ruled table — the header-based column
-    logic is reused unchanged.
+    match (never by index), fold the header words into column CELLS (multi-word labels kept
+    whole), then assign every following row's words to the column whose CENTER is nearest the
+    word's own center. Nearest-center (rather than a left-edge band) is what keeps a
+    right-aligned money value — whose x0 sits well under the next column's left edge — filed in
+    its own column. The output has the same shape `extract_tables()` returns, so `_parse_tables`
+    maps columns + drops the sub-total/tax/summary rows exactly as it does for a ruled table.
     """
     by_page: dict[int, list[_Word]] = {}
     for w in words:
@@ -515,15 +612,14 @@ def _words_table(words: list[_Word]) -> list[list[list[str]]]:
             None)
         if header_idx is None:
             continue
-        header = rows[header_idx]
-        bounds = _column_bounds([w.x0 for w in header])
-        table: list[list[str]] = [[w.text for w in header]]
+        cells = _header_cells(rows[header_idx])
+        table: list[list[str]] = [[c.text for c in cells]]
         for row in rows[header_idx + 1:]:
-            cells = [""] * len(header)
+            row_cells = [""] * len(cells)
             for w in row:
-                j = _band_of(w.x0, bounds)
-                cells[j] = f"{cells[j]} {w.text}".strip() if cells[j] else w.text
-            table.append(cells)
+                j = _nearest_cell((w.x0 + w.x1) / 2.0, cells)
+                row_cells[j] = f"{row_cells[j]} {w.text}".strip() if row_cells[j] else w.text
+            table.append(row_cells)
         out.append(table)
     return out
 
@@ -545,17 +641,44 @@ def _mk(value: object, raw: str, conf: float, status: FieldStatus,
 
 # --------------------------------------------------------------------------- arithmetic
 
+@dataclass
+class _Corrob:
+    """Which corroborating checks ACTUALLY RAN (had the inputs to run). A check that could not
+    run must NOT lend a field the top (0.95) confidence band — that would be a vacuous claim.
+    """
+    taxable_ran: bool     # Σ-line-taxable vs total-taxable was computable
+    per_line_ran: bool    # at least one line had both a taxable and a gst_rate to cross-check
+    grand_ran: bool       # taxable + taxes + round-off vs grand-total was computable
+    supply_ran: bool      # supply type was determinable AND a tax head was present to check
+
+
+def _supply_type(pos_code: str | None, supplier_code: str | None,
+                 buyer_code: str | None) -> bool | None:
+    """Intra (True) / inter (False) / indeterminate (None).
+
+    Prefer place-of-supply vs supplier; when POS is absent, fall back to supplier-vs-buyer
+    GSTIN state codes so the split can still be checked. Only genuinely unknown → None.
+    """
+    if pos_code and supplier_code:
+        return pos_code == supplier_code
+    if supplier_code and buyer_code:
+        return supplier_code == buyer_code
+    return None
+
+
 def _supply_type_consistent(pos_code: str | None, supplier_code: str | None,
-                            cgst: int, sgst: int, igst: int) -> bool:
+                            buyer_code: str | None, cgst: int, sgst: int, igst: int) -> bool:
     """Lenient contradiction check: True unless the tax split positively disagrees.
 
-    Intra-state (place-of-supply code == supplier code) must be CGST+SGST with IGST=0;
-    inter-state must be IGST with CGST=SGST=0. Indeterminate (missing code) → True (like
-    `gstin_matches_state`), so a missing place-of-supply doesn't manufacture a review flag.
+    Intra-state must be CGST+SGST with IGST=0; inter-state must be IGST with CGST=SGST=0.
+    When place-of-supply is absent the supply type is INFERRED from the supplier-vs-buyer
+    GSTIN state codes (M4) so a wrong tax head is still caught; only a truly indeterminate
+    supply type → True (no false review flag).
     """
-    if not pos_code or not supplier_code:
+    intra = _supply_type(pos_code, supplier_code, buyer_code)
+    if intra is None:
         return True
-    if pos_code == supplier_code:      # intra-state
+    if intra:                          # intra-state
         return igst == 0 and (cgst > 0 or sgst > 0)
     return cgst == 0 and sgst == 0     # inter-state
 
@@ -595,7 +718,7 @@ class TextLayerExtractor:
         except Exception as exc:  # noqa: BLE001 - pdfplumber raises many types on bad input
             raise InvoiceExtractionError("could not read the PDF text layer") from exc
 
-        raw_text = "\n".join(page_texts)
+        raw_text = _ILLEGAL_CTRL.sub("", "\n".join(page_texts))
         return self._build(page_count, raw_text, words, tables)
 
     # -- structure probe ----------------------------------------------------
@@ -628,7 +751,7 @@ class TextLayerExtractor:
 
     def _needs_ocr(self, page_count: int, page_texts: list[str]) -> ExtractedInvoice:
         """No usable text layer → all fields MISSING, parked for the deferred OCR engine."""
-        raw_text = "\n".join(page_texts)
+        raw_text = _ILLEGAL_CTRL.sub("", "\n".join(page_texts))
         header = InvoiceHeader(
             supplier_name=_missing(), supplier_gstin=_missing(), supplier_address=_missing(),
             buyer_name=_missing(), buyer_gstin=_missing(), buyer_address=_missing(),
@@ -660,12 +783,13 @@ class TextLayerExtractor:
                tables: list[list[list[str]]]) -> ExtractedInvoice:
         lines = _rebuild_lines(words)
 
-        # ---- GSTINs (supplier = top-left block; buyer = nearest "Bill To") -----------
+        # ---- GSTINs (supplier = top-most block; buyer = strictly below "Bill To") -----
         cands = _gstin_candidates(words)
         billto = next((ln for ln in lines if _BILLTO_RE.search(ln.text)), None)
-        supplier_c, buyer_c = _assign_gstins(cands, billto)
+        supplier_c, buyer_c, buyer_ambiguous = _assign_gstins(cands, billto)
 
         supplier_code = supplier_c.value[:2] if supplier_c else None
+        buyer_code = buyer_c.value[:2] if buyer_c else None
 
         # ---- place of supply (needed for the supply-type check) ----------------------
         pos_hit = _find_first(lines, _POS_RE)
@@ -695,18 +819,18 @@ class TextLayerExtractor:
         grand_total = _money_to_paise(gt_hit[0]) if gt_hit else None
 
         # ---- arithmetic cross-checks (integer paise) ---------------------------------
-        arithmetic = _run_arithmetic(
+        arithmetic, corrob = _run_arithmetic(
             raw_lines, total_taxable, total_cgst, total_sgst, total_igst, round_off,
-            grand_total, pos_code, supplier_code,
+            grand_total, pos_code, supplier_code, buyer_code,
         )
 
         # ---- envelope every field with a calibrated confidence -----------------------
         header = _build_header(lines, supplier_c, buyer_c, billto, pos_hit, pos_norm,
-                               pos_code, arithmetic)
-        invoice_lines = _build_lines(raw_lines, arithmetic)
+                               pos_code, arithmetic, corrob, buyer_ambiguous)
+        invoice_lines = _build_lines(raw_lines, arithmetic, corrob)
         totals = _build_totals(tt_hit, cg_hit, sg_hit, ig_hit, ro_hit, gt_hit, words_hit,
                                total_taxable, total_cgst, total_sgst, total_igst, round_off,
-                               grand_total, arithmetic)
+                               grand_total, arithmetic, corrob)
 
         # ---- review gate (collect ALL reasons) ---------------------------------------
         reasons = _review_reasons(header, totals, invoice_lines, supplier_c, buyer_c, arithmetic)
@@ -738,25 +862,39 @@ def _gstin_candidates(words: list[_Word]) -> list[_Gstin]:
     return out
 
 
-def _assign_gstins(cands: list[_Gstin],
-                   billto: _Line | None) -> tuple[_Gstin | None, _Gstin | None]:
-    """Supplier = top-left-most GSTIN; buyer = the GSTIN nearest the "Bill To" anchor."""
+# Two buyer candidates whose tops differ by less than this (PDF points ≈ one text line) sit
+# in the same band beneath the anchor → we cannot tell the buyer's GSTIN from a neighbour's
+# (e.g. a "Ship To" block), so we keep the nearest but mark it low-confidence, never a guess.
+_GSTIN_ROW_BAND = 18.0
+
+
+def _assign_gstins(
+    cands: list[_Gstin], billto: _Line | None
+) -> tuple[_Gstin | None, _Gstin | None, bool]:
+    """Assign (supplier, buyer, buyer_ambiguous) from the GSTIN candidates.
+
+    Supplier is ALWAYS the top-most GSTIN (suppliers head the masthead). The buyer's GSTIN
+    must lie strictly BELOW the "Bill To" anchor (same page, or its column band beneath it) —
+    this is what prevents the silent supplier⇄buyer swap when the supplier's GSTIN sits just
+    ABOVE the anchor and would otherwise be the Euclidean-nearest token. If no candidate lies
+    below the anchor, the buyer is left UNKNOWN (None) rather than guessed; if two candidates
+    share the first band below it, the nearest is kept but flagged ambiguous (low-confidence).
+    """
     if not cands:
-        return None, None
-    if billto is not None and len(cands) >= 2:
-        anchor = (billto.page, billto.x0, billto.top)
-
-        def dist(c: _Gstin) -> float:
-            page_pen = 10_000.0 * abs(c.page - anchor[0])
-            euclid = ((c.x0 - anchor[1]) ** 2 + (c.top - anchor[2]) ** 2) ** 0.5
-            return page_pen + float(euclid)
-
-        buyer = min(cands, key=dist)
-        rest = [c for c in cands if c is not buyer]
-        supplier = min(rest, key=lambda c: (c.page, c.top, c.x0)) if rest else None
-        return supplier, buyer
+        return None, None, False
     supplier = min(cands, key=lambda c: (c.page, c.top, c.x0))
-    return supplier, None
+    if billto is None or len(cands) < 2:
+        return supplier, None, False
+
+    below = [c for c in cands
+             if c is not supplier and c.page == billto.page and c.top > billto.top]
+    if not below:
+        return supplier, None, False
+
+    below.sort(key=lambda c: (c.top, abs(c.x0 - billto.x0)))
+    buyer = below[0]
+    ambiguous = len(below) >= 2 and (below[1].top - buyer.top) < _GSTIN_ROW_BAND
+    return supplier, buyer, ambiguous
 
 
 def _normalize_pos(raw: str) -> tuple[str | None, str | None]:
@@ -779,11 +917,14 @@ def _normalize_pos(raw: str) -> tuple[str | None, str | None]:
 def _build_header(lines: list[_Line], supplier_c: _Gstin | None, buyer_c: _Gstin | None,
                   billto: _Line | None, pos_hit: tuple[str, _Line] | None,
                   pos_norm: str | None, pos_code: str | None,
-                  arith: ArithmeticChecks) -> InvoiceHeader:
-    supply_ok = arith.supply_type_consistent
+                  arith: ArithmeticChecks, corrob: _Corrob,
+                  buyer_ambiguous: bool) -> InvoiceHeader:
+    # The supply-type check only corroborates a GSTIN when it actually RAN (M5) — an
+    # indeterminate/absent split must not lend the top confidence band.
+    supply_ok = arith.supply_type_consistent and corrob.supply_ran
 
     supplier_gstin = _gstin_field(supplier_c, supply_ok)
-    buyer_gstin = _gstin_field(buyer_c, supply_ok)
+    buyer_gstin = _gstin_field(buyer_c, supply_ok, ambiguous=buyer_ambiguous)
 
     inv_no_hit = _find_first(lines, _INV_NO_RE)
     invoice_number: TextField = (
@@ -804,7 +945,7 @@ def _build_header(lines: list[_Line], supplier_c: _Gstin | None, buyer_c: _Gstin
     if pos_hit and pos_code:
         place_of_supply: TextField = _mk(
             pos_norm, pos_hit[0], _CONF_STRONG if supply_ok else _CONF_OK,
-            FieldStatus.OK, pos_hit[1])
+            FieldStatus.OK, pos_hit[1])  # supply_ok already folds in corrob.supply_ran (M5)
     elif pos_hit:
         place_of_supply = _mk(pos_norm, pos_hit[0], _CONF_WEAK,
                               FieldStatus.LOW_CONFIDENCE, pos_hit[1])
@@ -826,12 +967,18 @@ def _build_header(lines: list[_Line], supplier_c: _Gstin | None, buyer_c: _Gstin
     )
 
 
-def _gstin_field(c: _Gstin | None, supply_ok: bool) -> TextField:
-    """Envelope a GSTIN: valid+corroborated→0.95, valid→0.80, bad-checksum→0.50 LOW."""
+def _gstin_field(c: _Gstin | None, supply_ok: bool, *, ambiguous: bool = False) -> TextField:
+    """Envelope a GSTIN: valid+corroborated→0.95, valid→0.80, bad-checksum/ambiguous→0.50 LOW.
+
+    An `ambiguous` buyer (two GSTINs sharing the first band below "Bill To") is a positional
+    guess, so it is capped at LOW_CONFIDENCE even with a valid checksum — never a silent OK.
+    """
     if c is None:
         return _missing()
     line = _Line(text=c.value, x0=c.x0, x1=c.x1, top=c.top, bottom=c.bottom, page=c.page)
     if valid_gstin(c.value):
+        if ambiguous:
+            return _mk(c.value, c.value, _CONF_WEAK, FieldStatus.LOW_CONFIDENCE, line)
         conf = _CONF_STRONG if supply_ok else _CONF_OK
         return _mk(c.value, c.value, conf, FieldStatus.OK, line)
     return _mk(c.value, c.value, _CONF_WEAK, FieldStatus.LOW_CONFIDENCE, line)
@@ -906,8 +1053,11 @@ def _is_noise_line(text: str) -> bool:
 
 # --------------------------------------------------------------------------- line envelope
 
-def _build_lines(raw_lines: list[_RawLine], arith: ArithmeticChecks) -> list[InvoiceLine]:
-    corroborated = arith.per_line_tax_consistent and arith.lines_sum_matches_taxable
+def _build_lines(raw_lines: list[_RawLine], arith: ArithmeticChecks,
+                 corrob: _Corrob) -> list[InvoiceLine]:
+    # Top band only when the corroborating checks BOTH passed AND actually ran (M5).
+    corroborated = (arith.per_line_tax_consistent and arith.lines_sum_matches_taxable
+                    and corrob.per_line_ran and corrob.taxable_ran)
     money_conf = _CONF_STRONG if corroborated else _CONF_OK
     out: list[InvoiceLine] = []
     for i, r in enumerate(raw_lines, start=1):
@@ -955,10 +1105,13 @@ def _build_totals(tt_hit: tuple[str, _Line] | None, cg_hit: tuple[str, _Line] | 
                   words_hit: tuple[str, _Line] | None,
                   total_taxable: int | None, total_cgst: int | None, total_sgst: int | None,
                   total_igst: int | None, round_off: int | None, grand_total: int | None,
-                  arith: ArithmeticChecks) -> InvoiceTotals:
-    taxable_ok = arith.lines_sum_matches_taxable
-    grand_ok = arith.totals_add_to_grand
-    tax_split_ok = arith.per_line_tax_consistent
+                  arith: ArithmeticChecks, corrob: _Corrob) -> InvoiceTotals:
+    # Each total earns the top band only when its corroborating check passed AND ran (M5):
+    # the taxable total is corroborated by the Σ-lines check, the tax heads by the per-line
+    # tax check, and grand-total / round-off by the totals-add-up check.
+    taxable_ok = arith.lines_sum_matches_taxable and corrob.taxable_ran
+    grand_ok = arith.totals_add_to_grand and corrob.grand_ran
+    tax_split_ok = arith.per_line_tax_consistent and corrob.per_line_ran
 
     return InvoiceTotals(
         total_taxable_paise=_total_field(tt_hit, total_taxable, taxable_ok),
@@ -985,21 +1138,25 @@ def _total_field(hit: tuple[str, _Line] | None, value: int | None,
 def _run_arithmetic(raw_lines: list[_RawLine], total_taxable: int | None,
                     total_cgst: int | None, total_sgst: int | None, total_igst: int | None,
                     round_off: int | None, grand_total: int | None, pos_code: str | None,
-                    supplier_code: str | None) -> ArithmeticChecks:
+                    supplier_code: str | None,
+                    buyer_code: str | None) -> tuple[ArithmeticChecks, _Corrob]:
     deltas: list[int] = []
 
     line_taxable_sum = sum(r.taxable for r in raw_lines if r.taxable is not None)
-    if raw_lines and total_taxable is not None:
-        d = abs(line_taxable_sum - total_taxable)
+    taxable_ran = bool(raw_lines) and total_taxable is not None
+    if taxable_ran:
+        d = abs(line_taxable_sum - (total_taxable or 0))
         deltas.append(d)
         lines_sum_ok = d <= TOTALS_TOL_PAISE
     else:
         lines_sum_ok = not raw_lines or total_taxable is None  # nothing to contradict
 
+    per_line_ran = False
     per_line_ok = True
     for r in raw_lines:
         if r.taxable is None or r.gst_rate is None:
             continue
+        per_line_ran = True
         expected = int((Decimal(r.taxable) * r.gst_rate / Decimal(100)).to_integral_value())
         got = (r.cgst or 0) + (r.sgst or 0) + (r.igst or 0)
         d = abs(expected - got)
@@ -1007,23 +1164,30 @@ def _run_arithmetic(raw_lines: list[_RawLine], total_taxable: int | None,
         if d > LINE_TAX_TOL_PAISE:
             per_line_ok = False
 
-    if grand_total is not None and total_taxable is not None:
-        computed = (total_taxable + (total_cgst or 0) + (total_sgst or 0)
+    grand_ran = grand_total is not None and total_taxable is not None
+    if grand_ran:
+        computed = ((total_taxable or 0) + (total_cgst or 0) + (total_sgst or 0)
                     + (total_igst or 0) + (round_off or 0))
-        d = abs(computed - grand_total)
+        d = abs(computed - (grand_total or 0))
         deltas.append(d)
         totals_ok = d <= TOTALS_TOL_PAISE
     else:
         totals_ok = grand_total is None or total_taxable is None  # nothing to contradict
 
     supply_ok = _supply_type_consistent(
-        pos_code, supplier_code, total_cgst or 0, total_sgst or 0, total_igst or 0)
+        pos_code, supplier_code, buyer_code, total_cgst or 0, total_sgst or 0, total_igst or 0)
+    supply_ran = (
+        _supply_type(pos_code, supplier_code, buyer_code) is not None
+        and any(t is not None for t in (total_cgst, total_sgst, total_igst)))
 
-    return ArithmeticChecks(
+    checks = ArithmeticChecks(
         lines_sum_matches_taxable=lines_sum_ok, per_line_tax_consistent=per_line_ok,
         totals_add_to_grand=totals_ok, supply_type_consistent=supply_ok,
         max_abs_delta_paise=max(deltas) if deltas else 0,
     )
+    corrob = _Corrob(taxable_ran=taxable_ran, per_line_ran=per_line_ran,
+                     grand_ran=grand_ran, supply_ran=supply_ran)
+    return checks, corrob
 
 
 # --------------------------------------------------------------------------- review gate

@@ -1,0 +1,44 @@
+{
+  "doc_type": "gst_invoice",
+  "header": {
+    "buyer_address": "Plot 9, Andheri East, Mumbai, Maharashtra 400069",
+    "buyer_gstin": "27ABCDE1234F1Z0",
+    "buyer_name": "Gifsy Solutions Ltd",
+    "invoice_date": "2026-07-14",
+    "invoice_number": "NHC/26-27/0410",
+    "place_of_supply": "Maharashtra (27)",
+    "po_ref": null,
+    "supplier_address": "7 Nashik Highway, Pune, Maharashtra 411001",
+    "supplier_gstin": "27AAPFU0939F1ZV",
+    "supplier_name": "Northline Hardware Co"
+  },
+  "lines": [
+    {
+      "cgst_paise": 8910,
+      "description": "Bolt assortment",
+      "gst_rate": "18",
+      "hsn_sac": "7318",
+      "igst_paise": 0,
+      "line_no": 1,
+      "line_total_paise": 116820,
+      "quantity": "3",
+      "sgst_paise": 8910,
+      "taxable_paise": 99000,
+      "unit": "BOX",
+      "unit_rate_paise": 33000
+    }
+  ],
+  "needs_ocr": false,
+  "page_count": 1,
+  "review_needed": false,
+  "schema_version": "gst_invoice/1.0.0",
+  "totals": {
+    "amount_in_words": "One Thousand One Hundred Sixty Eight Only",
+    "grand_total_paise": 116790,
+    "round_off_paise": -30,
+    "total_cgst_paise": 8910,
+    "total_igst_paise": 0,
+    "total_sgst_paise": 8910,
+    "total_taxable_paise": 99000
+  }
+}

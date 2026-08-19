@@ -110,11 +110,108 @@ def _scanned_no_text() -> InvoiceSpec:
     )
 
 
+# ---------------------------------------------------------------------------
+# Adversarial fixtures — each reproduces a CONFIRMED extractor defect and is doc-exact ONLY
+# with its fix in place, so it fails the extractor without the fix (a real regression guard).
+# ---------------------------------------------------------------------------
+
+
+def _h1_supplier_gstin_above_billto() -> InvoiceSpec:
+    # H1: intra-state (same state → a silent swap would NOT trip any state cross-check), with
+    # the supplier↔buyer gap REMOVED so the SUPPLIER GSTIN sits just above "Bill To" and is the
+    # Euclidean-nearest token. Doc-exact only if the buyer is taken strictly BELOW the anchor.
+    return InvoiceSpec(
+        supplier_name="Umang Traders",
+        supplier_gstin=GSTIN_SUPPLIER_MH,
+        supplier_address="14 Fort Road, Mumbai, Maharashtra 400001",
+        buyer_name="Gifsy Solutions Ltd",
+        buyer_gstin=GSTIN_BUYER_MH,
+        buyer_address="Plot 9, Andheri East, Mumbai, Maharashtra 400069",
+        invoice_number="UMG/2026/0099",
+        invoice_date=date(2026, 5, 20),
+        place_of_supply="Maharashtra (27)",
+        intra_state=True,
+        po_ref="PO-88010",
+        tight_header=True,
+        lines=[LineSpec("Office chair", "9401", Decimal("4"), "NOS", 450000, Decimal("18"))],
+        amount_in_words="Twenty One Thousand Two Hundred Forty Only",
+    )
+
+
+def _h2_borderless_right_aligned() -> InvoiceSpec:
+    # H2: BORDERLESS grid (no rules → word-geometry fallback) with RIGHT-aligned money columns
+    # and a multi-word "Taxable Value" header. Doc-exact only with nearest-center bucketing +
+    # multi-word header spans; the old left-edge banding drops/merges the taxable value.
+    return InvoiceSpec(
+        supplier_name="Gujarat Poly Pack LLP",
+        supplier_gstin=GSTIN_SUPPLIER_GJ,
+        supplier_address="Plot 22 GIDC, Vapi, Gujarat 396195",
+        buyer_name="Southern Retail Pvt Ltd",
+        buyer_gstin=GSTIN_BUYER_KA,
+        buyer_address="45 MG Road, Bengaluru, Karnataka 560001",
+        invoice_number="GPP-INV-2026-220",
+        invoice_date=date(2026, 6, 12),
+        place_of_supply="Karnataka (29)",
+        intra_state=False,
+        borderless=True,
+        header_labels={"taxable": "Taxable Value", "hsn": "HSN"},
+        lines=[
+            LineSpec("PP bag", "6305", Decimal("2"), "BAG", 125000, Decimal("18")),
+            LineSpec("HDPE drum", "3923", Decimal("1"), "NOS", 300000, Decimal("28")),
+        ],
+    )
+
+
+def _m3_accounting_negative_round_off() -> InvoiceSpec:
+    # M3: a NEGATIVE round-off printed in accounting parentheses "(0.30)". Doc-exact only if the
+    # money tokenizer reads the parenthesised sign (a first-token grab loses it → +30, wrong).
+    return InvoiceSpec(
+        supplier_name="Northline Hardware Co",
+        supplier_gstin=GSTIN_SUPPLIER_MH,
+        supplier_address="7 Nashik Highway, Pune, Maharashtra 411001",
+        buyer_name="Gifsy Solutions Ltd",
+        buyer_gstin=GSTIN_BUYER_MH,
+        buyer_address="Plot 9, Andheri East, Mumbai, Maharashtra 400069",
+        invoice_number="NHC/26-27/0410",
+        invoice_date=date(2026, 7, 14),
+        place_of_supply="Maharashtra (27)",
+        intra_state=True,
+        accounting_negatives=True,
+        round_off_paise=-30,
+        lines=[LineSpec("Bolt assortment", "7318", Decimal("3"), "BOX", 33000, Decimal("18"))],
+        amount_in_words="One Thousand One Hundred Sixty Eight Only",
+    )
+
+
+def _m6_amount_total_columns() -> InvoiceSpec:
+    # M6: the pre-tax column is headed "Amount" and sits beside a gross "Total". Doc-exact only
+    # if the synonym resolution routes "Amount"→taxable and "Total"→line_total (no collision).
+    return InvoiceSpec(
+        supplier_name="Umang Traders",
+        supplier_gstin=GSTIN_SUPPLIER_MH,
+        supplier_address="14 Fort Road, Mumbai, Maharashtra 400001",
+        buyer_name="Gifsy Solutions Ltd",
+        buyer_gstin=GSTIN_BUYER_MH,
+        buyer_address="Plot 9, Andheri East, Mumbai, Maharashtra 400069",
+        invoice_number="UMG/2026/0140",
+        invoice_date=date(2026, 5, 28),
+        place_of_supply="Maharashtra (27)",
+        intra_state=True,
+        header_labels={"taxable": "Amount"},
+        lines=[LineSpec("Steel rack", "9403", Decimal("2"), "NOS", 500000, Decimal("18"))],
+        amount_in_words="Eleven Thousand Eight Hundred Only",
+    )
+
+
 _FIXTURES: dict[str, InvoiceSpec] = {
     "intra_single_line": _intra_single_line(),
     "inter_multi_line": _inter_multi_line(),
     "edge_twopage_reorder": _edge_twopage_reorder(),
     "scanned_no_text": _scanned_no_text(),
+    "h1_supplier_gstin_above_billto": _h1_supplier_gstin_above_billto(),
+    "h2_borderless_right_aligned": _h2_borderless_right_aligned(),
+    "m3_accounting_negative_round_off": _m3_accounting_negative_round_off(),
+    "m6_amount_total_columns": _m6_amount_total_columns(),
 }
 
 
@@ -142,6 +239,18 @@ _NOTES: dict[str, str] = {
         "full GST grid; a discount/sub-total row; one line's tax carries a +₹1 wobble "
         "(±₹1 tolerance)."),
     "scanned_no_text": "Image-only / blank page: no text layer → needs_ocr, all fields MISSING.",
+    "h1_supplier_gstin_above_billto": (
+        "H1 guard: intra-state, supplier GSTIN sits just ABOVE 'Bill To' with NO gap; buyer "
+        "must be taken strictly below the anchor (else a silent supplier⇄buyer swap)."),
+    "h2_borderless_right_aligned": (
+        "H2 guard: borderless grid (no rules) with RIGHT-aligned money + a multi-word 'Taxable "
+        "Value' header; needs nearest-center bucketing + multi-word header spans."),
+    "m3_accounting_negative_round_off": (
+        "M3 guard: a negative round-off printed as accounting parentheses '(0.30)'; the money "
+        "tokenizer must read the parenthesised sign (−₹0.30), not grab the first token (+₹0.30)."),
+    "m6_amount_total_columns": (
+        "M6 guard: pre-tax column headed 'Amount' beside a gross 'Total'; synonym resolution "
+        "must route 'Amount'→taxable and 'Total'→line_total without colliding."),
 }
 
 

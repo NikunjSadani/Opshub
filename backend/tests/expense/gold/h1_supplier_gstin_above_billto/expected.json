@@ -1,0 +1,44 @@
+{
+  "doc_type": "gst_invoice",
+  "header": {
+    "buyer_address": "Plot 9, Andheri East, Mumbai, Maharashtra 400069",
+    "buyer_gstin": "27ABCDE1234F1Z0",
+    "buyer_name": "Gifsy Solutions Ltd",
+    "invoice_date": "2026-05-20",
+    "invoice_number": "UMG/2026/0099",
+    "place_of_supply": "Maharashtra (27)",
+    "po_ref": "PO-88010",
+    "supplier_address": "14 Fort Road, Mumbai, Maharashtra 400001",
+    "supplier_gstin": "27AAPFU0939F1ZV",
+    "supplier_name": "Umang Traders"
+  },
+  "lines": [
+    {
+      "cgst_paise": 162000,
+      "description": "Office chair",
+      "gst_rate": "18",
+      "hsn_sac": "9401",
+      "igst_paise": 0,
+      "line_no": 1,
+      "line_total_paise": 2124000,
+      "quantity": "4",
+      "sgst_paise": 162000,
+      "taxable_paise": 1800000,
+      "unit": "NOS",
+      "unit_rate_paise": 450000
+    }
+  ],
+  "needs_ocr": false,
+  "page_count": 1,
+  "review_needed": false,
+  "schema_version": "gst_invoice/1.0.0",
+  "totals": {
+    "amount_in_words": "Twenty One Thousand Two Hundred Forty Only",
+    "grand_total_paise": 2124000,
+    "round_off_paise": 0,
+    "total_cgst_paise": 162000,
+    "total_igst_paise": 0,
+    "total_sgst_paise": 162000,
+    "total_taxable_paise": 1800000
+  }
+}
