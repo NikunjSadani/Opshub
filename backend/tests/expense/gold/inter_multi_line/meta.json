@@ -1,0 +1,24 @@
+{
+  "fixture_id": "inter_multi_line",
+  "supply_type": "inter",
+  "n_lines": 3,
+  "page_count": 1,
+  "needs_ocr": false,
+  "review_needed": false,
+  "column_order": [
+    "description",
+    "hsn",
+    "qty",
+    "unit",
+    "rate",
+    "taxable",
+    "gst",
+    "cgst",
+    "sgst",
+    "igst",
+    "total"
+  ],
+  "notes": "3 lines / 2 HSNs / mixed 18-12-28% rates, inter-state IGST, +Rs 0.28 round-off.",
+  "generator": "app.modules.expense.eval.synth.build_invoice_pdf (rl_config.invariant)",
+  "schema_version": "gst_invoice/1.0.0"
+}

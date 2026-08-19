@@ -14,6 +14,7 @@ import { Login } from './pages/Login';
 import { ModulePlaceholder } from './pages/ModulePlaceholder';
 import { NotFound } from './pages/NotFound';
 import { ChallanModule } from './pages/challan/ChallanModule';
+import { ExpenseModule } from './pages/expense/ExpenseModule';
 import { ProjectsModule } from './pages/projects/ProjectsModule';
 import { UsersModule } from './pages/users/UsersModule';
 import { RequireRole } from './auth/RequireRole';
@@ -62,6 +63,7 @@ export function AppRoutes() {
           genuinely role-scoped surfaces; the dev role switcher exercises it.
         */}
         <Route path="/m/document_automation/*" element={<ChallanModule />} />
+        <Route path="/m/expense_invoice/*" element={<ExpenseModule />} />
         <Route path="/m/projects/*" element={<ProjectsModule />} />
         {/*
           User Management is a genuinely role-scoped admin surface (unlike the

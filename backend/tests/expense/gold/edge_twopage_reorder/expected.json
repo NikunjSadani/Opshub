@@ -1,0 +1,86 @@
+{
+  "doc_type": "gst_invoice",
+  "header": {
+    "buyer_address": "Plot 9, Andheri East, Mumbai, Maharashtra 400069",
+    "buyer_gstin": "27ABCDE1234F1Z0",
+    "buyer_name": "Gifsy Solutions Ltd",
+    "invoice_date": "2026-07-09",
+    "invoice_number": "NHC/26-27/0301",
+    "place_of_supply": "Maharashtra (27)",
+    "po_ref": null,
+    "supplier_address": "7 Nashik Highway, Pune, Maharashtra 411001",
+    "supplier_gstin": "27AAPFU0939F1ZV",
+    "supplier_name": "Northline Hardware Co"
+  },
+  "lines": [
+    {
+      "cgst_paise": 3750,
+      "description": "M8 hex bolt (box)",
+      "gst_rate": "5",
+      "hsn_sac": "7318",
+      "igst_paise": 0,
+      "line_no": 1,
+      "line_total_paise": 157500,
+      "quantity": "10",
+      "sgst_paise": 3750,
+      "taxable_paise": 150000,
+      "unit": "BOX",
+      "unit_rate_paise": 15000
+    },
+    {
+      "cgst_paise": 79200,
+      "description": "Angle grinder 850W",
+      "gst_rate": "18",
+      "hsn_sac": "8467",
+      "igst_paise": 0,
+      "line_no": 2,
+      "line_total_paise": 1038400,
+      "quantity": "4",
+      "sgst_paise": 79200,
+      "taxable_paise": 880000,
+      "unit": "NOS",
+      "unit_rate_paise": 220000
+    },
+    {
+      "cgst_paise": 14000,
+      "description": "Copper lug 25mm",
+      "gst_rate": "12",
+      "hsn_sac": "8536",
+      "igst_paise": 0,
+      "line_no": 3,
+      "line_total_paise": 261331,
+      "quantity": "7",
+      "sgst_paise": 14000,
+      "taxable_paise": 233331,
+      "unit": "PKT",
+      "unit_rate_paise": 33333
+    },
+    {
+      "cgst_paise": 90000,
+      "description": "Cordless drill 18V",
+      "gst_rate": "18",
+      "hsn_sac": "8467",
+      "igst_paise": 0,
+      "line_no": 4,
+      "line_total_paise": 1180100,
+      "quantity": "2",
+      "sgst_paise": 90100,
+      "taxable_paise": 1000000,
+      "unit": "NOS",
+      "unit_rate_paise": 500000
+    }
+  ],
+  "needs_ocr": false,
+  "page_count": 2,
+  "review_needed": false,
+  "schema_version": "gst_invoice/1.0.0",
+  "totals": {
+    "amount_in_words": "Twenty Four Thousand Six Hundred One Only",
+    "grand_total_paise": 2637331,
+    "round_off_paise": 0,
+    "total_cgst_paise": 186950,
+    "total_igst_paise": 0,
+    "total_sgst_paise": 187050,
+    "total_taxable_paise": 2263331
+  }
+}

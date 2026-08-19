@@ -1,0 +1,29 @@
+{
+  "doc_type": "gst_invoice",
+  "header": {
+    "buyer_address": null,
+    "buyer_gstin": null,
+    "buyer_name": null,
+    "invoice_date": null,
+    "invoice_number": null,
+    "place_of_supply": null,
+    "po_ref": null,
+    "supplier_address": null,
+    "supplier_gstin": null,
+    "supplier_name": null
+  },
+  "lines": [],
+  "needs_ocr": true,
+  "page_count": 1,
+  "review_needed": true,
+  "schema_version": "gst_invoice/1.0.0",
+  "totals": {
+    "amount_in_words": null,
+    "grand_total_paise": null,
+    "round_off_paise": null,
+    "total_cgst_paise": null,
+    "total_igst_paise": null,
+    "total_sgst_paise": null,
+    "total_taxable_paise": null
+  }
+}

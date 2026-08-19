@@ -1,0 +1,72 @@
+{
+  "doc_type": "gst_invoice",
+  "header": {
+    "buyer_address": "45 MG Road, Bengaluru, Karnataka 560001",
+    "buyer_gstin": "29AAECS4321L1Z5",
+    "buyer_name": "Southern Retail Pvt Ltd",
+    "invoice_date": "2026-06-02",
+    "invoice_number": "GPP-INV-2026-118",
+    "place_of_supply": "Karnataka (29)",
+    "po_ref": null,
+    "supplier_address": "Plot 22 GIDC, Vapi, Gujarat 396195",
+    "supplier_gstin": "24AAACG1234H1Z6",
+    "supplier_name": "Gujarat Poly Pack LLP"
+  },
+  "lines": [
+    {
+      "cgst_paise": 0,
+      "description": "PP woven bag 50kg",
+      "gst_rate": "18",
+      "hsn_sac": "6305",
+      "igst_paise": 45000,
+      "line_no": 1,
+      "line_total_paise": 295000,
+      "quantity": "2",
+      "sgst_paise": 0,
+      "taxable_paise": 250000,
+      "unit": "BAG",
+      "unit_rate_paise": 125000
+    },
+    {
+      "cgst_paise": 0,
+      "description": "PP liner sheet",
+      "gst_rate": "12",
+      "hsn_sac": "6305",
+      "igst_paise": 24000,
+      "line_no": 2,
+      "line_total_paise": 224000,
+      "quantity": "5",
+      "sgst_paise": 0,
+      "taxable_paise": 200000,
+      "unit": "NOS",
+      "unit_rate_paise": 40000
+    },
+    {
+      "cgst_paise": 0,
+      "description": "HDPE drum 200L",
+      "gst_rate": "28",
+      "hsn_sac": "3923",
+      "igst_paise": 279972,
+      "line_no": 3,
+      "line_total_paise": 1279872,
+      "quantity": "1",
+      "sgst_paise": 0,
+      "taxable_paise": 999900,
+      "unit": "NOS",
+      "unit_rate_paise": 999900
+    }
+  ],
+  "needs_ocr": false,
+  "page_count": 1,
+  "review_needed": false,
+  "schema_version": "gst_invoice/1.0.0",
+  "totals": {
+    "amount_in_words": "Seventeen Thousand Nine Hundred Ninety Nine Only",
+    "grand_total_paise": 1798900,
+    "round_off_paise": 28,
+    "total_cgst_paise": 0,
+    "total_igst_paise": 348972,
+    "total_sgst_paise": 0,
+    "total_taxable_paise": 1449900
+  }
+}

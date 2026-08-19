@@ -1,0 +1,487 @@
+"""Synthetic GST-invoice PDF generator for the eval gold set.
+
+``build_invoice_pdf(spec)`` renders a real, text-layer PDF with **reportlab** and returns
+``(pdf_bytes, gold)`` where ``gold`` is the canonical expected value tree — known BY
+CONSTRUCTION, never re-parsed. The extractor / integration harness can reuse this exact
+signature to fabricate gold at will; the eval scorers consume the returned dict directly.
+
+Supported shape knobs (all deterministic — ``rl_config.invariant`` pins dates/ids):
+
+* intra-state (CGST + SGST) vs inter-state (IGST), chosen by ``spec.intra_state``;
+* N line items, mixed HSNs and GST rates;
+* a signed round-off line;
+* a custom column order (e.g. ``Qty | HSN | Description | Rate | Taxable Value | ...``);
+* a discount / sub-total presentation row (cosmetic — does not alter canonical totals);
+* a forced page break so line items span two pages;
+* a per-line tax wobble (``LineSpec.tax_delta_paise``) to exercise the ±₹1 tolerance;
+* ``scanned=True`` → an image-only / blank page with NO text layer (expects needs_ocr).
+
+Money is integer paise end to end (house convention); quantities / rates are ``Decimal``.
+"""
+from __future__ import annotations
+
+import io
+from dataclasses import dataclass, field
+from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
+
+from reportlab import rl_config
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
+
+from app.modules.expense.canonical import CANONICAL_SCHEMA_VERSION
+from app.modules.masterdata.normalize import valid_gstin
+
+# Deterministic output: fixed creation date + no random file ids, so committed fixtures are
+# byte-stable across regenerations.
+rl_config.invariant = 1
+
+_GSTIN_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def make_gstin(first14: str) -> str:
+    """Complete a 14-char GSTIN prefix (state[2] + PAN[10] + entity[1] + 'Z') with the
+    single valid GSTN check character. Raises if no completion validates."""
+    for ch in _GSTIN_ALPHABET:
+        candidate = first14 + ch
+        if valid_gstin(candidate):
+            return candidate
+    raise ValueError(f"no valid GSTIN check char for prefix {first14!r}")
+
+
+# A few real, checksum-valid GSTINs (verified via masterdata.normalize.valid_gstin) so
+# fixtures never trip the extractor's checksum gate spuriously.
+GSTIN_SUPPLIER_MH = "27AAPFU0939F1ZV"  # Maharashtra
+GSTIN_BUYER_MH = make_gstin("27ABCDE1234F1Z")  # Maharashtra (intra with supplier)
+GSTIN_SUPPLIER_GJ = "24AAACG1234H1Z6"  # Gujarat
+GSTIN_BUYER_KA = "29AAECS4321L1Z5"     # Karnataka (inter-state vs a Gujarat supplier)
+
+
+# ---------------------------------------------------------------------------
+# Spec
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LineSpec:
+    description: str
+    hsn_sac: str
+    quantity: Decimal
+    unit: str
+    unit_rate_paise: int
+    gst_rate: Decimal            # percent, e.g. Decimal("18")
+    tax_delta_paise: int = 0     # inject vendor rounding onto the line tax (± up to ₹1)
+
+
+@dataclass
+class InvoiceSpec:
+    supplier_name: str
+    supplier_gstin: str
+    supplier_address: str
+    buyer_name: str
+    buyer_gstin: str
+    buyer_address: str
+    invoice_number: str
+    invoice_date: date
+    place_of_supply: str          # "State (NN)"
+    lines: list[LineSpec]
+    intra_state: bool
+    po_ref: str | None = None
+    round_off_paise: int = 0
+    amount_in_words: str | None = None
+    column_order: tuple[str, ...] = (
+        "description", "hsn", "qty", "unit", "rate", "taxable", "gst",
+        "cgst", "sgst", "igst", "total")
+    discount_subtotal: bool = False
+    two_page: bool = False
+    page_break_after: int = 0     # rows on page 1 before a forced break (0 → auto/none)
+    scanned: bool = False
+    _title: str = field(default="Tax Invoice", repr=False)
+
+
+# ---------------------------------------------------------------------------
+# Canonical computation (by construction)
+# ---------------------------------------------------------------------------
+
+
+def _q0(d: Decimal) -> int:
+    """Round a Decimal to whole paise (HALF_UP) → int."""
+    return int(d.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+@dataclass
+class _ComputedLine:
+    line_no: int
+    description: str
+    hsn_sac: str
+    quantity: Decimal
+    unit: str
+    unit_rate_paise: int
+    taxable_paise: int
+    gst_rate: Decimal
+    cgst_paise: int
+    sgst_paise: int
+    igst_paise: int
+    line_total_paise: int
+
+
+def _compute_line(idx: int, ls: LineSpec, intra: bool) -> _ComputedLine:
+    taxable = _q0(ls.quantity * Decimal(ls.unit_rate_paise))
+    tax_total = _q0(Decimal(taxable) * ls.gst_rate / Decimal(100))
+    if intra:
+        cgst = tax_total // 2
+        sgst = tax_total - cgst + ls.tax_delta_paise
+        igst = 0
+    else:
+        cgst = 0
+        sgst = 0
+        igst = tax_total + ls.tax_delta_paise
+    line_total = taxable + cgst + sgst + igst
+    return _ComputedLine(
+        line_no=idx,
+        description=ls.description,
+        hsn_sac=ls.hsn_sac,
+        quantity=ls.quantity,
+        unit=ls.unit,
+        unit_rate_paise=ls.unit_rate_paise,
+        taxable_paise=taxable,
+        gst_rate=ls.gst_rate,
+        cgst_paise=cgst,
+        sgst_paise=sgst,
+        igst_paise=igst,
+        line_total_paise=line_total,
+    )
+
+
+def _compute(spec: InvoiceSpec) -> tuple[list[_ComputedLine], dict[str, int]]:
+    lines = [_compute_line(i + 1, ls, spec.intra_state) for i, ls in enumerate(spec.lines)]
+    total_taxable = sum(cl.taxable_paise for cl in lines)
+    total_cgst = sum(cl.cgst_paise for cl in lines)
+    total_sgst = sum(cl.sgst_paise for cl in lines)
+    total_igst = sum(cl.igst_paise for cl in lines)
+    grand_total = (
+        total_taxable + total_cgst + total_sgst + total_igst + spec.round_off_paise)
+    totals = {
+        "total_taxable_paise": total_taxable,
+        "total_cgst_paise": total_cgst,
+        "total_sgst_paise": total_sgst,
+        "total_igst_paise": total_igst,
+        "round_off_paise": spec.round_off_paise,
+        "grand_total_paise": grand_total,
+    }
+    return lines, totals
+
+
+def _build_gold(
+    spec: InvoiceSpec, lines: list[_ComputedLine], totals: dict[str, int], page_count: int
+) -> dict[str, object]:
+    if spec.scanned:
+        # Image-only page: nothing is extractable, so every field is MISSING and the doc
+        # must route to OCR. Lines are empty by construction.
+        return {
+            "schema_version": CANONICAL_SCHEMA_VERSION,
+            "doc_type": "gst_invoice",
+            "page_count": 1,
+            "needs_ocr": True,
+            "review_needed": True,
+            "header": {a: None for a in _HEADER_ATTRS},
+            "totals": {a: None for a in _TOTALS_ATTRS},
+            "lines": [],
+        }
+    header = {
+        "supplier_name": spec.supplier_name,
+        "supplier_gstin": spec.supplier_gstin,
+        "supplier_address": spec.supplier_address,
+        "buyer_name": spec.buyer_name,
+        "buyer_gstin": spec.buyer_gstin,
+        "buyer_address": spec.buyer_address,
+        "invoice_number": spec.invoice_number,
+        "invoice_date": spec.invoice_date.isoformat(),
+        "place_of_supply": spec.place_of_supply,
+        "po_ref": spec.po_ref,
+    }
+    gold_lines: list[dict[str, object]] = [
+        {
+            "line_no": cl.line_no,
+            "description": cl.description,
+            "hsn_sac": cl.hsn_sac,
+            "quantity": _dec_str(cl.quantity),
+            "unit": cl.unit,
+            "unit_rate_paise": cl.unit_rate_paise,
+            "taxable_paise": cl.taxable_paise,
+            "gst_rate": _dec_str(cl.gst_rate),
+            "cgst_paise": cl.cgst_paise,
+            "sgst_paise": cl.sgst_paise,
+            "igst_paise": cl.igst_paise,
+            "line_total_paise": cl.line_total_paise,
+        }
+        for cl in lines
+    ]
+    gold_totals: dict[str, object] = dict(totals)
+    gold_totals["amount_in_words"] = spec.amount_in_words
+    return {
+        "schema_version": CANONICAL_SCHEMA_VERSION,
+        "doc_type": "gst_invoice",
+        "page_count": page_count,
+        "needs_ocr": False,
+        "review_needed": False,
+        "header": header,
+        "totals": gold_totals,
+        "lines": gold_lines,
+    }
+
+
+_HEADER_ATTRS = (
+    "supplier_name", "supplier_gstin", "supplier_address", "buyer_name", "buyer_gstin",
+    "buyer_address", "invoice_number", "invoice_date", "place_of_supply", "po_ref",
+)
+_TOTALS_ATTRS = (
+    "total_taxable_paise", "total_cgst_paise", "total_sgst_paise", "total_igst_paise",
+    "round_off_paise", "grand_total_paise", "amount_in_words",
+)
+
+
+def _dec_str(d: Decimal) -> str:
+    """Plain-string a Decimal without exponent notation (e.g. '3', '18.00')."""
+    return format(d.normalize() if d == d.to_integral() else d, "f")
+
+
+# ---------------------------------------------------------------------------
+# Rendering (reportlab canvas)
+# ---------------------------------------------------------------------------
+
+_PAGE_W, _PAGE_H = A4
+_MARGIN = 18 * mm
+
+
+def _rupees(paise: int) -> str:
+    sign = "-" if paise < 0 else ""
+    p = abs(paise)
+    return f"{sign}{p // 100:,}.{p % 100:02d}"
+
+
+# A realistic GST line-item table names taxable value and each tax head in its OWN column
+# (CGST / SGST for intra-state, IGST for inter-state — the not-applicable heads print 0.00).
+# The header labels here are what the extractor resolves columns BY (never by index), so they
+# must read like a real invoice: "Taxable Value", "CGST", "SGST", "IGST", "Total".
+_COLUMNS: dict[str, str] = {
+    "description": "Description",
+    "hsn": "HSN/SAC",
+    "qty": "Qty",
+    "unit": "Unit",
+    "rate": "Rate",
+    "taxable": "Taxable",
+    "gst": "GST%",
+    "cgst": "CGST",
+    "sgst": "SGST",
+    "igst": "IGST",
+    "total": "Total",
+}
+
+
+def _cell(cl: _ComputedLine, key: str) -> str:
+    if key == "description":
+        return cl.description
+    if key == "hsn":
+        return cl.hsn_sac
+    if key == "qty":
+        return _dec_str(cl.quantity)
+    if key == "unit":
+        return cl.unit
+    if key == "rate":
+        return _rupees(cl.unit_rate_paise)
+    if key == "taxable":
+        return _rupees(cl.taxable_paise)
+    if key == "gst":
+        return f"{_dec_str(cl.gst_rate)}%"
+    if key == "cgst":
+        return _rupees(cl.cgst_paise)
+    if key == "sgst":
+        return _rupees(cl.sgst_paise)
+    if key == "igst":
+        return _rupees(cl.igst_paise)
+    if key == "total":
+        return _rupees(cl.line_total_paise)
+    return ""
+
+
+def _draw_header_block(c: canvas.Canvas, spec: InvoiceSpec, y: float, continued: bool) -> float:
+    """Render a realistic single-column masthead: supplier block, a "Bill To:" buyer block,
+    then the invoice meta lines.
+
+    Each identity/meta line sits on its OWN visual row (never a two-column overlay), so the
+    extractor reads the supplier name as the top non-noise line, anchors the buyer on
+    "Bill To:", and keeps the supplier GSTIN as the top-most GSTIN — the exact structure its
+    header logic is designed for. Field VALUES are the spec's, verbatim.
+    """
+    c.setFont("Helvetica-Bold", 14)
+    title = spec._title + (" (continued)" if continued else "")
+    c.drawString(_MARGIN, y, title)
+    y -= 8 * mm
+
+    def _line(text: str, font: str = "Helvetica", size: float = 9, gap: float = 5) -> None:
+        nonlocal y
+        c.setFont(font, size)
+        c.drawString(_MARGIN, y, text)
+        y -= gap * mm
+
+    _line(spec.supplier_name, font="Helvetica-Bold", size=11)
+    _line(spec.supplier_address)
+    _line(f"GSTIN: {spec.supplier_gstin}")
+    # A clear separation before the buyer block so the buyer GSTIN — not the supplier's —
+    # is the one nearest the "Bill To" anchor the extractor keys the buyer off.
+    y -= 10 * mm
+    _line(f"Bill To: {spec.buyer_name}")
+    _line(spec.buyer_address)
+    _line(f"GSTIN: {spec.buyer_gstin}")
+    y -= 2 * mm
+    _line(f"Invoice No: {spec.invoice_number}    "
+          f"Invoice Date: {spec.invoice_date.strftime('%d-%m-%Y')}")
+    _line(f"Place of Supply: {spec.place_of_supply}")
+    if spec.po_ref:
+        _line(f"PO Ref: {spec.po_ref}")
+    return float(y - 2 * mm)
+
+
+def _column_x(cols: tuple[str, ...]) -> list[float]:
+    usable = _PAGE_W - 2 * _MARGIN
+    # Description gets the widest column; the rest split evenly but stay wide enough that a
+    # 9-char money value ("16,500.00") and the header labels never overflow into (and
+    # interleave with) the neighbouring cell — overflow is what corrupts edge-based table
+    # detection.
+    weights = [2.0 if k == "description" else 1.0 for k in cols]
+    total = sum(weights)
+    xs: list[float] = []
+    x = _MARGIN
+    for w in weights:
+        xs.append(x)
+        x += usable * (w / total)
+    return xs
+
+
+# Row band height + text insets for the ruled grid. A real GST invoice draws the line-item
+# table as a visible box with column/row rules; drawing them (rather than borderless
+# positioned text) is what makes the grid detectable by pdfplumber's edge-based
+# `extract_tables()`. Cell VALUES are unchanged — only the surrounding rules are new.
+_ROW_H = 6 * mm
+_CELL_TX = 1.5          # x inset so text clears the left column rule
+_CELL_TY = 1.8 * mm     # baseline inset above the row's bottom rule
+
+
+def _draw_grid_table(c: canvas.Canvas, cols: tuple[str, ...], xs: list[float],
+                     page_lines: list[_ComputedLine], y_top: float) -> float:
+    """Render the header + this page's item rows as a RULED (bordered) table.
+
+    Draws the full grid — a horizontal rule between every row and a vertical rule at every
+    column boundary — so the item table looks like a real ruled GST invoice AND registers as
+    a table for `pdfplumber.extract_tables()`. Returns the y just below the table.
+    """
+    right = _PAGE_W - _MARGIN
+    n_rows = 1 + len(page_lines)                 # header row + one band per item
+    bottom = y_top - n_rows * _ROW_H
+    c.setLineWidth(0.5)
+    for i in range(n_rows + 1):                  # horizontal rules (top, between, bottom)
+        yy = y_top - i * _ROW_H
+        c.line(_MARGIN, yy, right, yy)
+    for x in [*xs, right]:                        # vertical rules (column boundaries + box)
+        c.line(x, y_top, x, bottom)
+
+    c.setFont("Helvetica-Bold", 7)
+    header_base = y_top - _ROW_H + _CELL_TY
+    for key, x in zip(cols, xs, strict=True):
+        c.drawString(x + _CELL_TX, header_base, _COLUMNS[key])
+
+    c.setFont("Helvetica", 7)
+    for ri, cl in enumerate(page_lines, start=1):
+        base = y_top - (ri + 1) * _ROW_H + _CELL_TY
+        for key, x in zip(cols, xs, strict=True):
+            c.drawString(x + _CELL_TX, base, _cell(cl, key))
+    return float(bottom)
+
+
+def _draw_totals_block(
+    c: canvas.Canvas, spec: InvoiceSpec, totals: dict[str, int], y: float
+) -> None:
+    c.setFont("Helvetica", 9)
+    x_label = _PAGE_W - _MARGIN - 70 * mm
+    x_val = _PAGE_W - _MARGIN - 5 * mm
+    # Print every tax head AND round-off explicitly (0.00 where not applicable) so the
+    # extractor reads a value for each — a not-applicable head is a real 0, not MISSING, and
+    # the gold expects 0 there.
+    rows: list[tuple[str, int]] = [
+        ("Taxable Value", totals["total_taxable_paise"]),
+        ("CGST", totals["total_cgst_paise"]),
+        ("SGST", totals["total_sgst_paise"]),
+        ("IGST", totals["total_igst_paise"]),
+        ("Round Off", totals["round_off_paise"]),
+    ]
+    for label, val in rows:
+        c.drawString(x_label, y, label)
+        c.drawRightString(x_val, y, _rupees(val))
+        y -= 5 * mm
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(x_label, y, "Grand Total")
+    c.drawRightString(x_val, y, _rupees(totals["grand_total_paise"]))
+    y -= 6 * mm
+    if spec.amount_in_words:
+        c.setFont("Helvetica-Oblique", 9)
+        c.drawString(_MARGIN, y, f"Amount in words: {spec.amount_in_words}")
+
+
+def _draw_discount_subtotal(c: canvas.Canvas, subtotal_paise: int, y: float) -> float:
+    c.setFont("Helvetica-Oblique", 8)
+    c.drawString(_MARGIN, y, "Sub-Total")
+    c.drawRightString(_PAGE_W - _MARGIN, y, _rupees(subtotal_paise))
+    y -= 5 * mm
+    c.drawString(_MARGIN, y, "Discount")
+    c.drawRightString(_PAGE_W - _MARGIN, y, _rupees(0))
+    return float(y - 5 * mm)
+
+
+def build_invoice_pdf(spec: InvoiceSpec) -> tuple[bytes, dict[str, object]]:
+    """Render ``spec`` to a PDF and return ``(pdf_bytes, gold)``.
+
+    ``gold`` matches the shape :func:`app.modules.expense.eval.scorers.score` expects.
+    """
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    c.setTitle(spec._title)
+
+    if spec.scanned:
+        # No text: a single filled rectangle stands in for a scanned image. pdfplumber /
+        # any text-layer extractor finds nothing → needs_ocr.
+        c.setFillGray(0.85)
+        c.rect(_MARGIN, _MARGIN, _PAGE_W - 2 * _MARGIN, _PAGE_H - 2 * _MARGIN, fill=1, stroke=0)
+        c.showPage()
+        c.save()
+        gold = _build_gold(spec, [], {}, page_count=1)
+        return buf.getvalue(), gold
+
+    lines, totals = _compute(spec)
+    cols = spec.column_order
+    xs = _column_x(cols)
+
+    # Decide the split point for a two-page invoice.
+    split = len(lines)
+    if spec.two_page:
+        split = spec.page_break_after or max(1, len(lines) // 2)
+    pages: list[list[_ComputedLine]] = [lines[:split]]
+    if split < len(lines):
+        pages.append(lines[split:])
+
+    page_count = len(pages)
+    for pi, page_lines in enumerate(pages):
+        y = _PAGE_H - _MARGIN
+        y = _draw_header_block(c, spec, y, continued=(pi > 0))
+        y = _draw_grid_table(c, cols, xs, page_lines, y)
+        is_last = pi == page_count - 1
+        if is_last:
+            if spec.discount_subtotal:
+                y = _draw_discount_subtotal(c, totals["total_taxable_paise"], y - 2 * mm)
+            _draw_totals_block(c, spec, totals, y - 4 * mm)
+        c.showPage()
+    c.save()
+
+    gold = _build_gold(spec, lines, totals, page_count=page_count)
+    return buf.getvalue(), gold

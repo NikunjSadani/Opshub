@@ -1,0 +1,24 @@
+{
+  "fixture_id": "scanned_no_text",
+  "supply_type": "scanned",
+  "n_lines": 0,
+  "page_count": 1,
+  "needs_ocr": true,
+  "review_needed": true,
+  "column_order": [
+    "description",
+    "hsn",
+    "qty",
+    "unit",
+    "rate",
+    "taxable",
+    "gst",
+    "cgst",
+    "sgst",
+    "igst",
+    "total"
+  ],
+  "notes": "Image-only / blank page: no text layer → needs_ocr, all fields MISSING.",
+  "generator": "app.modules.expense.eval.synth.build_invoice_pdf (rl_config.invariant)",
+  "schema_version": "gst_invoice/1.0.0"
+}

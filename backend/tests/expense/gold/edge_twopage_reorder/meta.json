@@ -1,0 +1,24 @@
+{
+  "fixture_id": "edge_twopage_reorder",
+  "supply_type": "intra",
+  "n_lines": 4,
+  "page_count": 2,
+  "needs_ocr": false,
+  "review_needed": false,
+  "column_order": [
+    "qty",
+    "hsn",
+    "description",
+    "unit",
+    "rate",
+    "taxable",
+    "gst",
+    "cgst",
+    "sgst",
+    "igst",
+    "total"
+  ],
+  "notes": "Line items span a page break; reordered columns (Qty|HSN|Description|... ) over a full GST grid; a discount/sub-total row; one line's tax carries a +₹1 wobble (±₹1 tolerance).",
+  "generator": "app.modules.expense.eval.synth.build_invoice_pdf (rl_config.invariant)",
+  "schema_version": "gst_invoice/1.0.0"
+}

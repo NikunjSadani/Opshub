@@ -1,0 +1,44 @@
+{
+  "doc_type": "gst_invoice",
+  "header": {
+    "buyer_address": "Plot 9, Andheri East, Mumbai, Maharashtra 400069",
+    "buyer_gstin": "27ABCDE1234F1Z0",
+    "buyer_name": "Gifsy Solutions Ltd",
+    "invoice_date": "2026-05-15",
+    "invoice_number": "UMG/2026/0042",
+    "place_of_supply": "Maharashtra (27)",
+    "po_ref": "PO-77120",
+    "supplier_address": "14 Fort Road, Mumbai, Maharashtra 400001",
+    "supplier_gstin": "27AAPFU0939F1ZV",
+    "supplier_name": "Umang Traders"
+  },
+  "lines": [
+    {
+      "cgst_paise": 148500,
+      "description": "Steel almirah 6ft",
+      "gst_rate": "18",
+      "hsn_sac": "9403",
+      "igst_paise": 0,
+      "line_no": 1,
+      "line_total_paise": 1947000,
+      "quantity": "3",
+      "sgst_paise": 148500,
+      "taxable_paise": 1650000,
+      "unit": "NOS",
+      "unit_rate_paise": 550000
+    }
+  ],
+  "needs_ocr": false,
+  "page_count": 1,
+  "review_needed": false,
+  "schema_version": "gst_invoice/1.0.0",
+  "totals": {
+    "amount_in_words": "Nineteen Thousand Four Hundred Seventy Only",
+    "grand_total_paise": 1947000,
+    "round_off_paise": 0,
+    "total_cgst_paise": 148500,
+    "total_igst_paise": 0,
+    "total_sgst_paise": 148500,
+    "total_taxable_paise": 1650000
+  }
+}

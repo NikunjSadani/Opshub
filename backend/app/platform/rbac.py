@@ -17,6 +17,7 @@ from app.platform.models import Role, User
 ADMIN_ONLY: frozenset[str] = frozenset(
     {
         "user.manage",          # create/invite users, assign role + module access, enable/disable
+        "expense.delete",       # delete a CONFIRMED expense invoice (unconfirmed = module-gated)
         "challan.void",
         "challan.recover",      # reset a batch wedged in GENERATING (dead worker) → retryable
         "numbering.override",

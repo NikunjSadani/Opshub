@@ -1,0 +1,635 @@
+"""Expense/Invoice orchestration — extract, persist, review, confirm, delete.
+
+The upload flow mirrors the challan module's discipline (store bytes, then run the
+engine, then persist a SNAPSHOT), but the money here is READ from a vendor PDF, so
+the seam is the ``Extractor`` (injectable — tests pass a fake) rather than a
+renderer. For each uploaded PDF:
+
+  read bytes -> extractor.extract -> map ExtractedInvoice onto an Invoice snapshot
+  (scalars) + first-class line items + the per-field ENVELOPE rows, deriving the
+  invoice STATUS from the extraction (EXTRACTED / NEEDS_REVIEW / NEEDS_OCR), or
+  REJECTED when the engine can't read the document at all.
+
+Dedup is HARD: a new invoice whose identity key (``dedup.dedup_key``) collides a
+stored one is NOT persisted — the per-file outcome carries the existing invoice's
+id + summary so the route can surface a 409, and the operator deletes + re-uploads
+to replace. Every mutation is audited.
+
+Errors: ``ExpenseError`` subclasses map to HTTP status at the route
+(``ExpenseNotFound`` -> 404, ``ExpenseBadRequest`` -> 400, ``ExpenseConflict`` -> 409).
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
+from typing import Any, cast
+
+from sqlalchemy import Select, select
+from sqlalchemy.orm import Session
+
+from app.modules.expense import dedup
+from app.modules.expense.canonical import (
+    REQUIRED_FIELD_PATHS,
+    ExtractedInvoice,
+)
+from app.modules.expense.canonical import (
+    Field as CField,
+)
+from app.modules.expense.extractor import Extractor, get_extractor
+from app.modules.expense.models import (
+    FieldStatus,
+    Invoice,
+    InvoiceBatch,
+    InvoiceBatchStatus,
+    InvoiceCorrection,
+    InvoiceField,
+    InvoiceLineItem,
+    InvoiceStatus,
+)
+from app.modules.files.models import StoredFile
+from app.platform import audit
+from app.platform.storage import Storage, get_storage
+
+logger = logging.getLogger(__name__)
+
+MODULE_KEY = "expense_invoice"
+# Hard ceiling on a single CSV export so the response can never be unbounded.
+MAX_CSV_ROWS = 50000
+
+_REJECTED_MESSAGE = (
+    "the document could not be read (unreadable or corrupt file) — re-scan or "
+    "upload a clearer copy"
+)
+
+
+# --------------------------------------------------------------------- errors
+
+class ExpenseError(Exception):
+    """Base for expense-flow errors."""
+
+
+class ExpenseNotFound(ExpenseError):
+    """A referenced invoice/entity does not exist -> 404."""
+
+
+class ExpenseBadRequest(ExpenseError):
+    """A malformed correction / unknown field -> 400."""
+
+
+class ExpenseConflict(ExpenseError):
+    """A state-machine or identity conflict -> 409."""
+
+
+# ----------------------------------------------------------- field mapping
+
+# The canonical HEADER + TOTALS scalars carried as per-field ENVELOPE rows (lines
+# are first-class, not envelopes). The dataclass attr name == the Invoice scalar
+# attr name == the trailing segment of the field_path, so one list drives the map.
+_HEADER_FIELDS: tuple[str, ...] = (
+    "supplier_name", "supplier_gstin", "supplier_address",
+    "buyer_name", "buyer_gstin", "buyer_address",
+    "invoice_number", "invoice_date", "place_of_supply", "po_ref",
+)
+_TOTALS_FIELDS: tuple[str, ...] = (
+    "total_taxable_paise", "total_cgst_paise", "total_sgst_paise",
+    "total_igst_paise", "round_off_paise", "grand_total_paise", "amount_in_words",
+)
+
+
+@dataclass(frozen=True)
+class _Spec:
+    field_path: str
+    section: str   # "header" | "totals"
+    attr: str
+    kind: str      # "money" | "date" | "text"
+
+
+def _kind_for(attr: str) -> str:
+    if attr == "invoice_date":
+        return "date"
+    if attr.endswith("_paise"):
+        return "money"
+    return "text"
+
+
+_FIELD_SPECS: tuple[_Spec, ...] = tuple(
+    _Spec(f"header.{a}", "header", a, _kind_for(a)) for a in _HEADER_FIELDS
+) + tuple(
+    _Spec(f"totals.{a}", "totals", a, _kind_for(a)) for a in _TOTALS_FIELDS
+)
+_SPEC_BY_PATH: dict[str, _Spec] = {s.field_path: s for s in _FIELD_SPECS}
+
+
+def _norm_str(kind: str, value: Any) -> str | None:
+    """The stored string form of an envelope value (paise->int-str, date->ISO)."""
+    if value is None:
+        return None
+    if kind == "date":
+        return cast("date", value).isoformat()
+    return str(value)
+
+
+def _coerce(kind: str, raw: str) -> Any:
+    """Parse a human-supplied correction string into its typed scalar value."""
+    text = raw.strip()
+    if kind == "money":
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise ExpenseBadRequest(
+                f"expected an integer paise amount, got {raw!r}") from exc
+    if kind == "date":
+        try:
+            return date.fromisoformat(text)
+        except ValueError as exc:
+            raise ExpenseBadRequest(
+                f"expected an ISO date (YYYY-MM-DD), got {raw!r}") from exc
+    return raw  # text — stored verbatim
+
+
+# --------------------------------------------------------------- outcomes
+
+@dataclass
+class FileOutcome:
+    """One uploaded file's result (surfaced per-file by the route)."""
+
+    file_id: int
+    status: str                       # EXTRACTED|NEEDS_REVIEW|NEEDS_OCR|REJECTED|DUPLICATE
+    invoice_id: int | None = None
+    duplicate_of: int | None = None   # the EXISTING invoice id on a DUPLICATE
+    supplier_name: str | None = None
+    invoice_number: str | None = None
+    grand_total_paise: int | None = None
+    review_reasons: list[str] = field(default_factory=list)  # extraction review flags
+    message: str | None = None
+    # Echoed by the route from the stored upload (the service works off file_id).
+    filename: str | None = None
+
+
+@dataclass
+class BatchResult:
+    """The persisted batch plus the per-file outcomes (duplicates are NOT persisted,
+    so they live only here — the route reads them straight off this result)."""
+
+    batch: InvoiceBatch
+    outcomes: list[FileOutcome] = field(default_factory=list)
+
+
+# --------------------------------------------------------------- create_batch
+
+def create_batch(
+    db: Session,
+    file_ids: list[int],
+    *,
+    actor_uid: str | None,
+    extractor: Extractor | None = None,
+) -> BatchResult:
+    """Extract + persist every uploaded PDF into one batch; return per-file outcomes.
+
+    ``extractor`` is INJECTABLE (defaults to the configured engine) so tests pass a
+    fake. Each file is processed independently: an unreadable file becomes a
+    REJECTED invoice (never aborts the batch); a document whose identity key
+    collides a stored invoice yields a DUPLICATE outcome and is NOT persisted.
+    """
+    extractor = extractor or get_extractor()
+    storage = get_storage()
+    batch = InvoiceBatch(status=InvoiceBatchStatus.EXTRACTING.value, created_by=actor_uid)
+    db.add(batch)
+    db.flush()
+    _audit(db, "expense.batch_created", actor_uid, batch.id, {"files": len(file_ids)})
+
+    outcomes: list[FileOutcome] = []
+    persisted = 0
+    for file_id in file_ids:
+        outcome = _process_file(db, batch, file_id, storage, extractor, actor_uid)
+        outcomes.append(outcome)
+        if outcome.invoice_id is not None and outcome.status != "DUPLICATE":
+            persisted += 1
+
+    batch.invoice_count = persisted
+    batch.status = InvoiceBatchStatus.COMPLETED.value
+    _audit(db, "expense.batch_completed", actor_uid, batch.id,
+           {"persisted": persisted, "files": len(file_ids)})
+    db.commit()
+    db.refresh(batch)
+    return BatchResult(batch=batch, outcomes=outcomes)
+
+
+def _process_file(
+    db: Session,
+    batch: InvoiceBatch,
+    file_id: int,
+    storage: Storage,
+    extractor: Extractor,
+    actor_uid: str | None,
+) -> FileOutcome:
+    """Extract + persist a single file, returning its outcome. Never raises for a
+    bad document: an extraction failure becomes a REJECTED invoice."""
+    try:
+        pdf_bytes = _read_source(db, storage, file_id)
+    except FileNotFoundError:
+        # The row was created microseconds ago in the same request; a missing blob
+        # is an internal fault, not a bad document. Log server-side, reject the file.
+        logger.error("expense source bytes missing for file %s", file_id)
+        return _persist_rejected(db, batch, file_id, actor_uid)
+
+    try:
+        extracted = extractor.extract(pdf_bytes, doc_type="gst_invoice")
+    except Exception as err:  # noqa: BLE001 - any engine failure -> a clean REJECTED
+        # Detail (which may embed file internals) is logged, NEVER surfaced.
+        logger.warning("expense extraction failed for file %s", file_id, exc_info=err)
+        return _persist_rejected(db, batch, file_id, actor_uid)
+
+    scalars = _scalars_from(extracted)
+    key = (dedup.dedup_key(
+        scalars["supplier_gstin"], scalars["invoice_number"],
+        scalars["invoice_date"], scalars["grand_total_paise"],
+    ) if _enforceable(scalars) else None)
+
+    if key is not None:
+        existing = db.execute(
+            select(Invoice).where(Invoice.dedup_key == key).limit(1)
+        ).scalar_one_or_none()
+        if existing is not None:
+            # HARD dedup: do NOT persist. Carry the STORED invoice's id + summary.
+            _audit(db, "expense.invoice_duplicate", actor_uid, existing.id,
+                   {"file_id": file_id, "batch_id": batch.id})
+            return FileOutcome(
+                file_id=file_id, status="DUPLICATE", duplicate_of=existing.id,
+                supplier_name=existing.supplier_name,
+                invoice_number=existing.invoice_number,
+                grand_total_paise=existing.grand_total_paise,
+                message="a matching invoice already exists; delete it to re-upload",
+            )
+
+    invoice = _persist_invoice(db, batch, file_id, extracted, scalars, key, actor_uid)
+    return FileOutcome(
+        file_id=file_id, status=invoice.status, invoice_id=invoice.id,
+        supplier_name=invoice.supplier_name, invoice_number=invoice.invoice_number,
+        grand_total_paise=invoice.grand_total_paise,
+        review_reasons=list(extracted.review_reasons),
+    )
+
+
+def _persist_invoice(
+    db: Session,
+    batch: InvoiceBatch,
+    file_id: int,
+    extracted: ExtractedInvoice,
+    scalars: dict[str, Any],
+    key: str | None,
+    actor_uid: str | None,
+) -> Invoice:
+    """Persist the Invoice snapshot + line items + field envelope rows."""
+    invoice = Invoice(
+        batch_id=batch.id,
+        source_file_id=file_id,
+        schema_version=extracted.schema_version,
+        source_engine=extracted.source_engine,
+        status=_status_for(extracted),
+        needs_ocr=extracted.needs_ocr,
+        review_reasons=list(extracted.review_reasons),
+        dedup_key=key,
+        content_hash=dedup.content_hash(extracted.raw_text),
+        created_by=actor_uid,
+        **scalars,
+    )
+    for spec in _FIELD_SPECS:
+        cfield = _canonical_field(extracted, spec)
+        invoice.fields.append(InvoiceField(
+            field_path=spec.field_path,
+            value_normalized=_norm_str(spec.kind, cfield.value_normalized),
+            value_raw=cfield.value_raw,
+            confidence=_confidence(cfield.confidence),
+            source_engine=cfield.source_engine,
+            page=cfield.page,
+            bbox=list(cfield.bbox) if cfield.bbox is not None else None,
+            status=cfield.status.value,
+        ))
+    for i, line in enumerate(extracted.lines, start=1):
+        invoice.lines.append(InvoiceLineItem(
+            line_no=i,
+            description=line.description.value_normalized,
+            hsn_sac=line.hsn_sac.value_normalized,
+            quantity=line.quantity.value_normalized,
+            unit=line.unit.value_normalized,
+            unit_rate_paise=line.unit_rate_paise.value_normalized,
+            taxable_paise=line.taxable_paise.value_normalized,
+            gst_rate=line.gst_rate.value_normalized,
+            cgst_paise=line.cgst_paise.value_normalized,
+            sgst_paise=line.sgst_paise.value_normalized,
+            igst_paise=line.igst_paise.value_normalized,
+            line_total_paise=line.line_total_paise.value_normalized,
+        ))
+    db.add(invoice)
+    db.flush()
+    _audit(db, "expense.invoice_created", actor_uid, invoice.id,
+           {"batch_id": batch.id, "status": invoice.status, "file_id": file_id})
+    return invoice
+
+
+def _persist_rejected(
+    db: Session, batch: InvoiceBatch, file_id: int, actor_uid: str | None
+) -> FileOutcome:
+    """A quality-gate failure: a terminal REJECTED invoice with a generic message
+    (no identity key, no fields — there was nothing readable to snapshot)."""
+    invoice = Invoice(
+        batch_id=batch.id,
+        source_file_id=file_id,
+        status=InvoiceStatus.REJECTED.value,
+        review_reasons=[_REJECTED_MESSAGE],
+        created_by=actor_uid,
+    )
+    db.add(invoice)
+    db.flush()
+    _audit(db, "expense.invoice_rejected", actor_uid, invoice.id,
+           {"batch_id": batch.id, "file_id": file_id})
+    return FileOutcome(
+        file_id=file_id, status="REJECTED", invoice_id=invoice.id,
+        message=_REJECTED_MESSAGE,
+    )
+
+
+def _canonical_field(extracted: ExtractedInvoice, spec: _Spec) -> CField[Any]:
+    section = extracted.header if spec.section == "header" else extracted.totals
+    return cast("CField[Any]", getattr(section, spec.attr))
+
+
+def _scalars_from(extracted: ExtractedInvoice) -> dict[str, Any]:
+    """The typed canonical scalar values keyed by their Invoice column name."""
+    out: dict[str, Any] = {}
+    for spec in _FIELD_SPECS:
+        out[spec.attr] = _canonical_field(extracted, spec).value_normalized
+    return out
+
+
+def _enforceable(scalars: dict[str, Any]) -> bool:
+    """A dedup key only binds when all four identity fields are present. A partial /
+    OCR-parked extraction carries a NULL key so it never falsely collides another."""
+    return (
+        bool(scalars.get("supplier_gstin"))
+        and bool(scalars.get("invoice_number"))
+        and scalars.get("invoice_date") is not None
+        and scalars.get("grand_total_paise") is not None
+    )
+
+
+def _status_for(extracted: ExtractedInvoice) -> str:
+    """Map the extraction onto the invoice state machine (REJECTED is handled by the
+    quality-gate path, never reached here)."""
+    if extracted.needs_ocr:
+        return InvoiceStatus.NEEDS_OCR.value
+    if extracted.review_needed:
+        return InvoiceStatus.NEEDS_REVIEW.value
+    return InvoiceStatus.EXTRACTED.value
+
+
+def _confidence(value: float) -> Decimal:
+    """Clamp + quantize a 0..1 confidence into the Numeric(4,3) column."""
+    try:
+        dec = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        dec = Decimal("0")
+    dec = max(Decimal("0"), min(Decimal("1"), dec))
+    return dec.quantize(Decimal("0.001"))
+
+
+# --------------------------------------------------------------- register / read
+
+def _register_query(
+    *,
+    supplier: str | None = None,
+    gstin: str | None = None,
+    status: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> Select[tuple[Invoice]]:
+    """The filtered, newest-first register select shared by list + CSV."""
+    stmt = select(Invoice)
+    if supplier:
+        stmt = stmt.where(Invoice.supplier_name.ilike(f"%{supplier.strip()}%"))
+    if gstin:
+        stmt = stmt.where(Invoice.supplier_gstin == "".join(gstin.split()).upper())
+    if status:
+        stmt = stmt.where(Invoice.status == status)
+    if date_from is not None:
+        stmt = stmt.where(Invoice.invoice_date >= date_from)
+    if date_to is not None:  # inclusive
+        stmt = stmt.where(Invoice.invoice_date <= date_to)
+    return stmt.order_by(Invoice.id.desc())
+
+
+def list_invoices(
+    db: Session,
+    *,
+    supplier: str | None = None,
+    gstin: str | None = None,
+    status: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[Invoice]:
+    """The searchable expense register (supplier / GSTIN / date-range / status)."""
+    stmt = _register_query(
+        supplier=supplier, gstin=gstin, status=status,
+        date_from=date_from, date_to=date_to,
+    ).limit(limit).offset(offset)
+    return list(db.execute(stmt).scalars())
+
+
+def register_csv(rows: list[Invoice]) -> bytes:
+    """Render the register to CSV; text-derived fields are CSV-injection-guarded."""
+    header = "Invoice No,Date,Supplier,Supplier GSTIN,Taxable (INR),Grand Total (INR),Status"
+    lines = [header]
+    for inv in rows:
+        lines.append(",".join((
+            _csv_field(inv.invoice_number or ""),
+            f'"{inv.invoice_date.isoformat() if inv.invoice_date else ""}"',
+            _csv_field(inv.supplier_name or ""),
+            _csv_field(inv.supplier_gstin or ""),
+            f'"{_rupees(inv.total_taxable_paise)}"',
+            f'"{_rupees(inv.grand_total_paise)}"',
+            f'"{inv.status}"',
+        )))
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def get_invoice(db: Session, invoice_id: int) -> Invoice:
+    """One invoice with its field envelope + line items (relationships eager-load
+    on access). Raises ``ExpenseNotFound`` for a miss."""
+    invoice = db.get(Invoice, invoice_id)
+    if invoice is None:
+        raise ExpenseNotFound("invoice not found")
+    return invoice
+
+
+# --------------------------------------------------------------- corrections
+
+def submit_corrections(
+    db: Session,
+    invoice: Invoice,
+    corrections: list[tuple[str, str]],
+    *,
+    actor_uid: str | None,
+) -> Invoice:
+    """Apply per-field human corrections to an EXTRACTED / NEEDS_REVIEW invoice.
+
+    Each correction flips its ``InvoiceField`` to CORRECTED (source_engine="human"),
+    writes an ``InvoiceCorrection`` audit row, and overwrites the canonical scalar.
+    A CONFIRMED / REJECTED invoice is immutable (409); an unknown field path is 400.
+    """
+    if invoice.status not in (
+        InvoiceStatus.EXTRACTED.value, InvoiceStatus.NEEDS_REVIEW.value
+    ):
+        raise ExpenseConflict(
+            f"invoice is {invoice.status}; only EXTRACTED or NEEDS_REVIEW invoices "
+            "can be corrected")
+    if not corrections:
+        raise ExpenseBadRequest("no corrections supplied")
+
+    fields_by_path = {f.field_path: f for f in invoice.fields}
+    changed: list[str] = []
+    for raw_path, raw_value in corrections:
+        path = raw_path.strip()
+        spec = _SPEC_BY_PATH.get(path)
+        if spec is None:
+            raise ExpenseBadRequest(f"unknown field '{raw_path}'")
+        typed = _coerce(spec.kind, raw_value)          # may raise ExpenseBadRequest
+        new_norm = _norm_str(spec.kind, typed)
+
+        fld = fields_by_path.get(path)
+        old_norm = fld.value_normalized if fld is not None else None
+        if fld is None:  # envelope row absent (a REJECTED-style skeleton) — create it
+            fld = InvoiceField(field_path=path)
+            invoice.fields.append(fld)
+        fld.value_normalized = new_norm
+        fld.status = FieldStatus.CORRECTED.value
+        fld.source_engine = "human"
+
+        setattr(invoice, spec.attr, typed)             # overwrite the snapshot scalar
+        db.add(InvoiceCorrection(
+            invoice_id=invoice.id, field_path=path,
+            old_value=old_norm, new_value=new_norm, corrected_by=actor_uid,
+        ))
+        changed.append(path)
+
+    # Corrections can move the identity fields; keep the enforceable key in sync so a
+    # later confirm/register stays consistent. A collision with a DIFFERENT invoice is
+    # a 409 (delete the other or fix the value) rather than a surprise DB error.
+    _resync_dedup_key(db, invoice)
+
+    _audit(db, "expense.invoice_corrected", actor_uid, invoice.id,
+           {"fields": changed})
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+def _resync_dedup_key(db: Session, invoice: Invoice) -> None:
+    enforceable = (
+        bool(invoice.supplier_gstin)
+        and bool(invoice.invoice_number)
+        and invoice.invoice_date is not None
+        and invoice.grand_total_paise is not None
+    )
+    key = dedup.dedup_key(
+        invoice.supplier_gstin, invoice.invoice_number,
+        invoice.invoice_date, invoice.grand_total_paise,
+    ) if enforceable else None
+    if key == invoice.dedup_key:
+        return
+    if key is not None:
+        clash = db.execute(
+            select(Invoice.id).where(Invoice.dedup_key == key, Invoice.id != invoice.id)
+        ).scalar_one_or_none()
+        if clash is not None:
+            raise ExpenseConflict(
+                f"these values match an existing invoice (#{clash}); delete that one "
+                "to merge, or correct the identity fields")
+    invoice.dedup_key = key
+
+
+# --------------------------------------------------------------- confirm
+
+def confirm_invoice(db: Session, invoice: Invoice, *, actor_uid: str | None) -> Invoice:
+    """Freeze an EXTRACTED / NEEDS_REVIEW invoice into the immutable CONFIRMED record.
+
+    Blocked (409) while any REQUIRED field is still MISSING / LOW_CONFIDENCE — those
+    must be corrected (which flips them to CORRECTED) first.
+    """
+    if invoice.status not in (
+        InvoiceStatus.EXTRACTED.value, InvoiceStatus.NEEDS_REVIEW.value
+    ):
+        raise ExpenseConflict(
+            f"invoice is {invoice.status}; only EXTRACTED or NEEDS_REVIEW invoices "
+            "can be confirmed")
+    blocking = sorted(
+        f.field_path for f in invoice.fields
+        if f.field_path in REQUIRED_FIELD_PATHS
+        and f.status in (FieldStatus.MISSING.value, FieldStatus.LOW_CONFIDENCE.value)
+    )
+    if blocking:
+        raise ExpenseConflict(
+            "these required fields still need review before confirming: "
+            + ", ".join(blocking))
+    invoice.status = InvoiceStatus.CONFIRMED.value
+    invoice.confirmed_by = actor_uid
+    invoice.confirmed_at = datetime.now(UTC)
+    _audit(db, "expense.invoice_confirmed", actor_uid, invoice.id, {})
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+# --------------------------------------------------------------- delete
+
+def delete_invoice(db: Session, invoice: Invoice, *, actor_uid: str | None) -> None:
+    """Delete an invoice (cascades its lines / fields / corrections).
+
+    Supports delete-and-re-upload to replace a hard-deduped record. The route gates
+    deletion of a CONFIRMED record behind ``expense.delete`` (admin)."""
+    invoice_id = invoice.id
+    was_confirmed = invoice.status == InvoiceStatus.CONFIRMED.value
+    db.delete(invoice)
+    _audit(db, "expense.invoice_deleted", actor_uid, invoice_id,
+           {"was_confirmed": was_confirmed})
+    db.commit()
+
+
+# --------------------------------------------------------------- helpers
+
+def _read_source(db: Session, storage: Storage, file_id: int) -> bytes:
+    sf = db.get(StoredFile, file_id)
+    if sf is None:
+        raise FileNotFoundError(f"stored file {file_id} missing")
+    with storage.open(sf.storage_ref) as fh:
+        return fh.read()
+
+
+def _rupees(paise: int | None) -> str:
+    """Paise -> a plain 2dp rupee decimal a spreadsheet can sum; "" when absent."""
+    if paise is None:
+        return ""
+    return f"{Decimal(paise) / 100:.2f}"
+
+
+def _csv_field(value: str) -> str:
+    """Quote a CSV field and neutralize spreadsheet formula/DDE injection (RFC 4180
+    quote-doubling; a leading = + - @ / control char is prefixed with `'`)."""
+    value = value.replace('"', '""')
+    if value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        value = "'" + value
+    return f'"{value}"'
+
+
+def _audit(
+    db: Session, action: str, actor_uid: str | None, entity_id: int,
+    detail: dict[str, Any],
+) -> None:
+    audit.log(
+        db, action=action, actor_uid=actor_uid,
+        entity="expense_invoice", entity_id=str(entity_id), detail=detail,
+    )
