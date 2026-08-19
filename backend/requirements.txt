@@ -10,6 +10,7 @@ python-multipart==0.0.20        # file uploads
 tzdata==2024.2                   # zoneinfo Asia/Kolkata FY calc (Windows + slim containers have no system tzdb)
 openpyxl==3.1.5                  # challan Excel upload parsing
 pypdf==5.1.0                     # merged-PDF assembly
+pdfplumber==0.11.10              # expense: text-layer invoice extraction (words + tables + boxes; pure-python, zero-cost)
 weasyprint==63.1                 # HTML->PDF challan render (lazy-imported; needs GTK native libs, Linux container only)
 
 # Dev / gates
@@ -17,3 +18,4 @@ ruff==0.8.4
 mypy==1.14.0
 pytest==8.3.4
 httpx==0.28.1                    # TestClient
+reportlab==4.2.5                 # TEST-ONLY: generate synthetic text-layer invoice PDFs for the extractor + eval fixtures (not imported by runtime code)

@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 
 from app.config import get_settings
 from app.modules.challan.routes import router as challan_router
+from app.modules.expense.routes import router as expense_router
 from app.modules.files.routes import router as files_router
 from app.modules.health.routes import SPEC as HEALTH
 from app.modules.jobs.routes import router as jobs_router
@@ -42,7 +43,14 @@ register_module(ModuleSpec(
     router=APIRouter(),
     nav_group="Operations",
 ))
-# Phase 2 will add: Expense & Invoice (expense_invoice)
+# Expense & Invoice — nav entry only; its API routes are mounted separately below
+# (expense_router at /api/v1). Same empty-router pattern as the modules above.
+register_module(ModuleSpec(
+    key="expense_invoice",
+    title="Expense & Invoice",
+    router=APIRouter(),
+    nav_group="Operations",
+))
 
 
 def create_app() -> FastAPI:
@@ -55,6 +63,7 @@ def create_app() -> FastAPI:
     # platform primitive routers (infrastructure, not nav modules)
     app.include_router(files_router, prefix="/api/v1/files", tags=["files"])
     app.include_router(challan_router, prefix="/api/v1", tags=["challan"])
+    app.include_router(expense_router, prefix="/api/v1", tags=["expense"])
     app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
     app.include_router(masterdata_router, prefix="/api/v1", tags=["masterdata"])
     app.include_router(numbering_router, prefix="/api/v1", tags=["numbering"])

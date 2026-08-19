@@ -14,6 +14,7 @@ from app.db import Base
 
 # --- populate Base.metadata: import all model-defining modules ---
 import app.modules.challan.models  # noqa: E402,F401
+import app.modules.expense.models  # noqa: E402,F401
 import app.modules.files.models  # noqa: E402,F401
 import app.modules.masterdata.models  # noqa: E402,F401
 import app.modules.numbering.models  # noqa: E402,F401
