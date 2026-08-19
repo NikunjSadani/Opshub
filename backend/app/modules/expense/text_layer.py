@@ -786,7 +786,7 @@ class TextLayerExtractor:
         # ---- GSTINs (supplier = top-most block; buyer = strictly below "Bill To") -----
         cands = _gstin_candidates(words)
         billto = next((ln for ln in lines if _BILLTO_RE.search(ln.text)), None)
-        supplier_c, buyer_c, buyer_ambiguous = _assign_gstins(cands, billto)
+        supplier_c, buyer_c, supplier_ambiguous, buyer_ambiguous = _assign_gstins(cands, billto)
 
         supplier_code = supplier_c.value[:2] if supplier_c else None
         buyer_code = buyer_c.value[:2] if buyer_c else None
@@ -826,7 +826,8 @@ class TextLayerExtractor:
 
         # ---- envelope every field with a calibrated confidence -----------------------
         header = _build_header(lines, supplier_c, buyer_c, billto, pos_hit, pos_norm,
-                               pos_code, arithmetic, corrob, buyer_ambiguous)
+                               pos_code, arithmetic, corrob, supplier_ambiguous,
+                               buyer_ambiguous)
         invoice_lines = _build_lines(raw_lines, arithmetic, corrob)
         totals = _build_totals(tt_hit, cg_hit, sg_hit, ig_hit, ro_hit, gt_hit, words_hit,
                                total_taxable, total_cgst, total_sgst, total_igst, round_off,
@@ -870,31 +871,37 @@ _GSTIN_ROW_BAND = 18.0
 
 def _assign_gstins(
     cands: list[_Gstin], billto: _Line | None
-) -> tuple[_Gstin | None, _Gstin | None, bool]:
-    """Assign (supplier, buyer, buyer_ambiguous) from the GSTIN candidates.
+) -> tuple[_Gstin | None, _Gstin | None, bool, bool]:
+    """Assign (supplier, buyer, supplier_ambiguous, buyer_ambiguous) from the candidates.
 
-    Supplier is ALWAYS the top-most GSTIN (suppliers head the masthead). The buyer's GSTIN
-    must lie strictly BELOW the "Bill To" anchor (same page, or its column band beneath it) —
-    this is what prevents the silent supplier⇄buyer swap when the supplier's GSTIN sits just
-    ABOVE the anchor and would otherwise be the Euclidean-nearest token. If no candidate lies
-    below the anchor, the buyer is left UNKNOWN (None) rather than guessed; if two candidates
-    share the first band below it, the nearest is kept but flagged ambiguous (low-confidence).
+    Supplier is the top-most GSTIN (suppliers head the masthead). The buyer's GSTIN must lie
+    strictly BELOW the "Bill To" anchor (same page / its column band beneath it) — preventing
+    the silent supplier⇄buyer swap when the supplier's GSTIN sits just ABOVE the anchor. If no
+    candidate lies below, the buyer is UNKNOWN (None) not guessed; two candidates sharing the
+    first band below → nearest kept but flagged.
+
+    A BUYER-FIRST masthead (the "Bill To" anchor sits ABOVE the top-most GSTIN, so the
+    top-most is really the buyer's) breaks the top-most-is-supplier assumption — we detect it
+    (`supplier.top > billto.top`) and flag BOTH identities uncertain (a required-field
+    LOW_CONFIDENCE → review) rather than silently swap.
     """
     if not cands:
-        return None, None, False
+        return None, None, False, False
     supplier = min(cands, key=lambda c: (c.page, c.top, c.x0))
+    buyer_first = (billto is not None and supplier.page == billto.page
+                   and supplier.top > billto.top)
     if billto is None or len(cands) < 2:
-        return supplier, None, False
+        return supplier, None, buyer_first, buyer_first
 
     below = [c for c in cands
              if c is not supplier and c.page == billto.page and c.top > billto.top]
     if not below:
-        return supplier, None, False
+        return supplier, None, buyer_first, buyer_first
 
     below.sort(key=lambda c: (c.top, abs(c.x0 - billto.x0)))
     buyer = below[0]
     ambiguous = len(below) >= 2 and (below[1].top - buyer.top) < _GSTIN_ROW_BAND
-    return supplier, buyer, ambiguous
+    return supplier, buyer, buyer_first, (ambiguous or buyer_first)
 
 
 def _normalize_pos(raw: str) -> tuple[str | None, str | None]:
@@ -918,12 +925,12 @@ def _build_header(lines: list[_Line], supplier_c: _Gstin | None, buyer_c: _Gstin
                   billto: _Line | None, pos_hit: tuple[str, _Line] | None,
                   pos_norm: str | None, pos_code: str | None,
                   arith: ArithmeticChecks, corrob: _Corrob,
-                  buyer_ambiguous: bool) -> InvoiceHeader:
+                  supplier_ambiguous: bool, buyer_ambiguous: bool) -> InvoiceHeader:
     # The supply-type check only corroborates a GSTIN when it actually RAN (M5) — an
     # indeterminate/absent split must not lend the top confidence band.
     supply_ok = arith.supply_type_consistent and corrob.supply_ran
 
-    supplier_gstin = _gstin_field(supplier_c, supply_ok)
+    supplier_gstin = _gstin_field(supplier_c, supply_ok, ambiguous=supplier_ambiguous)
     buyer_gstin = _gstin_field(buyer_c, supply_ok, ambiguous=buyer_ambiguous)
 
     inv_no_hit = _find_first(lines, _INV_NO_RE)

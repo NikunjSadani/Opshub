@@ -621,3 +621,28 @@ def test_l9_control_chars_stripped_from_word_text() -> None:
     assert len(words) == 1
     assert words[0].text == "Acme Supplies"                    # \x07 and \x1f removed
     assert "\x07" not in words[0].text and "\x1f" not in words[0].text
+
+
+def test_assign_gstins_flags_buyer_first_masthead() -> None:
+    """Re-audit residual: a BUYER-FIRST masthead ("Bill To" above the top-most GSTIN) must
+    NOT silently swap supplier/buyer — both identities are flagged uncertain (→ review)."""
+    from app.modules.expense.text_layer import _assign_gstins, _Gstin, _Line
+
+    billto = _Line(text="Bill To:", x0=50, x1=90, top=100, bottom=110, page=1)
+    buyer = _Gstin(value="27ABCDE1234F1Z0", page=1, x0=50, top=120, x1=200, bottom=130)
+    supplier = _Gstin(value="27AAPFU0939F1ZV", page=1, x0=50, top=200, x1=200, bottom=210)
+    _sup, _buy, supplier_ambiguous, buyer_ambiguous = _assign_gstins([buyer, supplier], billto)
+    assert supplier_ambiguous is True
+    assert buyer_ambiguous is True
+
+
+def test_assign_gstins_ordinary_supplier_first_is_confident() -> None:
+    """The normal masthead (supplier GSTIN at top, Bill To + buyer below) stays confident."""
+    from app.modules.expense.text_layer import _assign_gstins, _Gstin, _Line
+
+    supplier = _Gstin(value="27AAPFU0939F1ZV", page=1, x0=50, top=60, x1=200, bottom=70)
+    billto = _Line(text="Bill To:", x0=50, x1=90, top=150, bottom=160, page=1)
+    buyer = _Gstin(value="27ABCDE1234F1Z0", page=1, x0=50, top=180, x1=200, bottom=190)
+    sup, buy, supplier_ambiguous, buyer_ambiguous = _assign_gstins([supplier, buyer], billto)
+    assert sup is supplier and buy is buyer
+    assert supplier_ambiguous is False and buyer_ambiguous is False

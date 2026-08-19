@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
@@ -169,6 +169,16 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     monkeypatch.setattr(service, "get_extractor", lambda *a, **k: FakeExtractor())
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
                            poolclass=StaticPool, future=True)
+
+    # Enforce foreign keys in SQLite (OFF by default) so FK-ordering bugs — e.g. deleting
+    # a StoredFile still referenced by an Invoice — fail the gate instead of silently
+    # passing here while 500-ing on Postgres.
+    @event.listens_for(engine, "connect")
+    def _fk_pragma(dbapi_conn: Any, _record: Any) -> None:  # noqa: ANN401
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
     Base.metadata.create_all(engine)
     TestSession = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 

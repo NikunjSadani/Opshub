@@ -705,18 +705,24 @@ def delete_invoice(
             "deleted (its gold provenance would be lost)")
 
     # F6: the source blob + its StoredFile row are NOT FK-cascaded — remove them too so a
-    # delete doesn't orphan the PDF forever. Blob removal is best-effort and happens AFTER
-    # the row commit (a failed unlink must never lose the DB delete).
+    # delete doesn't orphan the PDF forever. ORDER MATTERS: the Invoice FK-references the
+    # StoredFile, and there is no ORM relationship for the unit-of-work to order by, so we
+    # delete the invoice + FLUSH first (dropping the FK) BEFORE deleting the StoredFile —
+    # else Postgres (immediate FK checks) aborts the whole delete. Blob removal is
+    # best-effort and happens AFTER the commit (a failed unlink must never lose the delete).
+    source_file_id = locked.source_file_id
+    db.delete(locked)
+    db.flush()  # invoice gone -> its FK no longer pins the StoredFile
+
     source_ref: str | None = None
-    if locked.source_file_id is not None:
-        sf = db.get(StoredFile, locked.source_file_id)
+    if source_file_id is not None:
+        sf = db.get(StoredFile, source_file_id)
         if sf is not None:
             source_ref = sf.storage_ref
             db.delete(sf)
 
-    db.delete(locked)
     _audit(db, "expense.invoice_deleted", actor_uid, invoice_id,
-           {"was_confirmed": was_confirmed, "source_file_id": locked.source_file_id})
+           {"was_confirmed": was_confirmed, "source_file_id": source_file_id})
     db.commit()
 
     if source_ref is not None:
