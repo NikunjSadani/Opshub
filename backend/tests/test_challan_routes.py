@@ -22,9 +22,10 @@ from starlette.testclient import TestClient
 
 from app.config import get_settings
 from app.db import Base, get_db
-from app.modules.challan import schema
+from app.modules.challan import download, render, schema
 from app.modules.challan.models import BatchStatus, Challan, ChallanBatch, ChallanStatus
 from app.modules.challan.routes import router
+from app.modules.files.models import StoredFile
 from app.modules.masterdata.models import Consignor, HsnCode
 from app.modules.numbering import service as numbering
 from app.modules.numbering.models import NumberingAllocation
@@ -365,3 +366,93 @@ def test_stuck_sweep_resets_only_stale(
         db.close()
     finally:
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------- range/list download
+
+import datetime as _dt  # noqa: E402
+
+
+def _seed_challan(db: object, n: int, status: str = "ISSUED", *, with_pdf: bool = True) -> None:
+    """Seed one challan (series L, FY 26-27, number_int=n) + a stored A4 PDF."""
+    from app.platform.storage import get_storage
+    alloc = NumberingAllocation(series="L", fy="26-27", number=n,
+                                formatted=f"GIF/DC/26-27/L/{n:06d}", status="ISSUED")
+    db.add(alloc)
+    db.flush()
+    pdf_id = None
+    if with_pdf:
+        ref = get_storage().save(f"challan-pdf/{n}.pdf", render.StubRenderer().render_pdf(""))
+        sf = StoredFile(kind="challan-pdf", filename=f"{n}.pdf", content_type="application/pdf",
+                        size=1, storage_ref=ref, uploaded_by="seed",
+                        module_key="document_automation")
+        db.add(sf)
+        db.flush()
+        pdf_id = sf.id
+    db.add(Challan(
+        batch_id=1, allocation_id=alloc.id, number=alloc.formatted, series="L", fy="26-27",
+        number_int=n, challan_date=_dt.date(2026, 5, 15),
+        consignor_name="Gifsy Depot", consignor_gstin=GSTIN, consignor_state="MH",
+        consignee_brand="Deoleo", consignee_name="Deoleo MH", consignee_gstin=GSTIN,
+        consignee_state="MH", ship_to_name="S", ship_to_address="A", ship_to_state="MH",
+        total_paise=10000, status=status, pdf_file_id=pdf_id,
+    ))
+    db.commit()
+
+
+def test_parse_number_spec() -> None:
+    nums, errs = download.parse_number_spec("10-12, 15, 000018")
+    assert nums == [10, 11, 12, 15, 18] and errs == []
+    assert download.parse_number_spec("5-3")[1]         # reversed range -> error
+    assert download.parse_number_spec("abc")[1]         # non-numeric -> error
+    assert download.parse_number_spec("1-99999")[1]     # span too large -> error
+    assert download.parse_number_spec("")[0] == []      # empty -> no numbers
+
+
+def test_download_preview_reports_void_and_missing(client: TestClient) -> None:
+    db = client.app.state.TestSession()
+    _seed_challan(db, 10, "ISSUED")
+    _seed_challan(db, 11, "VOID")
+    db.close()  # 12 is never seeded -> missing
+    r = client.get("/api/v1/challan/download/preview",
+                   params={"series": "l", "fy": "26-27", "spec": "10-12"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["count"] == 1
+    assert [c["number_int"] for c in body["resolved"]] == [10]
+    assert body["skipped_void"] == [11]
+    assert body["missing"] == [12]
+
+
+def test_download_separate_zip_and_merged_2up(client: TestClient) -> None:
+    db = client.app.state.TestSession()
+    _seed_challan(db, 20, "ISSUED")
+    _seed_challan(db, 21, "ISSUED")
+    _seed_challan(db, 22, "VOID")
+    db.close()
+    # separate -> a ZIP; the voided 22 is skipped and reported in the header
+    z = client.get("/api/v1/challan/download",
+                   params={"series": "L", "fy": "26-27", "spec": "20-22", "mode": "separate"})
+    assert z.status_code == 200 and z.headers["content-type"] == "application/zip"
+    assert z.headers["x-skipped-void"] == "22"
+    import zipfile
+    names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
+    assert len(names) == 2  # only the two ISSUED challans
+    # merged -> a 2-up PDF: 2 challans on 1 A4 page
+    m = client.get("/api/v1/challan/download",
+                   params={"series": "L", "fy": "26-27", "spec": "20-22", "mode": "merged"})
+    assert m.status_code == 200 and m.headers["content-type"] == "application/pdf"
+    assert m.headers["x-skipped-void"] == "22"
+    from pypdf import PdfReader
+    assert len(PdfReader(io.BytesIO(m.content)).pages) == 1  # 2 challans, 2-up -> 1 sheet
+
+
+def test_download_bad_spec_400_and_no_issued_404(client: TestClient) -> None:
+    db = client.app.state.TestSession()
+    _seed_challan(db, 30, "VOID")
+    db.close()
+    assert client.get("/api/v1/challan/download",
+                      params={"series": "L", "fy": "26-27", "spec": "abc"}).status_code == 400
+    # only a voided number in range -> nothing issued -> 404
+    assert client.get("/api/v1/challan/download",
+                      params={"series": "L", "fy": "26-27", "spec": "30"}).status_code == 404

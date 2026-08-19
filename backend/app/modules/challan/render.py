@@ -286,3 +286,43 @@ def merge_pdfs(pdfs: list[bytes]) -> bytes:
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()
+
+
+# A4 in PDF points (matches the StubRenderer + WeasyPrint's @page A4).
+_A4_W_PT = 595.0
+_A4_H_PT = 842.0
+
+
+def merge_2up(pdfs: list[bytes]) -> bytes:
+    """Composite challan PDFs TWO-UP — 2 source pages per portrait-A4 output sheet,
+    each uniformly scaled to fit the top / bottom half and centred. Halves paper usage
+    on a reprint. Pure `pypdf` page compositing of the ALREADY-rendered stored challans
+    (no re-render / WeasyPrint), so it runs anywhere. Source pages are laid out in order;
+    a multi-page challan simply consumes consecutive half-slots. Raises on an empty list.
+    """
+    if not pdfs:
+        raise ValueError("merge_2up requires at least one PDF")
+
+    from pypdf import PageObject, PdfReader, PdfWriter, Transformation  # lazy
+
+    src_pages = []
+    for pdf in pdfs:
+        for page in PdfReader(io.BytesIO(pdf)).pages:
+            src_pages.append(page)
+
+    slot_h = _A4_H_PT / 2  # two stacked half-A4 slots per portrait sheet
+    writer = PdfWriter()
+    for i in range(0, len(src_pages), 2):
+        sheet = PageObject.create_blank_page(width=_A4_W_PT, height=_A4_H_PT)
+        for j, src in enumerate(src_pages[i:i + 2]):
+            sw = float(src.mediabox.width) or _A4_W_PT
+            sh = float(src.mediabox.height) or _A4_H_PT
+            scale = min(_A4_W_PT / sw, slot_h / sh)  # fit the slot, preserve aspect
+            slot_bottom = _A4_H_PT - slot_h * (j + 1)  # j=0 -> top half, j=1 -> bottom half
+            tx = (_A4_W_PT - sw * scale) / 2
+            ty = slot_bottom + (slot_h - sh * scale) / 2
+            sheet.merge_transformed_page(src, Transformation().scale(scale).translate(tx, ty))
+        writer.add_page(sheet)
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()

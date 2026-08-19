@@ -18,7 +18,7 @@ import re
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import PurePosixPath
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -40,7 +40,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.modules.challan import render, service, template
+from app.modules.challan import download, render, service, template
 from app.modules.challan.models import BatchStatus, Challan, ChallanBatch, ChallanStatus
 from app.modules.files.models import StoredFile
 from app.platform.auth import current_user
@@ -494,6 +494,94 @@ def export_challans_csv(
             "X-Truncated": "true" if truncated else "false",
         },
     )
+
+
+# ------------------------------------------------------- range/list download
+
+class ResolvedChallanOut(BaseModel):
+    number_int: int
+    number: str
+    id: int
+
+
+class DownloadPreviewOut(BaseModel):
+    series: str
+    fy: str
+    count: int                         # ISSUED challans that will download
+    resolved: list[ResolvedChallanOut]
+    skipped_void: list[int]            # VOID numbers being skipped (shown to the operator)
+    missing: list[int]                 # requested numbers with no challan in this series/FY
+    errors: list[str]
+
+
+@router.get("/challan/download/preview", response_model=DownloadPreviewOut)
+def download_preview(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    series: str,
+    fy: str,
+    spec: str,
+) -> DownloadPreviewOut:
+    """Resolve a (series, FY, range/list) selection WITHOUT downloading — so the operator
+    sees how many issued challans they'll get and exactly which VOID numbers are skipped."""
+    _require_module(user)
+    series, fy = series.strip().upper(), fy.strip()
+    result = download.resolve(db, series, fy, spec)
+    return DownloadPreviewOut(
+        series=series, fy=fy, count=len(result.resolved),
+        resolved=[ResolvedChallanOut(number_int=c.number_int, number=c.number, id=c.id)
+                  for c in result.resolved],
+        skipped_void=result.skipped_void, missing=result.missing, errors=result.errors)
+
+
+@router.get("/challan/download")
+def download_challans(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    series: str,
+    fy: str,
+    spec: str,
+    mode: Literal["separate", "merged"] = "separate",
+) -> Response:
+    """Download the ISSUED challans in a (series, FY, range/list) selection — a ZIP of the
+    individual full-A4 PDFs (`separate`) or a paper-saving 2-up merged PDF (`merged`, 2
+    challans per A4). VOID numbers are skipped; the skipped list rides in `X-Skipped-Void`."""
+    _require_module(user)
+    series, fy = series.strip().upper(), fy.strip()
+    result = download.resolve(db, series, fy, spec)
+    if result.errors:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "; ".join(result.errors))
+    if not result.resolved:
+        detail = "no issued challans match that selection"
+        if result.skipped_void:
+            detail += f" ({len(result.skipped_void)} voided, skipped)"
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail)
+
+    storage = get_storage()
+    named: list[tuple[str, bytes]] = []
+    for c in result.resolved:
+        if c.pdf_file_id is None:
+            continue
+        sf = db.get(StoredFile, c.pdf_file_id)
+        if sf is None:
+            continue
+        named.append((f"{service._safe(c.number)}.pdf", storage.open(sf.storage_ref).read()))
+    if not named:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "the selected challans have no stored PDF")
+
+    skipped = ",".join(str(n) for n in result.skipped_void)
+    stamp = f"{series}-{fy}"
+    if mode == "merged":
+        return Response(
+            content=render.merge_2up([data for _, data in named]),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="challans-{stamp}-2up.pdf"',
+                     "X-Skipped-Void": skipped})
+    return Response(
+        content=render.zip_files(named), media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="challans-{stamp}.zip"',
+                 "X-Skipped-Void": skipped})
 
 
 @router.get("/challan/summary", response_model=ChallanSummaryOut)
