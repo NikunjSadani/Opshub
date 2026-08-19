@@ -127,6 +127,8 @@ export interface DownloadPreview {
   resolved: DownloadResolved[];
   /** Numbers that exist but are VOID — deliberately excluded; tell the operator. */
   skipped_void: number[];
+  /** ISSUED numbers with no rendered PDF yet — can't download; reported so count is honest. */
+  no_pdf: number[];
   /** Numbers in the spec with no matching challan in (series, fy). */
   missing: number[];
   /** Human-readable problems with the spec (e.g. an unparsable range). */

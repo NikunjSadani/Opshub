@@ -29,8 +29,9 @@ class ResolvedChallan:
 
 @dataclass
 class ResolveResult:
-    resolved: list[ResolvedChallan] = field(default_factory=list)  # ISSUED, in number order
+    resolved: list[ResolvedChallan] = field(default_factory=list)  # ISSUED + has a stored PDF
     skipped_void: list[int] = field(default_factory=list)          # VOID → skipped (+ notified)
+    no_pdf: list[int] = field(default_factory=list)                # ISSUED but no stored PDF yet
     missing: list[int] = field(default_factory=list)               # no such challan in series/FY
     errors: list[str] = field(default_factory=list)                # spec-parse / empty errors
 
@@ -98,6 +99,11 @@ def resolve(db: Session, series: str, fy: str, spec: str) -> ResolveResult:
             result.missing.append(n)
         elif c.status == ChallanStatus.VOID.value:
             result.skipped_void.append(n)
+        elif c.pdf_file_id is None:
+            # ISSUED but never rendered (e.g. a partially-generated/retried batch). It is a
+            # real challan, so NOT "missing" — but it has no PDF to hand out, so it must be
+            # reported, never counted as downloadable and never silently dropped.
+            result.no_pdf.append(n)
         else:
             result.resolved.append(ResolvedChallan(n, c.number, c.id, c.pdf_file_id))
     return result

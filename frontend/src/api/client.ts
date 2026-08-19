@@ -59,10 +59,25 @@ async function downloadError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, message);
 }
 
-/** Result of a URL download: whether the export was capped, and the saved name. */
+/** Parse a comma-separated header like "11,22" into `[11, 22]` (empty/absent → `[]`). */
+function parseNumberList(header: string | null): number[] {
+  if (!header) return [];
+  return header
+    .split(',')
+    .map((s) => Number.parseInt(s.trim(), 10))
+    .filter((n) => Number.isFinite(n));
+}
+
+/** Result of a URL download: whether the export was capped, the saved name, and — for the
+ * challan bulk download — the numbers the server actually skipped (voided, or an unavailable
+ * PDF) as reported at download time, so the caller can reconcile against what was previewed. */
 export interface DownloadResult {
   truncated: boolean;
   filename: string;
+  /** Challan numbers skipped because they were VOID at download time (`X-Skipped-Void`). */
+  skippedVoid: number[];
+  /** Challan numbers that resolved but whose PDF couldn't be served (`X-Skipped-Unavailable`). */
+  skippedUnavailable: number[];
 }
 
 export interface RequestOptions {
@@ -161,7 +176,12 @@ export function useApi() {
       URL.revokeObjectURL(url);
       // Streaming exports cap their row count and flag it with `X-Truncated: true`
       // so the caller can tell the user the file is not the full result set.
-      return { truncated: res.headers.get('X-Truncated') === 'true', filename: name };
+      return {
+        truncated: res.headers.get('X-Truncated') === 'true',
+        filename: name,
+        skippedVoid: parseNumberList(res.headers.get('X-Skipped-Void')),
+        skippedUnavailable: parseNumberList(res.headers.get('X-Skipped-Unavailable')),
+      };
     },
     [getToken],
   );

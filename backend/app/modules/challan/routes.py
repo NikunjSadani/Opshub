@@ -507,23 +507,32 @@ class ResolvedChallanOut(BaseModel):
 class DownloadPreviewOut(BaseModel):
     series: str
     fy: str
-    count: int                         # ISSUED challans that will download
+    count: int                         # ISSUED challans WITH a stored PDF — what will download
     resolved: list[ResolvedChallanOut]
     skipped_void: list[int]            # VOID numbers being skipped (shown to the operator)
+    no_pdf: list[int]                  # ISSUED but not-yet-rendered — can't download, reported
     missing: list[int]                 # requested numbers with no challan in this series/FY
     errors: list[str]
+
+
+# Statutory series/FY codes are short (see the sibling register/CSV routes); cap them so a
+# multi-KB query value can't reach the header path or burn CPU in the spec regex.
+_SERIES_Q = Query(max_length=8)
+_FY_Q = Query(max_length=7)
+_SPEC_Q = Query(max_length=20_000)
 
 
 @router.get("/challan/download/preview", response_model=DownloadPreviewOut)
 def download_preview(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
-    series: str,
-    fy: str,
-    spec: str,
+    series: Annotated[str, _SERIES_Q],
+    fy: Annotated[str, _FY_Q],
+    spec: Annotated[str, _SPEC_Q],
 ) -> DownloadPreviewOut:
     """Resolve a (series, FY, range/list) selection WITHOUT downloading — so the operator
-    sees how many issued challans they'll get and exactly which VOID numbers are skipped."""
+    sees how many issued challans they'll get, which VOID numbers are skipped, and which
+    ISSUED numbers have no stored PDF yet (so the count never over-promises)."""
     _require_module(user)
     series, fy = series.strip().upper(), fy.strip()
     result = download.resolve(db, series, fy, spec)
@@ -531,57 +540,78 @@ def download_preview(
         series=series, fy=fy, count=len(result.resolved),
         resolved=[ResolvedChallanOut(number_int=c.number_int, number=c.number, id=c.id)
                   for c in result.resolved],
-        skipped_void=result.skipped_void, missing=result.missing, errors=result.errors)
+        skipped_void=result.skipped_void, no_pdf=result.no_pdf,
+        missing=result.missing, errors=result.errors)
 
 
 @router.get("/challan/download")
 def download_challans(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
-    series: str,
-    fy: str,
-    spec: str,
+    series: Annotated[str, _SERIES_Q],
+    fy: Annotated[str, _FY_Q],
+    spec: Annotated[str, _SPEC_Q],
     mode: Literal["separate", "merged"] = "separate",
 ) -> Response:
     """Download the ISSUED challans in a (series, FY, range/list) selection — a ZIP of the
     individual full-A4 PDFs (`separate`) or a paper-saving 2-up merged PDF (`merged`, 2
-    challans per A4). VOID numbers are skipped; the skipped list rides in `X-Skipped-Void`."""
+    challans per A4).
+
+    Nothing is ever skipped silently. VOID numbers ride in `X-Skipped-Void`; any challan
+    that resolved but whose PDF can't be served right now — never rendered, or its blob is
+    gone (e.g. after an ephemeral-disk redeploy) — is collected and reported in
+    `X-Skipped-Unavailable` rather than being dropped without a trace or 500-ing the whole
+    batch. The operator always gets every deliverable PDF plus an honest account of the rest.
+    """
     _require_module(user)
     series, fy = series.strip().upper(), fy.strip()
     result = download.resolve(db, series, fy, spec)
     if result.errors:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "; ".join(result.errors))
     if not result.resolved:
-        detail = "no issued challans match that selection"
+        detail = "no downloadable challans match that selection"
+        extra = []
         if result.skipped_void:
-            detail += f" ({len(result.skipped_void)} voided, skipped)"
+            extra.append(f"{len(result.skipped_void)} voided")
+        if result.no_pdf:
+            extra.append(f"{len(result.no_pdf)} with no stored PDF")
+        if extra:
+            detail += f" ({', '.join(extra)}, skipped)"
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail)
 
     storage = get_storage()
     named: list[tuple[str, bytes]] = []
+    # ISSUED-without-a-PDF is already split out by resolve() into no_pdf; here we also guard
+    # the download-time races: the StoredFile row vanished, or the blob is gone on disk. Such
+    # a challan is reported (unavailable), never silently omitted and never fatal to the batch.
+    unavailable: list[int] = list(result.no_pdf)
     for c in result.resolved:
-        if c.pdf_file_id is None:
-            continue
-        sf = db.get(StoredFile, c.pdf_file_id)
+        sf = db.get(StoredFile, c.pdf_file_id) if c.pdf_file_id is not None else None
         if sf is None:
+            unavailable.append(c.number_int)
             continue
-        named.append((f"{service._safe(c.number)}.pdf", storage.open(sf.storage_ref).read()))
+        try:
+            data = storage.open(sf.storage_ref).read()
+        except FileNotFoundError:
+            unavailable.append(c.number_int)
+            continue
+        named.append((f"{service._safe(c.number)}.pdf", data))
     if not named:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
-                            "the selected challans have no stored PDF")
+                            "the selected challans have no downloadable stored PDF")
 
-    skipped = ",".join(str(n) for n in result.skipped_void)
+    headers = {
+        "X-Skipped-Void": ",".join(str(n) for n in result.skipped_void),
+        "X-Skipped-Unavailable": ",".join(str(n) for n in sorted(unavailable)),
+    }
     stamp = f"{series}-{fy}"
     if mode == "merged":
-        return Response(
-            content=render.merge_2up([data for _, data in named]),
-            media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="challans-{stamp}-2up.pdf"',
-                     "X-Skipped-Void": skipped})
-    return Response(
-        content=render.zip_files(named), media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="challans-{stamp}.zip"',
-                 "X-Skipped-Void": skipped})
+        headers["Content-Disposition"] = f'attachment; filename="challans-{stamp}-2up.pdf"'
+        return Response(content=render.merge_2up([data for _, data in named]),
+                        media_type="application/pdf", headers=headers)
+    headers["Content-Disposition"] = f'attachment; filename="challans-{stamp}.zip"'
+    return Response(content=render.zip_files(named), media_type="application/zip",
+                    headers=headers)
 
 
 @router.get("/challan/summary", response_model=ChallanSummaryOut)

@@ -7,6 +7,7 @@ VALIDATED-only guard on generate, and Admin-only void.
 from __future__ import annotations
 
 import io
+import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -14,7 +15,7 @@ from decimal import Decimal
 import pytest
 from fastapi import FastAPI
 from openpyxl import Workbook
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -422,6 +423,7 @@ def test_download_preview_reports_void_and_missing(client: TestClient) -> None:
     assert [c["number_int"] for c in body["resolved"]] == [10]
     assert body["skipped_void"] == [11]
     assert body["missing"] == [12]
+    assert body["no_pdf"] == []
 
 
 def test_download_separate_zip_and_merged_2up(client: TestClient) -> None:
@@ -435,7 +437,6 @@ def test_download_separate_zip_and_merged_2up(client: TestClient) -> None:
                    params={"series": "L", "fy": "26-27", "spec": "20-22", "mode": "separate"})
     assert z.status_code == 200 and z.headers["content-type"] == "application/zip"
     assert z.headers["x-skipped-void"] == "22"
-    import zipfile
     names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
     assert len(names) == 2  # only the two ISSUED challans
     # merged -> a 2-up PDF: 2 challans on 1 A4 page
@@ -456,3 +457,55 @@ def test_download_bad_spec_400_and_no_issued_404(client: TestClient) -> None:
     # only a voided number in range -> nothing issued -> 404
     assert client.get("/api/v1/challan/download",
                       params={"series": "L", "fy": "26-27", "spec": "30"}).status_code == 404
+
+
+def test_download_issued_without_pdf_is_reported_not_silently_dropped(client: TestClient) -> None:
+    """An ISSUED challan with no rendered PDF must never be counted as downloadable nor
+    silently dropped: preview separates it into `no_pdf`, and the download excludes it from
+    the ZIP while naming it in X-Skipped-Unavailable (the count never over-promises)."""
+    db = client.app.state.TestSession()
+    _seed_challan(db, 40, "ISSUED", with_pdf=True)
+    _seed_challan(db, 41, "ISSUED", with_pdf=False)  # issued but never rendered
+    db.close()
+    p = client.get("/api/v1/challan/download/preview",
+                   params={"series": "L", "fy": "26-27", "spec": "40-41"})
+    assert p.status_code == 200, p.text
+    body = p.json()
+    assert body["count"] == 1                       # only the one with a PDF
+    assert [c["number_int"] for c in body["resolved"]] == [40]
+    assert body["no_pdf"] == [41]
+    z = client.get("/api/v1/challan/download",
+                   params={"series": "L", "fy": "26-27", "spec": "40-41"})
+    assert z.status_code == 200
+    names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
+    assert len(names) == 1                          # only 40 downloads
+    assert z.headers["x-skipped-unavailable"] == "41"  # 41 reported, not dropped in silence
+
+
+def test_download_missing_blob_is_reported_not_fatal(client: TestClient) -> None:
+    """The ephemeral-disk trap: an ISSUED challan whose StoredFile row exists but whose blob
+    is gone must not 500 the whole batch — the other PDFs still download and it is reported."""
+    from app.modules.challan.models import Challan
+    from app.modules.files.models import StoredFile as _SF
+    from app.platform.storage import get_storage
+    db = client.app.state.TestSession()
+    _seed_challan(db, 50, "ISSUED", with_pdf=True)
+    _seed_challan(db, 51, "ISSUED", with_pdf=True)
+    # delete 51's blob on disk (row stays) — simulates a post-redeploy ephemeral-disk loss
+    c51 = db.execute(select(Challan).where(Challan.number_int == 51)).scalar_one()
+    ref = db.get(_SF, c51.pdf_file_id).storage_ref
+    get_storage().delete(ref)
+    db.close()
+    z = client.get("/api/v1/challan/download",
+                   params={"series": "L", "fy": "26-27", "spec": "50-51"})
+    assert z.status_code == 200, z.text            # NOT a 500
+    names = zipfile.ZipFile(io.BytesIO(z.content)).namelist()
+    assert len(names) == 1                          # 50 still delivered
+    assert z.headers["x-skipped-unavailable"] == "51"
+    # now drop 50's blob too -> every requested challan unavailable -> 404 (nothing to hand out)
+    db = client.app.state.TestSession()
+    c50 = db.execute(select(Challan).where(Challan.number_int == 50)).scalar_one()
+    get_storage().delete(db.get(_SF, c50.pdf_file_id).storage_ref)
+    db.close()
+    assert client.get("/api/v1/challan/download",
+                      params={"series": "L", "fy": "26-27", "spec": "50-51"}).status_code == 404
