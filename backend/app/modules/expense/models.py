@@ -102,7 +102,8 @@ class Invoice(Base):
     review_reasons: Mapped[list[str]] = mapped_column(JSON, default=list)
 
     # Dedup: HARD unique on the identity key (F2). `content_hash` is a belt-and-suspenders
-    # fingerprint of the normalized text for byte-identical re-uploads.
+    # fingerprint of the raw SOURCE bytes, catching a byte-identical re-upload even when
+    # the identity key is NULL (an un-OCR'd scan) — see dedup.content_hash / service.F4.
     dedup_key: Mapped[str | None] = mapped_column(String(64))
     content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
 

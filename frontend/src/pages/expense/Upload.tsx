@@ -8,6 +8,7 @@ import {
   StatePanel,
   useToast,
 } from '../../ui';
+import { useAuth } from '../../auth/AuthProvider';
 import {
   useDeleteInvoice,
   useUploadInvoices,
@@ -28,23 +29,30 @@ function hasDetail(r: UploadResult): boolean {
 
 export function Upload() {
   const toast = useToast();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'ADMIN';
   const upload = useUploadInvoices();
   const del = useDeleteInvoice();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [files, setFiles] = useState<File[]>([]);
+  // Outcomes are index-aligned with `files` (the backend returns one outcome per
+  // uploaded file, in order), so a row's identity is its position — never its
+  // filename, which can collide across two same-named PDFs.
   const [results, setResults] = useState<UploadResult[] | null>(null);
-  // The DUPLICATE row awaiting the delete-and-re-upload confirm (null = closed).
-  const [dupTarget, setDupTarget] = useState<UploadResult | null>(null);
-  // Which filename is being re-processed, so its row shows progress and the
-  // dialog's confirm stays busy across the delete + re-upload round-trip.
-  const [resolving, setResolving] = useState<string | null>(null);
+  // The DUPLICATE row awaiting the delete-and-re-upload confirm, with its index so
+  // the correct source File is re-uploaded and only that row is spliced (null = closed).
+  const [dupTarget, setDupTarget] = useState<{ index: number; result: UploadResult } | null>(null);
+  // Which file_id is being re-processed, so its row shows progress and the dialog's
+  // confirm stays busy across the delete + re-upload round-trip. Keyed by the stable
+  // file_id, not the filename (duplicates would otherwise all show as resolving).
+  const [resolvingId, setResolvingId] = useState<number | null>(null);
 
   function reset() {
     setFiles([]);
     setResults(null);
     setDupTarget(null);
-    setResolving(null);
+    setResolvingId(null);
     upload.reset();
     del.reset();
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -57,9 +65,15 @@ export function Upload() {
         setResults(batch.outcomes);
         const dupes = batch.outcomes.filter((r) => r.status === 'DUPLICATE').length;
         const rejected = batch.outcomes.filter((r) => r.status === 'REJECTED').length;
-        if (dupes > 0) {
+        const dupPhrase = `${dupes} file${dupes === 1 ? '' : 's'} matched an existing invoice`;
+        const rejPhrase = `${rejected} could not be read`;
+        if (dupes > 0 && rejected > 0) {
+          // Summarize BOTH problems so a mixed batch doesn't hide its rejects
+          // behind the duplicates (or vice-versa) — see the list below for each.
+          toast.info(`${dupPhrase}; ${rejPhrase}. See the list below.`);
+        } else if (dupes > 0) {
           toast.info(
-            `${dupes} file${dupes === 1 ? '' : 's'} matched an existing invoice — resolve ${dupes === 1 ? 'it' : 'them'} below.`,
+            `${dupPhrase} — resolve ${dupes === 1 ? 'it' : 'them'} below.`,
           );
         } else if (rejected > 0) {
           toast.error(
@@ -81,21 +95,22 @@ export function Upload() {
    */
   async function confirmReplace() {
     const target = dupTarget;
-    if (!target?.duplicate_of) return;
-    const file = files.find((f) => f.name === target.filename);
+    if (!target?.result.duplicate_of) return;
+    // Pair the re-upload to its source File by INDEX (not filename), so two files
+    // named the same don't re-upload the wrong blob.
+    const file = files[target.index];
     if (!file) {
       toast.error('Could not find the original file to re-upload. Choose the files again.');
       setDupTarget(null);
       return;
     }
-    setResolving(target.filename);
+    setResolvingId(target.result.file_id);
     try {
-      await del.mutateAsync(target.duplicate_of);
+      await del.mutateAsync(target.result.duplicate_of);
       const batch = await upload.mutateAsync([file]);
       const fresh = batch.outcomes[0];
-      setResults((prev) =>
-        (prev ?? []).map((r) => (r.filename === target.filename ? fresh : r)),
-      );
+      // Splice by index so only the resolved row is replaced (same-named rows stay put).
+      setResults((prev) => (prev ?? []).map((r, i) => (i === target.index ? fresh : r)));
       setDupTarget(null);
       if (fresh.status === 'DUPLICATE') {
         toast.error('That file still matches an existing invoice.');
@@ -108,11 +123,11 @@ export function Upload() {
       toast.error(errorMessage(err));
       setDupTarget(null);
     } finally {
-      setResolving(null);
+      setResolvingId(null);
     }
   }
 
-  const busy = upload.isPending || del.isPending || resolving != null;
+  const busy = upload.isPending || del.isPending || resolvingId != null;
 
   return (
     <div>
@@ -140,7 +155,7 @@ export function Upload() {
         </p>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button onClick={onUpload} disabled={files.length === 0 || busy} loading={upload.isPending && resolving == null}>
+          <Button onClick={onUpload} disabled={files.length === 0 || busy} loading={upload.isPending && resolvingId == null}>
             {files.length > 0
               ? `Upload ${files.length} file${files.length === 1 ? '' : 's'}`
               : 'Upload'}
@@ -160,10 +175,10 @@ export function Upload() {
             <StatePanel title="No files processed">Nothing came back for this upload.</StatePanel>
           ) : (
             <ul className="divide-y divide-slate-100 rounded-xl border border-slate-200 bg-white">
-              {results.map((r) => {
-                const isResolving = resolving === r.filename;
+              {results.map((r, index) => {
+                const isResolving = resolvingId === r.file_id;
                 return (
-                  <li key={r.filename} className="flex flex-col gap-2 px-4 py-3">
+                  <li key={r.file_id} className="flex flex-col gap-2 px-4 py-3">
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                       <span className="font-medium text-slate-900">{r.filename}</span>
                       <Badge tone={UPLOAD_STATUS_TONE[r.status]}>
@@ -174,7 +189,7 @@ export function Upload() {
                           <Button
                             variant="secondary"
                             size="sm"
-                            onClick={() => setDupTarget(r)}
+                            onClick={() => setDupTarget({ index, result: r })}
                             disabled={busy}
                             loading={isResolving}
                           >
@@ -219,23 +234,31 @@ export function Upload() {
         title="Invoice already exists"
         confirmLabel="Delete existing & re-upload"
         danger
-        loading={resolving != null}
+        loading={resolvingId != null}
         onCancel={() => {
-          if (resolving == null) setDupTarget(null);
+          if (resolvingId == null) setDupTarget(null);
         }}
         onConfirm={() => void confirmReplace()}
         message={
-          dupTarget?.duplicate_of ? (
-            <p>
-              An invoice with this number already exists (
-              <span className="font-semibold">{dupTarget.invoice_number}</span> /{' '}
-              <span className="font-semibold">
-                {formatPaise(dupTarget.grand_total_paise)}
-              </span>
-              ). Delete the existing one and re-upload{' '}
-              <span className="font-semibold">{dupTarget.filename}</span>? This permanently removes
-              the existing invoice and cannot be undone.
-            </p>
+          dupTarget?.result.duplicate_of ? (
+            <div>
+              <p>
+                An invoice with this number already exists (
+                <span className="font-semibold">{dupTarget.result.invoice_number}</span> /{' '}
+                <span className="font-semibold">
+                  {formatPaise(dupTarget.result.grand_total_paise)}
+                </span>
+                ). Delete the existing one and re-upload{' '}
+                <span className="font-semibold">{dupTarget.result.filename}</span>? This permanently
+                removes the existing invoice and cannot be undone.
+              </p>
+              {!isAdmin && (
+                <p className="mt-2 text-xs text-amber-700">
+                  Note: if the existing invoice has already been confirmed, only an admin can remove
+                  it — this will fail with a permission error and you'll need an admin to delete it.
+                </p>
+              )}
+            </div>
           ) : null
         }
       />

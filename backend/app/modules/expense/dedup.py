@@ -7,8 +7,11 @@ Two independent fingerprints, mirroring the canonical schema:
   (ISO) and the grand total (paise). Two documents that agree on all four are the
   SAME vendor invoice — the unique constraint on ``expense_invoice.dedup_key``
   refuses the second (the operator deletes + re-uploads to replace).
-* ``content_hash`` — a belt-and-suspenders fingerprint of the normalized text
-  layer, catching a byte-identical re-upload even before the identity fields are read.
+* ``content_hash`` — a belt-and-suspenders fingerprint of the raw SOURCE bytes,
+  catching a byte-identical re-upload even before the identity fields are read (and
+  even when there is NO text layer, i.e. an un-OCR'd scan whose ``dedup_key`` is
+  NULL — hashing the text layer there would be empty/constant and false-match every
+  scan, so we hash the file bytes instead).
 
 Both live here (not only inside the extractor) so the service, the extractor and
 the tests all compute them from ONE formula.
@@ -18,7 +21,7 @@ from __future__ import annotations
 import hashlib
 from datetime import date
 
-from app.modules.masterdata.normalize import collapse_ws, match_key
+from app.modules.masterdata.normalize import match_key
 
 
 def _norm_gstin(gstin: str | None) -> str:
@@ -48,6 +51,7 @@ def dedup_key(
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
-def content_hash(raw_text: str) -> str:
-    """``sha256`` of the normalized (whitespace-collapsed) text layer."""
-    return hashlib.sha256(collapse_ws(raw_text or "").encode("utf-8")).hexdigest()
+def content_hash(source: bytes) -> str:
+    """``sha256`` of the raw source bytes — a byte-identical re-upload hashes the same
+    even when the identity key is NULL (an un-OCR'd scan)."""
+    return hashlib.sha256(source).hexdigest()

@@ -72,6 +72,8 @@ def _map_service_error(err: service.ExpenseError) -> HTTPException:
         return HTTPException(status.HTTP_404_NOT_FOUND, str(err))
     if isinstance(err, service.ExpenseBadRequest):
         return HTTPException(status.HTTP_400_BAD_REQUEST, str(err))
+    if isinstance(err, service.ExpenseForbidden):
+        return HTTPException(status.HTTP_403_FORBIDDEN, str(err))
     if isinstance(err, service.ExpenseConflict):
         return HTTPException(status.HTTP_409_CONFLICT, str(err))
     return HTTPException(status.HTTP_400_BAD_REQUEST, str(err))
@@ -270,6 +272,7 @@ def upload_invoices(
 def list_invoices(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
+    q: Annotated[str | None, Query(max_length=300)] = None,
     supplier: Annotated[str | None, Query(max_length=300)] = None,
     gstin: Annotated[str | None, Query(max_length=15)] = None,
     status_filter: Annotated[InvoiceStatus | None, Query(alias="status")] = None,
@@ -280,7 +283,7 @@ def list_invoices(
 ) -> list[Invoice]:
     _require_module(user)
     return service.list_invoices(
-        db, supplier=supplier, gstin=gstin,
+        db, q=q, supplier=supplier, gstin=gstin,
         status=status_filter.value if status_filter is not None else None,
         date_from=date_from, date_to=date_to, limit=limit, offset=offset,
     )
@@ -290,6 +293,7 @@ def list_invoices(
 def export_invoices_csv(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
+    q: Annotated[str | None, Query(max_length=300)] = None,
     supplier: Annotated[str | None, Query(max_length=300)] = None,
     gstin: Annotated[str | None, Query(max_length=15)] = None,
     status_filter: Annotated[InvoiceStatus | None, Query(alias="status")] = None,
@@ -299,7 +303,7 @@ def export_invoices_csv(
     """Export the filtered register (newest-first) as CSV, capped at MAX_CSV_ROWS."""
     _require_module(user)
     rows = service.list_invoices(
-        db, supplier=supplier, gstin=gstin,
+        db, q=q, supplier=supplier, gstin=gstin,
         status=status_filter.value if status_filter is not None else None,
         date_from=date_from, date_to=date_to, limit=service.MAX_CSV_ROWS,
     )
@@ -378,9 +382,15 @@ def delete_invoice(
     upload / a hard-duplicate can be removed and re-uploaded)."""
     _require_module(user)
     invoice = _get_invoice(db, invoice_id)
-    if invoice.status == InvoiceStatus.CONFIRMED.value and not can(user, "expense.delete"):
+    can_delete_confirmed = can(user, "expense.delete")
+    if invoice.status == InvoiceStatus.CONFIRMED.value and not can_delete_confirmed:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "deleting a confirmed invoice requires admin (expense.delete)")
-    service.delete_invoice(db, invoice, actor_uid=user.firebase_uid)
+    try:
+        service.delete_invoice(
+            db, invoice, actor_uid=user.firebase_uid,
+            can_delete_confirmed=can_delete_confirmed)
+    except service.ExpenseError as err:
+        raise _map_service_error(err) from err
     return DeleteOut(id=invoice_id, deleted=True)

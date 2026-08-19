@@ -11,6 +11,7 @@ import json
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,8 +33,9 @@ from app.modules.expense.canonical import (
     InvoiceLine,
     InvoiceTotals,
 )
-from app.modules.expense.models import InvoiceCorrection
+from app.modules.expense.models import Invoice, InvoiceCorrection
 from app.modules.expense.routes import router
+from app.modules.files.models import StoredFile
 from app.platform.auth import current_user
 from app.platform.models import AuditLog, Role, User, UserModuleAccess
 
@@ -121,12 +123,13 @@ def _extracted(spec: dict[str, Any]) -> ExtractedInvoice:
         gst_rate=_f(Decimal("18.00")), cgst_paise=_f(0), sgst_paise=_f(0),
         igst_paise=_f(grand - taxable), line_total_paise=_f(grand),
     )
+    lines = [] if spec.get("no_lines") else [line]
     return ExtractedInvoice(
         schema_version=CANONICAL_SCHEMA_VERSION, doc_type="gst_invoice",
         source_engine="text_layer/1.0", page_count=1, needs_ocr=False,
         review_needed=review,
         review_reasons=["grand total low confidence"] if review else [],
-        header=header, lines=[line], totals=totals,
+        header=header, lines=lines, totals=totals,
         arithmetic=ArithmeticChecks(True, True, True, True, 0),
         raw_text=json.dumps(spec, sort_keys=True), content_hash="", dedup_key="",
     )
@@ -373,3 +376,155 @@ def test_missing_invoice_404(client: TestClient) -> None:
     assert client.delete("/api/v1/expense/invoices/99999").status_code == 404
     assert client.patch("/api/v1/expense/invoices/99999/reviews",
                         json={"confirm": True}).status_code == 404
+
+
+# ------------------------------------------------- F1: dedup-key race in a batch
+
+def test_dedup_race_becomes_duplicate_not_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A UNIQUE(dedup_key) collision that RACES the pre-check (both look-ups miss, then
+    the flush collides) must convert THAT file to a DUPLICATE — never a 500 that rolls
+    back the whole batch and loses the other good files (F1)."""
+    winner_id = _upload(client, _spec()).json()["outcomes"][0]["invoice_id"]
+    db = client.app.state.TestSession()
+    collide_key = db.get(Invoice, winner_id).dedup_key
+    db.close()
+
+    # Simulate the race: force the *pre-check* to miss for the colliding key exactly once,
+    # so persistence proceeds to a flush that hits the UNIQUE constraint. Recovery re-runs
+    # the (real) look-up and must resolve the stored winner.
+    real = service._find_duplicate
+    calls = {"n": 0}
+
+    def racy(db: Any, key: str | None, chash: str) -> Any:
+        if key == collide_key:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return None
+        return real(db, key, chash)
+
+    monkeypatch.setattr(service, "_find_duplicate", racy)
+
+    # One colliding file + one brand-new file, in the same batch.
+    r = _upload(client, _spec(), _spec(invoice_number="INV-NEW"))
+    assert r.status_code == 201, r.text  # NOT a 500
+    # the collider resolved to a DUPLICATE of the stored winner...
+    dup = next(o for o in r.json()["outcomes"] if o["status"] == "DUPLICATE")
+    assert dup["duplicate_of"] == winner_id and dup["invoice_id"] is None
+    # ...and the OTHER good file still persisted (batch not lost)
+    good = next(o for o in r.json()["outcomes"] if o["status"] == "EXTRACTED")
+    assert good["invoice_id"] is not None
+    # exactly two live invoices: the winner + the new one
+    assert len(client.get("/api/v1/expense/invoices").json()) == 2
+
+
+# ------------------------------------------------- F2: correction bounds -> 400
+
+def test_correction_out_of_range_money_400(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="INV-M", review=True)
+                     ).json()["outcomes"][0]["invoice_id"]
+    r = client.patch(
+        f"/api/v1/expense/invoices/{inv_id}/reviews",
+        json={"corrections": [
+            {"field_path": "totals.grand_total_paise", "value": "9" * 20}]},
+    )
+    assert r.status_code == 400, r.text
+
+
+def test_correction_overwidth_gstin_400(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="INV-G", review=True)
+                     ).json()["outcomes"][0]["invoice_id"]
+    r = client.patch(
+        f"/api/v1/expense/invoices/{inv_id}/reviews",
+        json={"corrections": [
+            {"field_path": "header.supplier_gstin", "value": "X" * 16}]},
+    )
+    assert r.status_code == 400, r.text
+
+
+# ------------------------------------------------- F4: byte-identical re-upload
+
+def test_reupload_identical_scan_is_duplicate(client: TestClient) -> None:
+    """An un-OCR'd scan carries a NULL identity key, so re-uploading the SAME bytes used
+    to make N NEEDS_OCR rows; the source-byte content_hash now catches it (F4)."""
+    first = _upload(client, _spec(needs_ocr=True)).json()["outcomes"][0]
+    assert first["status"] == "NEEDS_OCR"
+    # same bytes again -> DUPLICATE despite the NULL dedup_key
+    r = _upload(client, _spec(needs_ocr=True))
+    assert r.status_code == 409, r.text
+    out = r.json()["outcomes"][0]
+    assert out["status"] == "DUPLICATE" and out["duplicate_of"] == first["invoice_id"]
+    # a DIFFERENT scan (different bytes) is NOT a duplicate
+    r2 = _upload(client, _spec(needs_ocr=True, invoice_number="OTHER-SCAN"))
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["outcomes"][0]["status"] == "NEEDS_OCR"
+    assert len(client.get("/api/v1/expense/invoices").json()) == 2
+
+
+# ------------------------------------------------- F6: delete removes source blob
+
+def test_delete_removes_source_file_and_blob(
+    client: TestClient, tmp_path: object,
+) -> None:
+    inv_id = _upload(client, _spec()).json()["outcomes"][0]["invoice_id"]
+    src_dir = Path(f"{tmp_path}/_files/expense-source")
+    assert list(src_dir.glob("*")), "source blob should exist before delete"
+
+    assert client.delete(f"/api/v1/expense/invoices/{inv_id}").status_code == 200
+    db = client.app.state.TestSession()
+    assert db.query(StoredFile).count() == 0  # row gone
+    db.close()
+    assert not list(src_dir.glob("*")), "source blob should be removed on delete"
+
+
+# ------------------------------------------------- F7: gold-promoted delete blocked
+
+def test_delete_blocked_when_correction_promoted_to_gold(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="INV-GOLD", review=True)
+                     ).json()["outcomes"][0]["invoice_id"]
+    client.patch(
+        f"/api/v1/expense/invoices/{inv_id}/reviews",
+        json={"corrections": [{"field_path": "header.supplier_name", "value": "Fixed Co"}]},
+    )
+    db = client.app.state.TestSession()
+    corr = db.execute(select(InvoiceCorrection)
+                      .where(InvoiceCorrection.invoice_id == inv_id)).scalars().all()
+    corr[0].promoted_to_gold = True
+    db.commit()
+    db.close()
+    # even the module-granted operator (and admin) cannot cascade away gold provenance
+    assert client.delete(f"/api/v1/expense/invoices/{inv_id}").status_code == 409
+    _as(client, ADMIN)
+    assert client.delete(f"/api/v1/expense/invoices/{inv_id}").status_code == 409
+
+
+# ------------------------------------------------- L1: lineless confirm rejected
+
+def test_confirm_requires_at_least_one_line(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="INV-NOLINE", no_lines=True)
+                     ).json()["outcomes"][0]["invoice_id"]
+    r = client.patch(f"/api/v1/expense/invoices/{inv_id}/reviews",
+                     json={"confirm": True})
+    assert r.status_code == 409, r.text
+    assert "line" in r.json()["detail"].lower()
+
+
+# ------------------------------------------------- U-H2: free-text `q` search
+
+def test_register_q_free_text_search(client: TestClient) -> None:
+    _upload(client, _spec(invoice_number="INV-A", supplier_name="Alpha Traders"))
+    _upload(client, _spec(invoice_number="INV-B", supplier_name="Beta Supplies"))
+    # q on invoice number
+    hits = client.get("/api/v1/expense/invoices", params={"q": "INV-A"}).json()
+    assert len(hits) == 1 and hits[0]["invoice_number"] == "INV-A"
+    # q on supplier name
+    hits = client.get("/api/v1/expense/invoices", params={"q": "Beta"}).json()
+    assert len(hits) == 1 and hits[0]["invoice_number"] == "INV-B"
+    # q on shared GSTIN -> both
+    assert len(client.get("/api/v1/expense/invoices",
+                          params={"q": SUPPLIER_GSTIN}).json()) == 2
+    # and the CSV honours q too
+    csv = client.get("/api/v1/expense/invoices.csv", params={"q": "Alpha"})
+    assert csv.status_code == 200
+    assert "INV-A" in csv.text and "INV-B" not in csv.text

@@ -140,3 +140,16 @@ export function fieldLabel(fieldPath: string): string {
 export function isMoneyField(fieldPath: string): boolean {
   return fieldPath.endsWith('_paise');
 }
+
+/**
+ * Parse an operator-typed rupee string into integer PAISE, or null when it is not
+ * a valid amount. Accepts an optional ₹, thousands separators, surrounding spaces,
+ * an optional leading minus (round-off can be negative), and up to two decimals.
+ * The backend parses money corrections as integer paise, so this is the single
+ * ₹→paise seam for editable money fields (mirrors `formatPaise` in the read path).
+ */
+export function parseRupeesToPaise(input: string): number | null {
+  const cleaned = input.replace(/[₹,\s]/g, '');
+  if (!/^-?\d+(\.\d{1,2})?$/.test(cleaned)) return null;
+  return Math.round(parseFloat(cleaned) * 100);
+}

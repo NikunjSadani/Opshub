@@ -279,11 +279,72 @@ describe('ReviewPanel', () => {
     fireEvent.change(gtInput, { target: { value: '11800.00' } });
     expect(confirm).toBeEnabled();
 
-    // Confirm PATCHes the correction with confirm:true.
+    // Confirm PATCHes the correction with confirm:true. The money field is edited
+    // in RUPEES (₹11,800.00) but the wire `value` is integer PAISE (1180000) — the
+    // backend coerces money with int(text), so sending "11800.00" would 400 and
+    // sending "11800" would store ₹118 (the 100× bug this guards against).
     fireEvent.click(confirm);
     await waitFor(() => expect(patchBody).not.toBeNull());
     expect(patchBody).toEqual({
-      corrections: [{ field_path: 'totals.grand_total_paise', new_value: '11800.00' }],
+      corrections: [{ field_path: 'totals.grand_total_paise', value: '1180000' }],
+      confirm: true,
+    });
+  });
+
+  it('shows an existing money value in rupees, converts a rupee edit to paise, and blocks a malformed amount', async () => {
+    let patchBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.match(/\/expense\/invoices\/5\/reviews$/) && method === 'PATCH') {
+          patchBody = JSON.parse(String(init?.body));
+          return json({ ...detail(), status: 'CONFIRMED' });
+        }
+        if (url.match(/\/expense\/invoices\/5$/)) {
+          // Grand total is LOW_CONFIDENCE but already has a normalized paise value
+          // (250000 paise = ₹2,500.00) — the editable input must show rupees.
+          return json(
+            detail({
+              fields: [
+                { field_path: 'header.supplier_gstin', value_normalized: '27ABCDE1234F1Z5', value_raw: '27ABCDE1234F1Z5', confidence: 0.95, status: 'OK' },
+                { field_path: 'header.invoice_number', value_normalized: 'INV-2026-001', value_raw: 'INV-2026-001', confidence: 0.95, status: 'OK' },
+                { field_path: 'header.invoice_date', value_normalized: '2026-05-10', value_raw: '10-05-2026', confidence: 0.9, status: 'OK' },
+                { field_path: 'totals.total_taxable_paise', value_normalized: '1000000', value_raw: '10,000.00', confidence: 0.9, status: 'OK' },
+                { field_path: 'totals.grand_total_paise', value_normalized: '250000', value_raw: '2,500.00', confidence: 0.4, status: 'LOW_CONFIDENCE' },
+              ],
+            }),
+          );
+        }
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/expense_invoice/invoices/:id" element={<ReviewPanel />} />
+      </Routes>,
+      ['/m/expense_invoice/invoices/5'],
+    );
+
+    const gtInput = (await screen.findByLabelText('Grand total')) as HTMLInputElement;
+    // Existing 250000 paise renders in the input as rupees, not raw paise.
+    expect(gtInput.value).toBe('2500.00');
+
+    const confirm = screen.getByRole('button', { name: /confirm invoice/i });
+
+    // A malformed amount blocks Confirm (backend would reject it).
+    fireEvent.change(gtInput, { target: { value: '12.3.4' } });
+    expect(confirm).toBeDisabled();
+
+    // A valid rupee edit (with a thousands separator) → integer paise on the wire.
+    fireEvent.change(gtInput, { target: { value: '1,234.56' } });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    await waitFor(() => expect(patchBody).not.toBeNull());
+    expect(patchBody).toEqual({
+      corrections: [{ field_path: 'totals.grand_total_paise', value: '123456' }],
       confirm: true,
     });
   });

@@ -1,7 +1,10 @@
 import {
+  useInfiniteQuery,
   useMutation,
   useQuery,
   useQueryClient,
+  type InfiniteData,
+  type UseInfiniteQueryResult,
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
@@ -41,29 +44,27 @@ export type FieldStatus = 'OK' | 'LOW_CONFIDENCE' | 'MISSING' | 'CORRECTED';
 
 // --- DTOs ---------------------------------------------------------------------
 
-/** A register row / canonical invoice scalars (backend InvoiceOut). */
+/**
+ * A register row — EXACTLY the scalars the list endpoint returns (backend
+ * `InvoiceOut`). The list is a lean projection: it does NOT carry review_reasons,
+ * buyer_*, place_of_supply, the tax sub-totals, round-off, or amount_in_words —
+ * those live only on the detail response. Keep this in lock-step with the backend
+ * `InvoiceOut` model, not with the fuller `InvoiceDetail`.
+ */
 export interface InvoiceOut {
   id: number;
   status: InvoiceStatus;
   needs_ocr: boolean;
-  review_reasons: string[];
   supplier_name: string | null;
   supplier_gstin: string | null;
-  buyer_name: string | null;
-  buyer_gstin: string | null;
   invoice_number: string | null;
   /** ISO date string (backend `date`); null when not extracted. */
   invoice_date: string | null;
-  place_of_supply: string | null;
   /** PAISE. */
   total_taxable_paise: number | null;
-  total_cgst_paise: number | null;
-  total_sgst_paise: number | null;
-  total_igst_paise: number | null;
-  /** PAISE, SIGNED (round-off can be negative). */
-  round_off_paise: number | null;
   grand_total_paise: number | null;
-  amount_in_words: string | null;
+  /** ISO datetime string (backend `created_at`). */
+  created_at: string;
 }
 
 /** One extracted field envelope (backend FieldOut). */
@@ -72,8 +73,8 @@ export interface FieldOut {
   field_path: string;
   value_normalized: string | null;
   value_raw: string;
-  /** 0..1 calibrated confidence. */
-  confidence: number | null;
+  /** 0..1 calibrated confidence (backend `FieldOut.confidence` is a non-null float). */
+  confidence: number;
   status: FieldStatus;
 }
 
@@ -95,8 +96,44 @@ export interface LineOut {
   line_total_paise: number | null;
 }
 
-/** Full invoice detail (backend GET /expense/invoices/{id}). */
-export interface InvoiceDetail extends InvoiceOut {
+/**
+ * Full invoice detail (backend `InvoiceDetailOut`, GET /expense/invoices/{id} and
+ * the PATCH review response). A distinct, richer shape than the list `InvoiceOut`
+ * — it adds review_reasons, the buyer/address block, place-of-supply, the full tax
+ * sub-totals + round-off + amount-in-words, confirmation audit, and the per-field
+ * envelopes + line items. Kept standalone (not `extends InvoiceOut`) so the list
+ * projection can stay lean without leaking detail-only fields onto register rows.
+ */
+export interface InvoiceDetail {
+  id: number;
+  batch_id: number;
+  status: InvoiceStatus;
+  needs_ocr: boolean;
+  review_reasons: string[];
+  source_file_id: number | null;
+  supplier_name: string | null;
+  supplier_gstin: string | null;
+  supplier_address: string | null;
+  buyer_name: string | null;
+  buyer_gstin: string | null;
+  buyer_address: string | null;
+  invoice_number: string | null;
+  /** ISO date string (backend `date`); null when not extracted. */
+  invoice_date: string | null;
+  place_of_supply: string | null;
+  po_ref: string | null;
+  /** PAISE. */
+  total_taxable_paise: number | null;
+  total_cgst_paise: number | null;
+  total_sgst_paise: number | null;
+  total_igst_paise: number | null;
+  /** PAISE, SIGNED (round-off can be negative). */
+  round_off_paise: number | null;
+  grand_total_paise: number | null;
+  amount_in_words: string | null;
+  confirmed_by: string | null;
+  /** ISO datetime string; null until confirmed. */
+  confirmed_at: string | null;
   fields: FieldOut[];
   lines: LineOut[];
 }
@@ -129,11 +166,20 @@ export interface UploadBatchOut {
   outcomes: UploadResult[];
 }
 
-/** One field correction submitted from the review panel. */
+/**
+ * One field correction submitted from the review panel (backend `CorrectionItem`).
+ * The wire field is `value` (NOT `new_value` — that name is only the backend's
+ * audit column). For a money (`*_paise`) field this MUST be an integer-paise
+ * string, because the backend coerces money corrections with `int(text)`; the
+ * review panel converts the operator's rupee input to paise before building this.
+ */
 export interface Correction {
   field_path: string;
-  new_value: string;
+  value: string;
 }
+
+/** Register page size for the "Load more" pager (mirrors the backend list default). */
+export const EXPENSE_PAGE_SIZE = 100;
 
 export interface InvoiceFilters {
   /** Free-text search over supplier / GSTIN / invoice number. */
@@ -159,17 +205,26 @@ function appendInvoiceFilters(params: URLSearchParams, filters: InvoiceFilters):
   if (filters.date_to?.trim()) params.set('date_to', filters.date_to.trim());
 }
 
-/** Build the `?q=&status=&date_from=&date_to=` query for the register list. */
-export function buildInvoiceListQuery(filters: InvoiceFilters): string {
+/**
+ * Build the `?q=&status=&date_from=&date_to=&limit=&offset=` query for the
+ * register list. Filter params are appended only when non-empty (trimmed);
+ * limit/offset are always sent so the register never silently rides the backend's
+ * default 100-row cap.
+ */
+export function buildInvoiceListQuery(filters: InvoiceFilters, offset: number): string {
   const params = new URLSearchParams();
   appendInvoiceFilters(params, filters);
-  const qs = params.toString();
-  return qs ? `?${qs}` : '';
+  params.set('limit', String(EXPENSE_PAGE_SIZE));
+  params.set('offset', String(offset));
+  return `?${params.toString()}`;
 }
 
 /** Build the query for the CSV export — identical filters, no paging. */
 export function buildInvoiceCsvQuery(filters: InvoiceFilters): string {
-  return buildInvoiceListQuery(filters);
+  const params = new URLSearchParams();
+  appendInvoiceFilters(params, filters);
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
 }
 
 // --- query keys ---------------------------------------------------------------
@@ -181,15 +236,32 @@ export const expenseKeys = {
 
 // --- queries ------------------------------------------------------------------
 
-/** The invoice register, filtered by q / status / date range. */
-export function useInvoicesQuery(
+/**
+ * The invoice register, filtered by q / status / date range, with offset-based
+ * "Load more" paging. Each page fetches up to `EXPENSE_PAGE_SIZE` rows; there is
+ * another page only when the last one came back exactly full (a short OR empty
+ * page means the end). The offset for the next page is the running total already
+ * loaded. Mirrors the challan register so paging semantics stay identical.
+ */
+export function useInvoicesInfiniteQuery(
   filters: InvoiceFilters,
-): UseQueryResult<InvoiceOut[], Error> {
+): UseInfiniteQueryResult<InfiniteData<InvoiceOut[], number>, Error> {
   const { get } = useApi();
-  return useQuery<InvoiceOut[], Error>({
+  return useInfiniteQuery<
+    InvoiceOut[],
+    Error,
+    InfiniteData<InvoiceOut[], number>,
+    readonly unknown[],
+    number
+  >({
     queryKey: expenseKeys.invoices(filters),
-    queryFn: ({ signal }) =>
-      get<InvoiceOut[]>(`/expense/invoices${buildInvoiceListQuery(filters)}`, signal),
+    initialPageParam: 0,
+    queryFn: ({ pageParam, signal }) =>
+      get<InvoiceOut[]>(`/expense/invoices${buildInvoiceListQuery(filters, pageParam)}`, signal),
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length > 0 && lastPage.length === EXPENSE_PAGE_SIZE
+        ? allPages.reduce((total, page) => total + page.length, 0)
+        : undefined,
   });
 }
 
@@ -235,19 +307,19 @@ export function useUploadInvoices(): UseMutationResult<UploadBatchOut, Error, Fi
  * Seeds the detail cache and refreshes the register on success.
  */
 export function useSubmitReview(): UseMutationResult<
-  InvoiceOut,
+  InvoiceDetail,
   Error,
   { invoiceId: number; corrections: Correction[]; confirm?: boolean }
 > {
   const { patch } = useApi();
   const qc = useQueryClient();
   return useMutation<
-    InvoiceOut,
+    InvoiceDetail,
     Error,
     { invoiceId: number; corrections: Correction[]; confirm?: boolean }
   >({
     mutationFn: ({ invoiceId, corrections, confirm }) =>
-      patch<InvoiceOut>(`/expense/invoices/${invoiceId}/reviews`, { corrections, confirm }),
+      patch<InvoiceDetail>(`/expense/invoices/${invoiceId}/reviews`, { corrections, confirm }),
     onSuccess: (invoice) => {
       void qc.invalidateQueries({ queryKey: expenseKeys.invoice(invoice.id) });
       void qc.invalidateQueries({ queryKey: ['expense', 'invoices'] });

@@ -20,7 +20,7 @@ import { useApi } from '../../api/client';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import {
   buildInvoiceCsvQuery,
-  useInvoicesQuery,
+  useInvoicesInfiniteQuery,
   type InvoiceFilters,
   type InvoiceStatus,
 } from '../../api/expense';
@@ -42,6 +42,7 @@ export function Register() {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [downloading, setDownloading] = useState(false);
+  const [exportTruncated, setExportTruncated] = useState(false);
 
   // Debounce the filters that feed the query key so each keystroke does not fire
   // its own request; the list refetches ~300ms after typing settles. The
@@ -49,13 +50,24 @@ export function Register() {
   const filters: InvoiceFilters = { q, status, date_from: dateFrom, date_to: dateTo };
   const debouncedFilters = useDebouncedValue(filters);
 
-  const query = useInvoicesQuery(debouncedFilters);
-  const rows = query.data ?? [];
+  // Changing any filter changes the query key, so paging naturally resets to page 0.
+  const query = useInvoicesInfiniteQuery(debouncedFilters);
+  const rows = query.data?.pages.flat() ?? [];
 
   async function onDownloadCsv() {
     setDownloading(true);
+    setExportTruncated(false);
     try {
-      await downloadUrl(`/expense/invoices.csv${buildInvoiceCsvQuery(filters)}`, 'invoices.csv');
+      const result = await downloadUrl(
+        `/expense/invoices.csv${buildInvoiceCsvQuery(filters)}`,
+        'invoices.csv',
+      );
+      if (result.truncated) {
+        setExportTruncated(true);
+        toast.info(
+          'The export was capped at the maximum row limit — narrow the filters to get the full set.',
+        );
+      }
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -79,6 +91,17 @@ export function Register() {
           </Button>
         }
       />
+
+      {exportTruncated && (
+        <div
+          role="status"
+          className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+        >
+          The last CSV export was capped at the maximum row limit, so it is not the complete
+          result set. Add filters (search, status, or a date range) and export again for the full
+          data.
+        </div>
+      )}
 
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <TextField
@@ -165,8 +188,18 @@ export function Register() {
             </tbody>
           </Table>
 
-          <div className="mt-4">
+          <div className="mt-4 flex items-center justify-between gap-3">
             <p className="text-sm text-slate-500">Showing {rows.length}</p>
+            {query.hasNextPage && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => void query.fetchNextPage()}
+                loading={query.isFetchingNextPage}
+              >
+                Load more
+              </Button>
+            )}
           </div>
         </>
       )}

@@ -33,6 +33,7 @@ import {
   formatConfidence,
   formatPaise,
   isMoneyField,
+  parseRupeesToPaise,
 } from './expenseFormat';
 
 /**
@@ -76,21 +77,36 @@ const FIELD_CONTROL =
 function FieldRow({
   field,
   edit,
+  error,
   onEdit,
 }: {
   field: FieldOut;
   edit: string | undefined;
+  /** True when this is a money field whose typed rupee value is not parseable. */
+  error?: boolean;
   onEdit: (value: string) => void;
 }) {
   const inputId = `field-${field.field_path}`;
   const hintId = `${inputId}-hint`;
+  const errorId = `${inputId}-error`;
   const editable = isEditable(field);
-  const shown = edit ?? field.value_normalized ?? field.value_raw ?? '';
-  const hint = isMoneyField(field.field_path)
-    ? 'Amount as printed on the invoice'
+  const money = isMoneyField(field.field_path);
+  // Money fields are EDITED in rupees (the read path stores integer paise), so an
+  // untouched money value is shown as value_normalized/100 with 2 decimals. The
+  // raw OCR text is deliberately not prefilled for money — it is often the exact
+  // misread that flagged the field (e.g. "1I800.00").
+  const shown = money
+    ? (edit ??
+        (field.value_normalized != null
+          ? (Number(field.value_normalized) / 100).toFixed(2)
+          : ''))
+    : (edit ?? field.value_normalized ?? field.value_raw ?? '');
+  const hint = money
+    ? 'Enter amount in ₹'
     : field.value_raw
       ? `Extracted text: “${field.value_raw}”`
       : undefined;
+  const describedBy = [error ? errorId : null, hint ? hintId : null].filter(Boolean).join(' ');
   return (
     <div className="grid grid-cols-1 gap-1 border-t border-slate-100 py-3 sm:grid-cols-[14rem_1fr] sm:gap-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -105,14 +121,36 @@ function FieldRow({
       <div>
         {editable ? (
           <>
-            <input
-              id={inputId}
-              value={shown}
-              onChange={(e) => onEdit(e.target.value)}
-              aria-describedby={hint ? hintId : undefined}
-              placeholder={field.status === 'MISSING' ? 'Not found — enter a value' : undefined}
-              className={FIELD_CONTROL}
-            />
+            <div className={money ? 'relative' : undefined}>
+              {money && (
+                <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-sm text-slate-500">
+                  ₹
+                </span>
+              )}
+              <input
+                id={inputId}
+                value={shown}
+                onChange={(e) => onEdit(e.target.value)}
+                inputMode={money ? 'decimal' : undefined}
+                aria-describedby={describedBy || undefined}
+                aria-invalid={error || undefined}
+                placeholder={
+                  money
+                    ? '0.00'
+                    : field.status === 'MISSING'
+                      ? 'Not found — enter a value'
+                      : undefined
+                }
+                className={`${FIELD_CONTROL}${money ? ' pl-7' : ''}${
+                  error ? ' border-red-400 focus:border-red-500 focus:ring-red-500/40' : ''
+                }`}
+              />
+            </div>
+            {error && (
+              <span id={errorId} className="mt-1 block text-xs text-red-600">
+                Enter a valid rupee amount (numbers, up to 2 decimals).
+              </span>
+            )}
             {hint && (
               <span id={hintId} className="mt-1 block text-xs text-slate-400">
                 {hint}
@@ -121,7 +159,7 @@ function FieldRow({
           </>
         ) : (
           <p className="text-sm text-slate-900">
-            {isMoneyField(field.field_path) && field.value_normalized != null
+            {money && field.value_normalized != null
               ? formatPaise(Number(field.value_normalized))
               : field.value_normalized || field.value_raw || <span className="text-slate-400">—</span>}
           </p>
@@ -225,9 +263,20 @@ export function ReviewPanel() {
   const hasLines = invoice.lines.length > 0;
   const alreadyConfirmed = invoice.status === 'CONFIRMED';
   const isParked = invoice.status === 'NEEDS_OCR' || invoice.status === 'REJECTED';
+  // A money edit that is non-empty but doesn't parse to paise (letters, >2 decimals,
+  // stray symbols) is a hard error — the backend would reject it. Flag such paths so
+  // the row shows an inline error and both actions are blocked until it is fixed.
+  const moneyErrorPaths = new Set(
+    Object.entries(edits)
+      .filter(([path, v]) => isMoneyField(path) && v.trim() !== '' && parseRupeesToPaise(v) == null)
+      .map(([path]) => path),
+  );
+  const hasMoneyError = moneyErrorPaths.size > 0;
   // Confirm is available only when every required field is resolved, at least one
-  // line exists, and the invoice isn't already terminal (confirmed/parked).
-  const canConfirm = requiredResolved && hasLines && !alreadyConfirmed && !isParked;
+  // line exists, the invoice isn't already terminal (confirmed/parked), and no
+  // money edit is malformed.
+  const canConfirm =
+    requiredResolved && hasLines && !alreadyConfirmed && !isParked && !hasMoneyError;
 
   const headerFields = invoice.fields.filter((f) => sectionOf(f.field_path) === 'header');
   const totalsFields = invoice.fields.filter((f) => sectionOf(f.field_path) === 'totals');
@@ -235,11 +284,25 @@ export function ReviewPanel() {
     (f) => sectionOf(f.field_path) === 'line' || sectionOf(f.field_path) === 'other',
   );
 
+  // Build the wire corrections from the pending edits. Money fields are edited in
+  // rupees but the backend coerces money with int(text), so each money edit is
+  // converted to an integer-PAISE string here (the single ₹→paise seam for writes);
+  // a non-parseable money edit is dropped (the buttons are already gated on it).
+  function buildCorrections(): Correction[] {
+    return Object.entries(edits).flatMap(([field_path, raw]) => {
+      const v = raw.trim();
+      if (v === '') return [];
+      if (isMoneyField(field_path)) {
+        const paise = parseRupeesToPaise(v);
+        return paise == null ? [] : [{ field_path, value: String(paise) }];
+      }
+      return [{ field_path, value: v }];
+    });
+  }
+
   function onConfirm() {
     if (!canConfirm) return;
-    const corrections: Correction[] = Object.entries(edits)
-      .filter(([, v]) => v.trim() !== '')
-      .map(([field_path, new_value]) => ({ field_path, new_value: new_value.trim() }));
+    const corrections = buildCorrections();
     submit.mutate(
       { invoiceId: invoice!.id, corrections, confirm: true },
       {
@@ -257,9 +320,8 @@ export function ReviewPanel() {
   }
 
   function onSaveDraft() {
-    const corrections: Correction[] = Object.entries(edits)
-      .filter(([, v]) => v.trim() !== '')
-      .map(([field_path, new_value]) => ({ field_path, new_value: new_value.trim() }));
+    if (hasMoneyError) return;
+    const corrections = buildCorrections();
     if (corrections.length === 0) return;
     submit.mutate(
       { invoiceId: invoice!.id, corrections, confirm: false },
@@ -326,6 +388,7 @@ export function ReviewPanel() {
               key={f.field_path}
               field={f}
               edit={edits[f.field_path]}
+              error={moneyErrorPaths.has(f.field_path)}
               onEdit={(v) => setEdit(f.field_path, v)}
             />
           ))
@@ -342,6 +405,7 @@ export function ReviewPanel() {
               key={f.field_path}
               field={f}
               edit={edits[f.field_path]}
+              error={moneyErrorPaths.has(f.field_path)}
               onEdit={(v) => setEdit(f.field_path, v)}
             />
           ))
@@ -356,6 +420,7 @@ export function ReviewPanel() {
               key={f.field_path}
               field={f}
               edit={edits[f.field_path]}
+              error={moneyErrorPaths.has(f.field_path)}
               onEdit={(v) => setEdit(f.field_path, v)}
             />
           ))}
@@ -385,7 +450,7 @@ export function ReviewPanel() {
               <Button
                 variant="secondary"
                 onClick={onSaveDraft}
-                disabled={submit.isPending}
+                disabled={submit.isPending || hasMoneyError}
                 loading={submit.isPending}
               >
                 Save corrections
@@ -393,9 +458,11 @@ export function ReviewPanel() {
             )}
             {!canConfirm && (
               <span className="text-xs text-slate-500">
-                {!hasLines
-                  ? 'At least one line item is required to confirm.'
-                  : 'Resolve every required field (supplier GSTIN, invoice number, date, taxable, grand total) to confirm.'}
+                {hasMoneyError
+                  ? 'Fix the highlighted amount to confirm.'
+                  : !hasLines
+                    ? 'At least one line item is required to confirm.'
+                    : 'Resolve every required field (supplier GSTIN, invoice number, date, taxable, grand total) to confirm.'}
               </span>
             )}
           </>

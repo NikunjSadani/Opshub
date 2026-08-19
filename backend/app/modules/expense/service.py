@@ -26,7 +26,8 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.modules.expense import dedup
@@ -58,6 +59,20 @@ MODULE_KEY = "expense_invoice"
 # Hard ceiling on a single CSV export so the response can never be unbounded.
 MAX_CSV_ROWS = 50000
 
+# Mirror of challan.parsing._MAX_MONEY_PAISE (= Rs 10,000,000,000,000). A corrected
+# money amount outside +/- this ceiling is a 400, never an int8-overflow DB 500. Money
+# is SIGNED (round_off can be negative), so the floor is the negated ceiling.
+_MAX_MONEY_PAISE = 10**15
+
+# Per-column string widths (from models.Invoice) a corrected TEXT field must fit, so an
+# over-width value is a 400 at the seam rather than a String(n) truncation/DB 500.
+_COLUMN_MAXLEN: dict[str, int] = {
+    "supplier_name": 300, "supplier_gstin": 15, "supplier_address": 600,
+    "buyer_name": 300, "buyer_gstin": 15, "buyer_address": 600,
+    "invoice_number": 64, "place_of_supply": 64, "po_ref": 64,
+    "amount_in_words": 600,
+}
+
 _REJECTED_MESSAGE = (
     "the document could not be read (unreadable or corrupt file) — re-scan or "
     "upload a clearer copy"
@@ -80,6 +95,10 @@ class ExpenseBadRequest(ExpenseError):
 
 class ExpenseConflict(ExpenseError):
     """A state-machine or identity conflict -> 409."""
+
+
+class ExpenseForbidden(ExpenseError):
+    """The actor lacks the privilege for this specific transition -> 403."""
 
 
 # ----------------------------------------------------------- field mapping
@@ -131,21 +150,34 @@ def _norm_str(kind: str, value: Any) -> str | None:
     return str(value)
 
 
-def _coerce(kind: str, raw: str) -> Any:
-    """Parse a human-supplied correction string into its typed scalar value."""
+def _coerce(spec: _Spec, raw: str) -> Any:
+    """Parse a human-supplied correction string into its typed scalar value.
+
+    Bounds are enforced HERE so a hostile/typo'd value is a clean 400, never a DB
+    500: money is clamped to +/- ``_MAX_MONEY_PAISE`` (the int8 column), and a text
+    value must fit its target column width (``_COLUMN_MAXLEN``)."""
     text = raw.strip()
-    if kind == "money":
+    if spec.kind == "money":
         try:
-            return int(text)
+            value = int(text)
         except ValueError as exc:
             raise ExpenseBadRequest(
                 f"expected an integer paise amount, got {raw!r}") from exc
-    if kind == "date":
+        if not -_MAX_MONEY_PAISE <= value <= _MAX_MONEY_PAISE:
+            raise ExpenseBadRequest(
+                f"amount {value} is out of range (max +/-{_MAX_MONEY_PAISE} paise)")
+        return value
+    if spec.kind == "date":
         try:
             return date.fromisoformat(text)
         except ValueError as exc:
             raise ExpenseBadRequest(
                 f"expected an ISO date (YYYY-MM-DD), got {raw!r}") from exc
+    maxlen = _COLUMN_MAXLEN.get(spec.attr)
+    if maxlen is not None and len(raw) > maxlen:
+        raise ExpenseBadRequest(
+            f"value for '{spec.field_path}' is too long "
+            f"(max {maxlen} characters, got {len(raw)})")
     return raw  # text — stored verbatim
 
 
@@ -247,29 +279,61 @@ def _process_file(
         scalars["supplier_gstin"], scalars["invoice_number"],
         scalars["invoice_date"], scalars["grand_total_paise"],
     ) if _enforceable(scalars) else None)
+    chash = dedup.content_hash(pdf_bytes)
 
-    if key is not None:
-        existing = db.execute(
-            select(Invoice).where(Invoice.dedup_key == key).limit(1)
-        ).scalar_one_or_none()
-        if existing is not None:
-            # HARD dedup: do NOT persist. Carry the STORED invoice's id + summary.
-            _audit(db, "expense.invoice_duplicate", actor_uid, existing.id,
-                   {"file_id": file_id, "batch_id": batch.id})
-            return FileOutcome(
-                file_id=file_id, status="DUPLICATE", duplicate_of=existing.id,
-                supplier_name=existing.supplier_name,
-                invoice_number=existing.invoice_number,
-                grand_total_paise=existing.grand_total_paise,
-                message="a matching invoice already exists; delete it to re-upload",
-            )
+    # Fast path: a stored invoice with the same identity key (F2) OR the same source
+    # bytes (F4 — a byte-identical re-upload of an un-OCR'd scan whose key is NULL) is
+    # a DUPLICATE; do NOT persist.
+    existing = _find_duplicate(db, key, chash)
+    if existing is not None:
+        return _duplicate_outcome(db, batch, file_id, existing, actor_uid)
 
-    invoice = _persist_invoice(db, batch, file_id, extracted, scalars, key, actor_uid)
+    # Persist under a SAVEPOINT so a UNIQUE(dedup_key) collision that RACED our check (a
+    # concurrent upload of the same invoice) converts THIS file to a DUPLICATE outcome
+    # instead of surfacing an uncaught IntegrityError -> 500 that rolls back the whole
+    # batch and loses the earlier good files (F1).
+    try:
+        with db.begin_nested():
+            invoice = _persist_invoice(
+                db, batch, file_id, extracted, scalars, key, chash, actor_uid)
+    except IntegrityError:
+        logger.info("expense dedup race for file %s; converting to DUPLICATE", file_id)
+        existing = _find_duplicate(db, key, chash)
+        if existing is None:  # a DIFFERENT integrity fault — never silently swallow it
+            raise
+        return _duplicate_outcome(db, batch, file_id, existing, actor_uid)
     return FileOutcome(
         file_id=file_id, status=invoice.status, invoice_id=invoice.id,
         supplier_name=invoice.supplier_name, invoice_number=invoice.invoice_number,
         grand_total_paise=invoice.grand_total_paise,
         review_reasons=list(extracted.review_reasons),
+    )
+
+
+def _find_duplicate(db: Session, key: str | None, chash: str) -> Invoice | None:
+    """The stored invoice this upload duplicates (by identity key OR source-byte hash),
+    or None. Oldest-first so a re-upload always resolves to the original winner."""
+    conds = [Invoice.content_hash == chash]
+    if key is not None:
+        conds.append(Invoice.dedup_key == key)
+    return db.execute(
+        select(Invoice).where(or_(*conds)).order_by(Invoice.id).limit(1)
+    ).scalar_one_or_none()
+
+
+def _duplicate_outcome(
+    db: Session, batch: InvoiceBatch, file_id: int, existing: Invoice,
+    actor_uid: str | None,
+) -> FileOutcome:
+    """A DUPLICATE per-file outcome carrying the STORED winner's id + summary (audited)."""
+    _audit(db, "expense.invoice_duplicate", actor_uid, existing.id,
+           {"file_id": file_id, "batch_id": batch.id})
+    return FileOutcome(
+        file_id=file_id, status="DUPLICATE", duplicate_of=existing.id,
+        supplier_name=existing.supplier_name,
+        invoice_number=existing.invoice_number,
+        grand_total_paise=existing.grand_total_paise,
+        message="a matching invoice already exists; delete it to re-upload",
     )
 
 
@@ -280,6 +344,7 @@ def _persist_invoice(
     extracted: ExtractedInvoice,
     scalars: dict[str, Any],
     key: str | None,
+    content_hash: str,
     actor_uid: str | None,
 ) -> Invoice:
     """Persist the Invoice snapshot + line items + field envelope rows."""
@@ -292,7 +357,7 @@ def _persist_invoice(
         needs_ocr=extracted.needs_ocr,
         review_reasons=list(extracted.review_reasons),
         dedup_key=key,
-        content_hash=dedup.content_hash(extracted.raw_text),
+        content_hash=content_hash,
         created_by=actor_uid,
         **scalars,
     )
@@ -400,6 +465,7 @@ def _confidence(value: float) -> Decimal:
 
 def _register_query(
     *,
+    q: str | None = None,
     supplier: str | None = None,
     gstin: str | None = None,
     status: str | None = None,
@@ -408,6 +474,15 @@ def _register_query(
 ) -> Select[tuple[Invoice]]:
     """The filtered, newest-first register select shared by list + CSV."""
     stmt = select(Invoice)
+    if q and q.strip():
+        # Free-text search the FE sends as `q`: ORs supplier / GSTIN / invoice no. so a
+        # single box matches any of them (without it the search returned the full list).
+        like = f"%{q.strip()}%"
+        stmt = stmt.where(or_(
+            Invoice.supplier_name.ilike(like),
+            Invoice.supplier_gstin.ilike(like),
+            Invoice.invoice_number.ilike(like),
+        ))
     if supplier:
         stmt = stmt.where(Invoice.supplier_name.ilike(f"%{supplier.strip()}%"))
     if gstin:
@@ -424,6 +499,7 @@ def _register_query(
 def list_invoices(
     db: Session,
     *,
+    q: str | None = None,
     supplier: str | None = None,
     gstin: str | None = None,
     status: str | None = None,
@@ -432,9 +508,9 @@ def list_invoices(
     limit: int = 100,
     offset: int = 0,
 ) -> list[Invoice]:
-    """The searchable expense register (supplier / GSTIN / date-range / status)."""
+    """The searchable expense register (free-text q / supplier / GSTIN / date-range / status)."""
     stmt = _register_query(
-        supplier=supplier, gstin=gstin, status=status,
+        q=q, supplier=supplier, gstin=gstin, status=status,
         date_from=date_from, date_to=date_to,
     ).limit(limit).offset(offset)
     return list(db.execute(stmt).scalars())
@@ -497,7 +573,7 @@ def submit_corrections(
         spec = _SPEC_BY_PATH.get(path)
         if spec is None:
             raise ExpenseBadRequest(f"unknown field '{raw_path}'")
-        typed = _coerce(spec.kind, raw_value)          # may raise ExpenseBadRequest
+        typed = _coerce(spec, raw_value)               # may raise ExpenseBadRequest
         new_norm = _norm_str(spec.kind, typed)
 
         fld = fields_by_path.get(path)
@@ -575,6 +651,12 @@ def confirm_invoice(db: Session, invoice: Invoice, *, actor_uid: str | None) -> 
         raise ExpenseConflict(
             "these required fields still need review before confirming: "
             + ", ".join(blocking))
+    # A real GST invoice has at least one line; the FE already requires one to enable
+    # Confirm, so require it here too (L1) — otherwise a lineless invoice is API-
+    # confirmable yet UI-blocked, an inconsistency.
+    if not invoice.lines:
+        raise ExpenseConflict(
+            "a confirmable invoice needs at least one line item")
     invoice.status = InvoiceStatus.CONFIRMED.value
     invoice.confirmed_by = actor_uid
     invoice.confirmed_at = datetime.now(UTC)
@@ -586,17 +668,64 @@ def confirm_invoice(db: Session, invoice: Invoice, *, actor_uid: str | None) -> 
 
 # --------------------------------------------------------------- delete
 
-def delete_invoice(db: Session, invoice: Invoice, *, actor_uid: str | None) -> None:
-    """Delete an invoice (cascades its lines / fields / corrections).
+def delete_invoice(
+    db: Session, invoice: Invoice, *, actor_uid: str | None,
+    can_delete_confirmed: bool,
+) -> None:
+    """Delete an invoice (cascades its lines / fields / corrections) + its source blob.
 
-    Supports delete-and-re-upload to replace a hard-deduped record. The route gates
-    deletion of a CONFIRMED record behind ``expense.delete`` (admin)."""
+    Supports delete-and-re-upload to replace a hard-deduped record. Deleting a CONFIRMED
+    record requires ``can_delete_confirmed`` (the route derives it from the admin
+    ``expense.delete`` action), re-checked HERE under a row lock so a confirm that RACES
+    the route's gate can't let a non-admin delete a now-CONFIRMED record (F5)."""
     invoice_id = invoice.id
-    was_confirmed = invoice.status == InvoiceStatus.CONFIRMED.value
-    db.delete(invoice)
+    # F5: re-read the status under a row lock; a concurrent confirm can no longer slip
+    # between the route's pre-check and this delete.
+    locked = db.execute(
+        select(Invoice).where(Invoice.id == invoice_id).with_for_update()
+    ).scalar_one_or_none()
+    if locked is None:
+        raise ExpenseNotFound("invoice not found")
+    was_confirmed = locked.status == InvoiceStatus.CONFIRMED.value
+    if was_confirmed and not can_delete_confirmed:
+        raise ExpenseForbidden(
+            "deleting a confirmed invoice requires admin (expense.delete)")
+
+    # F7: a correction promoted into the eval gold set is training provenance — refuse to
+    # cascade it away silently (an admin can re-point the gold set first if truly needed).
+    promoted = db.execute(
+        select(func.count()).select_from(InvoiceCorrection).where(
+            InvoiceCorrection.invoice_id == invoice_id,
+            InvoiceCorrection.promoted_to_gold.is_(True),
+        )
+    ).scalar_one()
+    if promoted:
+        raise ExpenseConflict(
+            "this invoice has corrections promoted to the gold set and cannot be "
+            "deleted (its gold provenance would be lost)")
+
+    # F6: the source blob + its StoredFile row are NOT FK-cascaded — remove them too so a
+    # delete doesn't orphan the PDF forever. Blob removal is best-effort and happens AFTER
+    # the row commit (a failed unlink must never lose the DB delete).
+    source_ref: str | None = None
+    if locked.source_file_id is not None:
+        sf = db.get(StoredFile, locked.source_file_id)
+        if sf is not None:
+            source_ref = sf.storage_ref
+            db.delete(sf)
+
+    db.delete(locked)
     _audit(db, "expense.invoice_deleted", actor_uid, invoice_id,
-           {"was_confirmed": was_confirmed})
+           {"was_confirmed": was_confirmed, "source_file_id": locked.source_file_id})
     db.commit()
+
+    if source_ref is not None:
+        try:
+            get_storage().delete(source_ref)
+        except Exception:  # noqa: BLE001 - best-effort; the DB row is already gone
+            logger.warning(
+                "expense source blob %s left on disk after delete of invoice %s",
+                source_ref, invoice_id)
 
 
 # --------------------------------------------------------------- helpers
