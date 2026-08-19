@@ -5,6 +5,7 @@ import { Overview } from './Overview';
 import { NewChallan } from './NewChallan';
 import { Batches } from './Batches';
 import { Register } from './Register';
+import { DownloadChallans } from './DownloadChallans';
 import { Numbering } from './Numbering';
 import { MasterData } from './MasterData';
 
@@ -24,6 +25,7 @@ export function ChallanModule() {
     { to: `${BASE}/new`, label: 'New Challan' },
     { to: `${BASE}/batches`, label: 'Batches' },
     { to: `${BASE}/register`, label: 'Register' },
+    { to: `${BASE}/download`, label: 'Download' },
     { to: `${BASE}/numbering`, label: 'Numbering' },
     ...(isAdmin ? [{ to: `${BASE}/master-data`, label: 'Master Data' }] : []),
   ];
@@ -36,6 +38,7 @@ export function ChallanModule() {
         <Route path="new" element={<NewChallan />} />
         <Route path="batches" element={<Batches />} />
         <Route path="register" element={<Register />} />
+        <Route path="download" element={<DownloadChallans />} />
         <Route path="numbering" element={<Numbering />} />
         <Route
           path="master-data/*"

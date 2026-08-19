@@ -102,6 +102,48 @@ export interface ChallanSummaryFilters {
   fy?: string;
 }
 
+// --------------------------------------------------------- bulk PDF download
+
+/** One challan the spec resolved to (backend download-preview `resolved` row). */
+export interface DownloadResolved {
+  /** The numeric part of the challan number, scoped to (series, fy). */
+  number_int: number;
+  /** The full formatted number, e.g. "L/26-27/0010". */
+  number: string;
+  id: number;
+}
+
+/**
+ * The result of previewing a bulk-download spec against a (series, fy): what
+ * would download, what is skipped because it is void, what wasn't found, and any
+ * parse/validation errors for the spec itself. Mirrors the backend
+ * `GET /challan/download/preview` response.
+ */
+export interface DownloadPreview {
+  series: string;
+  fy: string;
+  /** How many challans would actually be included in the download. */
+  count: number;
+  resolved: DownloadResolved[];
+  /** Numbers that exist but are VOID — deliberately excluded; tell the operator. */
+  skipped_void: number[];
+  /** Numbers in the spec with no matching challan in (series, fy). */
+  missing: number[];
+  /** Human-readable problems with the spec (e.g. an unparsable range). */
+  errors: string[];
+}
+
+/** The identifying inputs for a bulk download: a (series, fy) and a numbers spec. */
+export interface DownloadParams {
+  series: string;
+  fy: string;
+  /** A range and/or comma-separated list, e.g. "10-50, 55, 60". */
+  spec: string;
+}
+
+/** How the bulk PDFs are packaged. */
+export type DownloadMode = 'separate' | 'merged';
+
 /** One row of the summary's per-series/fy breakdown (backend SeriesBreakdownOut). */
 export interface SeriesBreakdown {
   series: string;
@@ -178,6 +220,20 @@ export function buildChallanCsvQuery(filters: ChallanFilters): string {
   return qs ? `?${qs}` : '';
 }
 
+/**
+ * Build a `?series=&fy=&spec=[&mode=]` query string for the bulk-download preview
+ * and download endpoints. `URLSearchParams` URL-encodes the spec (its commas and
+ * spaces) for us. Exported + pure so it can be unit-tested without a hook.
+ */
+export function buildDownloadQuery(params: DownloadParams, mode?: DownloadMode): string {
+  const p = new URLSearchParams();
+  p.set('series', params.series.trim());
+  p.set('fy', params.fy.trim());
+  p.set('spec', params.spec.trim());
+  if (mode) p.set('mode', mode);
+  return `?${p.toString()}`;
+}
+
 // --------------------------------------------------------------- query keys
 export const challanKeys = {
   batches: (limit: number) => ['challan', 'batches', limit] as const,
@@ -185,6 +241,8 @@ export const challanKeys = {
   decisions: (id: number) => ['challan', 'decisions', id] as const,
   challans: (filters: ChallanFilters) => ['challan', 'challans', filters] as const,
   summary: (filters: ChallanSummaryFilters) => ['challan', 'summary', filters] as const,
+  downloadPreview: (params: DownloadParams | null) =>
+    ['challan', 'download-preview', params] as const,
 };
 
 // ------------------------------------------------------------------ queries
@@ -282,6 +340,27 @@ export function useChallanSummaryQuery(
     queryKey: challanKeys.summary(filters),
     queryFn: ({ signal }) =>
       get<ChallanSummary>(`/challan/summary${buildChallanSummaryQuery(filters)}`, signal),
+  });
+}
+
+/**
+ * Preview a bulk-download spec against a (series, fy). Enabled only once a caller
+ * has committed a full set of params (series + fy + spec, all non-empty) — the
+ * screen sets these on the operator's explicit "Preview" click, so each keystroke
+ * does NOT fire a request. Not polled; a spec's resolution changes only when the
+ * operator submits a new one (a new query key). The body carries its own
+ * `errors[]` for a malformed spec — those come back on a 200, not as a throw, so
+ * the caller renders them as inline validation rather than an error state.
+ */
+export function useDownloadPreview(
+  params: DownloadParams | null,
+): UseQueryResult<DownloadPreview, Error> {
+  const { get } = useApi();
+  return useQuery<DownloadPreview, Error>({
+    queryKey: challanKeys.downloadPreview(params),
+    enabled: params != null,
+    queryFn: ({ signal }) =>
+      get<DownloadPreview>(`/challan/download/preview${buildDownloadQuery(params!)}`, signal),
   });
 }
 
