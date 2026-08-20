@@ -111,28 +111,31 @@ This is the one change this design imposes on the already-built Phase-1 challan 
 
 ### 5e. Billing — `billing` module (OUTBOUND / sales side)
 
+> **REVISED 2026-08-20 (owner):** client invoices + credit notes are **created in the accounting software and UPLOADED here** — OpsHub does **NOT** generate them, mint their numbers, or compute their GST. `billing` is an **upload → extract → match → review → confirm** module: we reuse the **existing expense pdfplumber text-layer `Extractor`** to pull the uploaded invoice's **line items**, **auto-match** them to the PO's lines (product code / HSN / description + qty + price), flag mismatches on a **review screen**, and let the operator **manually map/correct** any line (the manual fallback; scanned/image invoices with no text layer fall straight to manual, OCR deferred). On confirm the invoice lines tie to PO lines → exact **invoiced-qty per line** (§6). Invoice number + GST are the document's own (captured as printed, never derived). This is **money-critical** → an **eval/gold harness before the engine** + a **DUAL** audit.
+
 ```
-billing_invoice       (id, invoice_number String uniq, po_id FK, client_id FK,
-                       client_gstin_id FK, client_address_id FK, invoice_date Date,
-                       due_date Date,                       -- derived from client credit_terms_days
-                       place_of_supply String(2),
-                       taxable_paise BigInt, cgst_paise, sgst_paise, igst_paise,
+billing_invoice       (id, invoice_number String, po_id FK, client_id FK,   -- number is EXTERNAL
+                       invoice_date Date, due_date Date NULL,   -- from client credit terms or entered
+                       taxable_paise BigInt, cgst_paise, sgst_paise, igst_paise, -- captured as printed
                        round_off_paise BigInt (SIGNED), grand_total_paise BigInt,
-                       status String(16) [DRAFT|ISSUED|PART_PAID|PAID|CANCELLED] (DERIVED),
-                       created_by/at)
-billing_invoice_line  (id, invoice_id FK CASCADE, po_line_item_id FK, qty Numeric,
-                       unit_price_paise BigInt, taxable_paise BigInt, tax_rate Numeric)
-credit_note           (id, cn_number String uniq, invoice_id FK, reason String(500),
-                       cn_date Date, taxable_paise, cgst/sgst/igst_paise,
-                       grand_total_paise, status, created_by/at)
-credit_note_line      (id, cn_note_id FK, po_line_item_id FK, qty Numeric, ...)  -- writes qty back
-payment_receipt       (id, client_id FK, invoice_id FK→billing_invoice NULL, amount_paise BigInt,
+                       source_engine String, review_reasons JSON,  -- extraction provenance (as expense)
+                       soft_copy_file_id FK→files_stored_file, status String(16), notes, created_by/at)
+                       -- unique(client_id, invoice_number); paid-status DERIVED; CANCELLED is explicit
+billing_invoice_line  (id, invoice_id FK CASCADE, po_line_item_id FK NULL, -- NULL until matched/mapped
+                       description String, qty Numeric, unit_price_paise BigInt,
+                       taxable_paise BigInt, tax_rate Numeric, match_status String)  -- MATCHED/MANUAL/UNMATCHED
+credit_note           (id, cn_number String, invoice_id FK→billing_invoice, client_id FK, -- number EXTERNAL
+                       cn_date Date, taxable_paise, cgst/sgst/igst_paise, round_off_paise (SIGNED),
+                       grand_total_paise, soft_copy_file_id FK, reason String(500), created_by/at)
+                       -- unique(client_id, cn_number)
+credit_note_line      (id, cn_id FK CASCADE, po_line_item_id FK NULL, qty Numeric, ...)  -- writes qty back
+payment_receipt       (id, client_id FK, invoice_id FK→billing_invoice, amount_paise BigInt,
                        received_on Date, mode String, reference String, note, created_by/at)
 client_advance        (id, client_id FK, po_id FK NULL, amount_paise BigInt,
                        received_on Date, mode, reference, note, created_by/at)
 advance_application   (id, advance_id FK, invoice_id FK, amount_paise BigInt)  -- advance → invoice
 ```
-Invoice `status` and a client-invoice's paid/outstanding figure are **derived** from `payment_receipt` + `advance_application` sums vs `grand_total_paise` — never a manual toggle. An **advance's remaining** = `amount_paise − Σ advance_application`.
+Confirmed invoice/CN lines drive **§6's per-line `invoiced_qty`** (ordered→invoiced reconciliation + over-billing detection). A client-invoice's **outstanding** = `grand_total_paise − Σ(credit_note.grand_total for this invoice) − Σ payment_receipt.amount − Σ advance_application.amount`; **status** (UNPAID/PART_PAID/PAID) and **overdue** are **derived**. An **advance's remaining** = `amount_paise − Σ advance_application`. Advance application is a **hybrid**: the app suggests **FIFO** (oldest first) + pre-fills it; the operator can override. Header totals are reconciled against the summed lines (a mismatch is a review flag, not a silent accept).
 
 ### 5f. Logistics — `logistics` module
 

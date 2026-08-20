@@ -11,9 +11,11 @@ from fastapi import APIRouter, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
 
 from app.config import get_settings
+from app.modules.billing.routes import router as billing_router
 from app.modules.challan.routes import router as challan_router
 from app.modules.expense.routes import router as expense_router
 from app.modules.files.routes import router as files_router
+from app.modules.finance.routes import router as finance_router
 from app.modules.health.routes import SPEC as HEALTH
 from app.modules.jobs.routes import router as jobs_router
 from app.modules.masterdata.routes import router as masterdata_router
@@ -62,6 +64,21 @@ register_module(ModuleSpec(
     router=APIRouter(),
     nav_group="Operations",
 ))
+# Billing / AR (client invoice capture, payments, advances) — nav entry only; its API
+# mounts separately below (billing_router at /api/v1). Same empty-router pattern.
+register_module(ModuleSpec(
+    key="billing",
+    title="Billing & AR",
+    router=APIRouter(),
+    nav_group="Operations",
+))
+# Finance (project + consolidated P&L, read-only) — nav entry only.
+register_module(ModuleSpec(
+    key="finance",
+    title="Finance & P&L",
+    router=APIRouter(),
+    nav_group="Operations",
+))
 
 
 def create_app() -> FastAPI:
@@ -80,6 +97,8 @@ def create_app() -> FastAPI:
     app.include_router(numbering_router, prefix="/api/v1", tags=["numbering"])
     app.include_router(projects_router, prefix="/api/v1", tags=["projects"])
     app.include_router(sales_orders_router, prefix="/api/v1", tags=["sales_orders"])
+    app.include_router(billing_router, prefix="/api/v1", tags=["billing"])
+    app.include_router(finance_router, prefix="/api/v1", tags=["finance"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
     # User Management + Roles — platform primitives (admin-managed accounts and the
     # roles that grant access); NOT nav ModuleSpecs, mounted like files/settings above.

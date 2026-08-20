@@ -147,6 +147,13 @@ class Invoice(Base):
         ForeignKey("project.id"), index=True, default=None)
     payment_method_id: Mapped[int | None] = mapped_column(
         ForeignKey("expense_payment_method.id"), index=True, default=None)
+    # inc 28 (vendor credit notes): a captured document is an INVOICE (cost) or a
+    # CREDIT_NOTE (a reduction of cost), optionally linked to the invoice it credits.
+    # Nullable-backfilled to INVOICE so all existing rows are unaffected. Every money
+    # aggregate (spend dashboard, project cost, P&L) must be SIGN-AWARE on this.
+    doc_type: Mapped[str] = mapped_column(String(16), default="INVOICE", index=True)
+    against_invoice_id: Mapped[int | None] = mapped_column(
+        ForeignKey("expense_invoice.id"), index=True, default=None)
     # Same-module relationship is safe; the Project is resolved via explicit joins to keep
     # the expense/projects modules decoupled (no cross-module mapper dependency).
     payment_method: Mapped["ExpensePaymentMethod | None"] = relationship()

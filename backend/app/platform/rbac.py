@@ -30,6 +30,8 @@ CHALLAN = "document_automation"
 PROJECTS = "projects"
 EXPENSE = "expense_invoice"
 SALES_ORDERS = "sales_orders"
+BILLING = "billing"
+FINANCE = "finance"
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,17 @@ ACTION_CATALOG: dict[str, _ModuleReq | _PlatformReq] = {
     "po.void": _ModuleReq(SALES_ORDERS, Level.MANAGE),
     "product.manage": _ModuleReq(SALES_ORDERS, Level.MANAGE),
     "quote.search": _ModuleReq(SALES_ORDERS, Level.VIEW),
+    # --- Billing / AR (client invoice capture, payments, advances) ---
+    "invoice.upload": _ModuleReq(BILLING, Level.OPERATE),
+    "invoice.match": _ModuleReq(BILLING, Level.OPERATE),
+    "creditnote.upload": _ModuleReq(BILLING, Level.OPERATE),
+    "payment.record": _ModuleReq(BILLING, Level.OPERATE),
+    "advance.record": _ModuleReq(BILLING, Level.OPERATE),
+    "advance.apply": _ModuleReq(BILLING, Level.OPERATE),
+    "invoice.cancel": _ModuleReq(BILLING, Level.MANAGE),
+    "invoice.delete": _ModuleReq(BILLING, Level.MANAGE),
+    # --- Finance (P&L, read-only) ---
+    "pnl.view": _ModuleReq(FINANCE, Level.VIEW),
     # --- Platform (cross-cutting) ---
     "user.manage": _PlatformReq(PlatformPerm.IAM),
     "role.manage": _PlatformReq(PlatformPerm.IAM),
