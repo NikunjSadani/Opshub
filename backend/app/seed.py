@@ -13,9 +13,15 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.modules.numbering import service as numbering
 from app.modules.numbering.models import NumberingCounter
+from app.modules.projects import service as projects
+from app.modules.projects.models import Project, ProjectClient
 from app.platform import audit
 from app.platform.models import Role, Setting, User
 from app.platform.roles_builtin import ensure_builtin_roles
+
+# The catch-all project code + name for overhead expenses with no client project.
+OVERHEAD_CLIENT_CODE = "GEN"
+OVERHEAD_PROJECT_NAME = "General / Overhead"
 
 
 def assert_seedable() -> None:
@@ -67,7 +73,32 @@ def seed(db: Session) -> None:
     # would be L/000001). The owner sets the REAL last number before go-live via the
     # admin mode-2 seed (POST /numbering/seed). Idempotent.
     _seed_placeholder_counter(db, series="L")
+    _seed_overhead_project(db)
     db.commit()
+
+
+def ensure_overhead_project(db: Session) -> Project:
+    """Idempotently ensure the catch-all "General / Overhead" project exists.
+
+    Inc 27 requires a Project on every expense, so overhead with no client project
+    (rent, utilities, software) needs a home. Kept as a standalone helper so a future
+    prod bootstrap can create it too (seed itself is fail-closed on prod). Returns the
+    project row. Caller commits.
+    """
+    client = db.execute(
+        select(ProjectClient).where(ProjectClient.code == OVERHEAD_CLIENT_CODE)
+    ).scalar_one_or_none()
+    if client is None:
+        client = projects.create_client(
+            db, name="General", code=OVERHEAD_CLIENT_CODE, actor_uid="seed")
+        db.flush()
+    # create_project is idempotent on (client_id, name), so this never mints a duplicate.
+    return projects.create_project(
+        db, client_id=client.id, name=OVERHEAD_PROJECT_NAME, actor_uid="seed")
+
+
+def _seed_overhead_project(db: Session) -> None:
+    ensure_overhead_project(db)
 
 
 def _seed_placeholder_counter(db: Session, *, series: str) -> None:

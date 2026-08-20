@@ -557,28 +557,31 @@ def list_invoices(
 
 def allocation_maps(
     db: Session, invoices: list[Invoice]
-) -> tuple[dict[int, str], dict[int, str]]:
-    """(project_id -> code, payment_method_id -> name) for a page of invoices.
+) -> tuple[dict[int, str], dict[int, str], dict[int, str]]:
+    """(project_id -> code, project_id -> name, payment_method_id -> name) for a page.
 
-    The project code is resolved by an EXPLICIT lookup — the expense module keeps NO
-    ORM relationship to Project (module decoupling) — and both maps are one query each
-    (no per-row N+1). Ids with no row (e.g. a deleted method) simply drop out."""
+    The project code/name is resolved by an EXPLICIT lookup — the expense module keeps NO
+    ORM relationship to Project (module decoupling) — and each map is one query (no per-row
+    N+1). Ids with no row (e.g. a deleted method) simply drop out."""
     project_ids = {inv.project_id for inv in invoices if inv.project_id is not None}
     pm_ids = {
         inv.payment_method_id for inv in invoices if inv.payment_method_id is not None
     }
-    projects: dict[int, str] = (
-        {row.id: row.code for row in db.execute(
-            select(Project.id, Project.code).where(Project.id.in_(project_ids))
-        )} if project_ids else {}
-    )
+    project_codes: dict[int, str] = {}
+    project_names: dict[int, str] = {}
+    if project_ids:
+        for row in db.execute(
+            select(Project.id, Project.code, Project.name).where(Project.id.in_(project_ids))
+        ):
+            project_codes[row.id] = row.code
+            project_names[row.id] = row.name
     methods: dict[int, str] = (
         {row.id: row.name for row in db.execute(
             select(ExpensePaymentMethod.id, ExpensePaymentMethod.name)
             .where(ExpensePaymentMethod.id.in_(pm_ids))
         )} if pm_ids else {}
     )
-    return projects, methods
+    return project_codes, project_names, methods
 
 
 def register_csv(
@@ -631,12 +634,15 @@ def get_invoice(db: Session, invoice_id: int) -> Invoice:
 @dataclass
 class GroupTotal:
     """One aggregation bucket: the grouping key (project or payment method), its
-    human label, the summed grand total in paise, and the invoice count."""
+    human label, the summed grand total in paise, and the invoice count. `sub_label`
+    is an optional secondary label (the project NAME alongside its code); None for
+    payment methods (which have only a name)."""
 
     key_id: int | None
     label: str | None
     total_paise: int
     count: int
+    sub_label: str | None = None
 
 
 @dataclass
@@ -664,17 +670,18 @@ def summary(db: Session) -> ExpenseSummary:
     ).one()
 
     by_project = [
-        GroupTotal(key_id=pid, label=code, total_paise=int(paise), count=cnt)
-        for pid, code, paise, cnt in db.execute(
+        GroupTotal(key_id=pid, label=code, sub_label=name, total_paise=int(paise), count=cnt)
+        for pid, code, name, paise, cnt in db.execute(
             select(
                 Invoice.project_id,
                 Project.code,
+                Project.name,
                 func.coalesce(func.sum(Invoice.grand_total_paise), 0),
                 func.count(),
             )
             .outerjoin(Project, Project.id == Invoice.project_id)
             .where(confirmed)
-            .group_by(Invoice.project_id, Project.code)
+            .group_by(Invoice.project_id, Project.code, Project.name)
             .order_by(func.coalesce(func.sum(Invoice.grand_total_paise), 0).desc())
         )
     ]

@@ -116,6 +116,7 @@ class InvoiceOut(BaseModel):
     invoice_date: Any
     project_id: int | None
     project_code: str | None
+    project_name: str | None
     payment_method_id: int | None
     payment_method_name: str | None
     total_taxable_paise: int | None
@@ -223,6 +224,7 @@ class PaymentMethodPatch(BaseModel):
 class ProjectSummaryOut(BaseModel):
     project_id: int | None
     project_code: str | None
+    project_name: str | None
     total_paise: int
     count: int
 
@@ -244,6 +246,7 @@ class SummaryOut(BaseModel):
 def _to_invoice_out(
     inv: Invoice,
     project_codes: dict[int, str],
+    project_names: dict[int, str],
     payment_method_names: dict[int, str],
 ) -> InvoiceOut:
     """Build a register row, resolving the allocation labels from the lookup maps."""
@@ -258,6 +261,9 @@ def _to_invoice_out(
         project_id=inv.project_id,
         project_code=(
             project_codes.get(inv.project_id) if inv.project_id is not None else None
+        ),
+        project_name=(
+            project_names.get(inv.project_id) if inv.project_id is not None else None
         ),
         payment_method_id=inv.payment_method_id,
         payment_method_name=(
@@ -429,8 +435,8 @@ def list_invoices(
         project_id=project_id, payment_method_id=payment_method_id,
         limit=limit, offset=offset,
     )
-    project_codes, method_names = service.allocation_maps(db, rows)
-    return [_to_invoice_out(inv, project_codes, method_names) for inv in rows]
+    project_codes, project_names, method_names = service.allocation_maps(db, rows)
+    return [_to_invoice_out(inv, project_codes, project_names, method_names) for inv in rows]
 
 
 @router.get("/expense/invoices.csv")
@@ -455,7 +461,7 @@ def export_invoices_csv(
         project_id=project_id, payment_method_id=payment_method_id,
         limit=service.MAX_CSV_ROWS,
     )
-    project_codes, method_names = service.allocation_maps(db, rows)
+    project_codes, _project_names, method_names = service.allocation_maps(db, rows)
     return Response(
         content=service.register_csv(rows, project_codes, method_names),
         media_type="text/csv; charset=utf-8",
@@ -476,7 +482,7 @@ def expense_summary(
         invoice_count=data.invoice_count,
         by_project=[
             ProjectSummaryOut(
-                project_id=g.key_id, project_code=g.label,
+                project_id=g.key_id, project_code=g.label, project_name=g.sub_label,
                 total_paise=g.total_paise, count=g.count)
             for g in data.by_project
         ],

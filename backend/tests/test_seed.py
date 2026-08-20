@@ -42,11 +42,26 @@ def test_seed_creates_role_based_users_and_setting(db: Session) -> None:
     assert db.get(Setting, "eway_threshold") is not None
 
 
+def test_seed_creates_overhead_project(db: Session) -> None:
+    from app.modules.projects.models import Project, ProjectClient
+    seed(db)
+    client = db.execute(
+        select(ProjectClient).where(ProjectClient.code == "GEN")
+    ).scalar_one()
+    projects = db.execute(
+        select(Project).where(Project.client_id == client.id)
+    ).scalars().all()
+    assert [(p.code, p.name) for p in projects] == [("GEN-001", "General / Overhead")]
+
+
 def test_seed_is_idempotent(db: Session) -> None:
+    from app.modules.projects.models import Project
     seed(db)
     seed(db)  # second run must not duplicate
     count = db.execute(select(func.count()).select_from(User)).scalar_one()
     assert count == 4  # dev-admin, dev-manager, dev-operator, dev-viewer
+    # the catch-all overhead project is created exactly once, not per-seed.
+    assert db.execute(select(func.count()).select_from(Project)).scalar_one() == 1
 
 
 def test_seed_refuses_prod(monkeypatch: pytest.MonkeyPatch) -> None:

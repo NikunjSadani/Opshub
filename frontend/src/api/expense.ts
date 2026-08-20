@@ -67,6 +67,8 @@ export interface InvoiceOut {
   project_id: number | null;
   /** The tagged project's `<CLIENT_CODE>-<n>` code, e.g. "BRI-001". */
   project_code: string | null;
+  /** The tagged project's name, e.g. "General / Overhead". */
+  project_name: string | null;
   /** Cost-allocation: the payment method this invoice is tagged to. */
   payment_method_id: number | null;
   payment_method_name: string | null;
@@ -98,6 +100,7 @@ export interface PaymentMethodUpdate {
 export interface ProjectSpend {
   project_id: number | null;
   project_code: string | null;
+  project_name: string | null;
   /** PAISE. */
   total_paise: number;
   count: number;

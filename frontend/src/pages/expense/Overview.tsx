@@ -135,7 +135,11 @@ export function Overview() {
               headers={['Project', 'Spend']}
               rows={query.data.by_project.map((r) => ({
                 key: `p-${r.project_id ?? 'none'}`,
-                label: r.project_code ?? 'Unallocated',
+                label: r.project_code
+                  ? r.project_name
+                    ? `${r.project_code} — ${r.project_name}`
+                    : r.project_code
+                  : 'Unallocated',
                 total_paise: r.total_paise,
                 count: r.count,
               }))}

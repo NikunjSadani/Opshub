@@ -141,9 +141,8 @@ test.describe('Expense / cost-allocation', () => {
     await expect(page.getByText('Confirmed spend')).toBeVisible();
     // ...and the by-project / by-payment-method breakdowns (built only from
     // CONFIRMED invoices) attribute this spend to our project + method.
-    await expect(
-      page.getByRole('cell', { name: PROJECT_CODE, exact: true }),
-    ).toBeVisible();
+    // The by-project cell now reads "<code> — <name>", so match the code as a substring.
+    await expect(page.getByRole('cell', { name: PROJECT_CODE })).toBeVisible();
     await expect(page.getByRole('cell', { name: METHOD, exact: true })).toBeVisible();
   });
 });

@@ -706,6 +706,7 @@ def test_register_shows_allocation_and_filters(client: TestClient) -> None:
     rows = client.get("/api/v1/expense/invoices").json()
     by_num = {r["invoice_number"]: r for r in rows}
     assert by_num["INV-DEF"]["project_code"] == "TST-001"
+    assert by_num["INV-DEF"]["project_name"] == "Default Project"
     assert by_num["INV-DEF"]["payment_method_name"] == "Bank Transfer"
     assert by_num["INV-DEF"]["project_id"] == default_pid
     assert by_num["INV-DEF"]["payment_method_id"] == default_mid
@@ -757,6 +758,7 @@ def test_summary_aggregates_confirmed_only(client: TestClient) -> None:
     by_project = {row["project_code"]: row for row in s["by_project"]}
     assert by_project["TST-001"]["total_paise"] == 318000
     assert by_project["TST-001"]["count"] == 2
+    assert by_project["TST-001"]["project_name"] == "Default Project"  # name for the dashboard
     assert by_project["OTH-001"]["total_paise"] == 50000
     assert by_project["OTH-001"]["count"] == 1
 

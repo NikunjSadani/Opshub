@@ -212,7 +212,13 @@ export function Register() {
                   <Td>{inv.invoice_number ?? '—'}</Td>
                   <Td className="whitespace-nowrap">{formatDate(inv.invoice_date)}</Td>
                   <Td className="text-right tabular-nums">{formatPaise(inv.grand_total_paise)}</Td>
-                  <Td className="whitespace-nowrap">{inv.project_code ?? '—'}</Td>
+                  <Td className="whitespace-nowrap">
+                    {inv.project_code
+                      ? inv.project_name
+                        ? `${inv.project_code} — ${inv.project_name}`
+                        : inv.project_code
+                      : '—'}
+                  </Td>
                   <Td>{inv.payment_method_name ?? '—'}</Td>
                   <Td>
                     <Badge tone={INVOICE_STATUS_TONE[inv.status]}>
