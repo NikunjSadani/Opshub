@@ -29,6 +29,7 @@ from app.platform.models import LEVEL_RANK, Level, PlatformPerm, User
 CHALLAN = "document_automation"
 PROJECTS = "projects"
 EXPENSE = "expense_invoice"
+SALES_ORDERS = "sales_orders"
 
 
 @dataclass(frozen=True)
@@ -53,12 +54,20 @@ ACTION_CATALOG: dict[str, _ModuleReq | _PlatformReq] = {
     "masterdata.edit": _ModuleReq(CHALLAN, Level.MANAGE),
     "series.seed": _ModuleReq(CHALLAN, Level.MANAGE),
     "numbering.override": _ModuleReq(CHALLAN, Level.MANAGE),
-    # --- Projects ---
+    # --- Projects (incl. the promoted client master) ---
     "project.create": _ModuleReq(PROJECTS, Level.OPERATE),
     "project.manage": _ModuleReq(PROJECTS, Level.MANAGE),
+    "client.manage": _ModuleReq(PROJECTS, Level.MANAGE),
     # --- Expense / Invoice ---
     "expense.operate": _ModuleReq(EXPENSE, Level.OPERATE),
     "expense.delete": _ModuleReq(EXPENSE, Level.MANAGE),
+    # --- Sales Orders (Product Master, POs, quote search) ---
+    "po.create": _ModuleReq(SALES_ORDERS, Level.OPERATE),
+    "po.amend": _ModuleReq(SALES_ORDERS, Level.OPERATE),
+    "po.short_close": _ModuleReq(SALES_ORDERS, Level.MANAGE),
+    "po.void": _ModuleReq(SALES_ORDERS, Level.MANAGE),
+    "product.manage": _ModuleReq(SALES_ORDERS, Level.MANAGE),
+    "quote.search": _ModuleReq(SALES_ORDERS, Level.VIEW),
     # --- Platform (cross-cutting) ---
     "user.manage": _PlatformReq(PlatformPerm.IAM),
     "role.manage": _PlatformReq(PlatformPerm.IAM),

@@ -64,6 +64,11 @@ class NumberingCounter(Base):
     series: Mapped[str] = mapped_column(String(8), index=True)
     fy: Mapped[str] = mapped_column(String(7), index=True)  # "26-27"
     last_number: Mapped[int] = mapped_column(Integer, default=0)
+    # The issuer prefix embedded in `formatted`, set once when a series is seeded.
+    # Defaults to "GIF/DC" so the delivery-challan "L" series is byte-identical to
+    # before this column existed; our outbound invoice/credit-note series seed their
+    # own (e.g. "GIF" -> GIF/26-27/INV/000001).
+    prefix: Mapped[str] = mapped_column(String(16), default="GIF/DC")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )

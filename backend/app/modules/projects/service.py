@@ -22,12 +22,20 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date
+from typing import Final
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.modules.projects.models import Project, ProjectClient, ProjectStatus
+from app.modules.projects.models import (
+    ClientAddress,
+    ClientContact,
+    ClientGstin,
+    Project,
+    ProjectClient,
+    ProjectStatus,
+)
 from app.platform import audit
 
 logger = logging.getLogger(__name__)
@@ -58,6 +66,50 @@ class DuplicateClientCode(ProjectError):
 class ProjectIdContention(ProjectError):
     """Transient: a per-client project id couldn't be allocated after retries.
     The route maps this to 409 — the caller should simply retry."""
+
+
+class InvalidGstin(ProjectError):
+    """A GSTIN is malformed (not 15 alphanumeric chars). Route maps to 422."""
+
+
+class DuplicateClientGstin(ProjectError):
+    """The GSTIN already exists (active or not) for this client. Route maps to 409."""
+
+
+class ClientChildNotFound(ProjectError):
+    """A referenced gstin/address/contact row is missing. Route maps to 404."""
+
+
+class _Unset:
+    """Marker for 'argument not supplied' in a partial (PATCH) update, so we can
+    tell "leave unchanged" apart from "set to NULL" for a nullable column."""
+
+
+# A single shared instance; `Final` so mypy treats it as a constant sentinel.
+_UNSET: Final = _Unset()
+
+_GSTIN_RE = re.compile(r"^[0-9A-Z]{15}$")
+
+
+def _normalize_gstin(raw: str) -> str:
+    """Strip + upper a GSTIN and enforce the 15-char alphanumeric shape.
+
+    A malformed value raises `InvalidGstin` (route -> 422) BEFORE any DB write, so
+    the uniqueness/default machinery only ever sees well-formed identifiers.
+    """
+    gstin = raw.strip().upper()
+    if not _GSTIN_RE.match(gstin):
+        raise InvalidGstin("gstin must be exactly 15 alphanumeric characters")
+    return gstin
+
+
+def _opt(value: str | None) -> str | None:
+    """Trim an optional free-text field; an empty/whitespace value collapses to
+    None so blank input never persists as an empty string."""
+    if value is None:
+        return None
+    trimmed = value.strip()
+    return trimmed or None
 
 
 def _clean_name(name: str) -> str:
@@ -253,3 +305,436 @@ def set_status(
         detail={"status": status},
     )
     return project
+
+
+# --------------------------------------------------------------- client master
+#
+# The promoted `project_client` carries child GSTINs / addresses / contacts. All
+# edits are gated by `client.manage` at the route; the service enforces the data
+# invariants: GSTIN normalization + uniqueness, "at most one default per client
+# per child type", and soft-delete (never a hard DELETE).
+
+
+def get_client(db: Session, client_id: int) -> ProjectClient | None:
+    """Return the client row by id (active or not), or None. Used by detail + as
+    the parent lookup for every child mutation."""
+    return db.execute(
+        select(ProjectClient).where(ProjectClient.id == client_id)
+    ).scalar_one_or_none()
+
+
+def update_client(
+    db: Session,
+    *,
+    client: ProjectClient,
+    name: str | _Unset = _UNSET,
+    pan: str | None | _Unset = _UNSET,
+    credit_terms_days: int | None | _Unset = _UNSET,
+    active: bool | _Unset = _UNSET,
+    actor_uid: str | None = None,
+) -> ProjectClient:
+    """Patch a client's editable master fields. Only supplied args change; a
+    nullable field can be explicitly cleared by passing `None` (distinct from the
+    `_UNSET` "leave unchanged" default). PAN is normalized (strip+upper). Audited.
+    """
+    changed: dict[str, object | None] = {}
+    if not isinstance(name, _Unset):
+        cleaned = _clean_name(name)
+        if not cleaned:
+            raise ProjectError("name is required")
+        client.name = cleaned
+        changed["name"] = cleaned
+    if not isinstance(pan, _Unset):
+        client.pan = pan.strip().upper() or None if pan else None
+        changed["pan"] = client.pan
+    if not isinstance(credit_terms_days, _Unset):
+        if credit_terms_days is not None and credit_terms_days < 0:
+            raise ProjectError("credit_terms_days must be >= 0")
+        client.credit_terms_days = credit_terms_days
+        changed["credit_terms_days"] = credit_terms_days
+    if not isinstance(active, _Unset):
+        client.active = active
+        changed["active"] = active
+
+    db.flush()
+    audit.log(
+        db,
+        action="client.updated",
+        actor_uid=actor_uid,
+        entity="project_client",
+        entity_id=str(client.id),
+        detail={"changed": changed},
+    )
+    return client
+
+
+def _unset_sibling_defaults(
+    db: Session,
+    model: type[ClientGstin] | type[ClientAddress] | type[ClientContact],
+    *,
+    client_id: int,
+    keep_id: int,
+) -> None:
+    """Enforce "at most one default per client per child type": clear `is_default`
+    on every OTHER row of the same type under `client_id`. Runs in the caller's
+    transaction so the flip + the new default commit atomically."""
+    db.execute(
+        update(model)
+        .where(
+            model.client_id == client_id,
+            model.id != keep_id,
+            model.is_default.is_(True),
+        )
+        .values(is_default=False)
+        .execution_options(synchronize_session=False)
+    )
+
+
+# ------------------------------------------------------------------ gstins
+
+
+def add_gstin(
+    db: Session,
+    *,
+    client: ProjectClient,
+    gstin: str,
+    legal_name: str | None = None,
+    state_code: str | None = None,
+    is_default: bool = False,
+    actor_uid: str | None = None,
+) -> ClientGstin:
+    """Attach a GSTIN to a client. Normalizes + validates the 15-char shape, derives
+    `state_code` from the first two digits when not supplied, rejects a duplicate
+    `(client, gstin)` (`DuplicateClientGstin` -> 409), and enforces one default.
+    Audited.
+    """
+    normalized = _normalize_gstin(gstin)
+    derived_state = _opt(state_code) or normalized[:2]
+    row = ClientGstin(
+        client_id=client.id,
+        gstin=normalized,
+        legal_name=_opt(legal_name),
+        state_code=derived_state.upper(),
+        is_default=is_default,
+        created_by=actor_uid,
+    )
+    try:
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+    except IntegrityError as exc:
+        raise DuplicateClientGstin(
+            f"gstin {normalized} already exists for this client"
+        ) from exc
+    if is_default:
+        _unset_sibling_defaults(db, ClientGstin, client_id=client.id, keep_id=row.id)
+    audit.log(
+        db,
+        action="client.gstin_added",
+        actor_uid=actor_uid,
+        entity="client_gstin",
+        entity_id=str(row.id),
+        detail={"client_id": client.id, "gstin": normalized, "is_default": is_default},
+    )
+    return row
+
+
+def get_gstin(db: Session, gstin_id: int) -> ClientGstin | None:
+    return db.execute(
+        select(ClientGstin).where(ClientGstin.id == gstin_id)
+    ).scalar_one_or_none()
+
+
+def update_gstin(
+    db: Session,
+    *,
+    row: ClientGstin,
+    gstin: str | _Unset = _UNSET,
+    legal_name: str | None | _Unset = _UNSET,
+    state_code: str | None | _Unset = _UNSET,
+    is_default: bool | _Unset = _UNSET,
+    actor_uid: str | None = None,
+) -> ClientGstin:
+    """Patch a GSTIN row. A changed gstin value is re-normalized + re-checked for
+    uniqueness; setting `is_default=True` demotes the client's other GSTINs. Audited."""
+    if not isinstance(gstin, _Unset):
+        row.gstin = _normalize_gstin(gstin)
+    if not isinstance(legal_name, _Unset):
+        row.legal_name = _opt(legal_name)
+    if not isinstance(state_code, _Unset):
+        cleaned_state = _opt(state_code)
+        row.state_code = cleaned_state.upper() if cleaned_state else None
+    if not isinstance(is_default, _Unset):
+        row.is_default = is_default
+    try:
+        with db.begin_nested():
+            db.flush()
+    except IntegrityError as exc:
+        raise DuplicateClientGstin(
+            f"gstin {row.gstin} already exists for this client"
+        ) from exc
+    if row.is_default:
+        _unset_sibling_defaults(db, ClientGstin, client_id=row.client_id, keep_id=row.id)
+    audit.log(
+        db,
+        action="client.gstin_updated",
+        actor_uid=actor_uid,
+        entity="client_gstin",
+        entity_id=str(row.id),
+        detail={"client_id": row.client_id, "is_default": row.is_default},
+    )
+    return row
+
+
+def deactivate_gstin(
+    db: Session, *, row: ClientGstin, actor_uid: str | None = None
+) -> ClientGstin:
+    """Soft-delete a GSTIN (`active=False`); never a hard delete. Audited."""
+    row.active = False
+    row.is_default = False  # a retired GSTIN must not stay the default
+    db.flush()
+    audit.log(
+        db,
+        action="client.gstin_deactivated",
+        actor_uid=actor_uid,
+        entity="client_gstin",
+        entity_id=str(row.id),
+        detail={"client_id": row.client_id},
+    )
+    return row
+
+
+# ---------------------------------------------------------------- addresses
+
+
+def add_address(
+    db: Session,
+    *,
+    client: ProjectClient,
+    line1: str,
+    gstin_id: int | None = None,
+    label: str | None = None,
+    line2: str | None = None,
+    city: str | None = None,
+    state: str | None = None,
+    pincode: str | None = None,
+    is_default: bool = False,
+    actor_uid: str | None = None,
+) -> ClientAddress:
+    """Attach a billing/shipping address. An optional `gstin_id` must belong to the
+    same client (else `ClientChildNotFound`). Enforces one default. Audited."""
+    cleaned_line1 = _opt(line1)
+    if not cleaned_line1:
+        raise ProjectError("line1 is required")
+    if gstin_id is not None:
+        linked = get_gstin(db, gstin_id)
+        if linked is None or linked.client_id != client.id:
+            raise ClientChildNotFound(f"gstin {gstin_id} not found for this client")
+    row = ClientAddress(
+        client_id=client.id,
+        gstin_id=gstin_id,
+        label=_opt(label),
+        line1=cleaned_line1,
+        line2=_opt(line2),
+        city=_opt(city),
+        state=_opt(state),
+        pincode=_opt(pincode),
+        is_default=is_default,
+        created_by=actor_uid,
+    )
+    db.add(row)
+    db.flush()
+    if is_default:
+        _unset_sibling_defaults(db, ClientAddress, client_id=client.id, keep_id=row.id)
+    audit.log(
+        db,
+        action="client.address_added",
+        actor_uid=actor_uid,
+        entity="client_address",
+        entity_id=str(row.id),
+        detail={"client_id": client.id, "is_default": is_default},
+    )
+    return row
+
+
+def get_address(db: Session, address_id: int) -> ClientAddress | None:
+    return db.execute(
+        select(ClientAddress).where(ClientAddress.id == address_id)
+    ).scalar_one_or_none()
+
+
+def update_address(
+    db: Session,
+    *,
+    row: ClientAddress,
+    gstin_id: int | None | _Unset = _UNSET,
+    label: str | None | _Unset = _UNSET,
+    line1: str | _Unset = _UNSET,
+    line2: str | None | _Unset = _UNSET,
+    city: str | None | _Unset = _UNSET,
+    state: str | None | _Unset = _UNSET,
+    pincode: str | None | _Unset = _UNSET,
+    is_default: bool | _Unset = _UNSET,
+    actor_uid: str | None = None,
+) -> ClientAddress:
+    """Patch an address row; setting `is_default=True` demotes the client's others.
+    A changed `gstin_id` is re-validated against the same client. Audited."""
+    if not isinstance(gstin_id, _Unset):
+        if gstin_id is not None:
+            linked = get_gstin(db, gstin_id)
+            if linked is None or linked.client_id != row.client_id:
+                raise ClientChildNotFound(f"gstin {gstin_id} not found for this client")
+        row.gstin_id = gstin_id
+    if not isinstance(label, _Unset):
+        row.label = _opt(label)
+    if not isinstance(line1, _Unset):
+        cleaned = _opt(line1)
+        if not cleaned:
+            raise ProjectError("line1 is required")
+        row.line1 = cleaned
+    if not isinstance(line2, _Unset):
+        row.line2 = _opt(line2)
+    if not isinstance(city, _Unset):
+        row.city = _opt(city)
+    if not isinstance(state, _Unset):
+        row.state = _opt(state)
+    if not isinstance(pincode, _Unset):
+        row.pincode = _opt(pincode)
+    if not isinstance(is_default, _Unset):
+        row.is_default = is_default
+    db.flush()
+    if row.is_default:
+        _unset_sibling_defaults(db, ClientAddress, client_id=row.client_id, keep_id=row.id)
+    audit.log(
+        db,
+        action="client.address_updated",
+        actor_uid=actor_uid,
+        entity="client_address",
+        entity_id=str(row.id),
+        detail={"client_id": row.client_id, "is_default": row.is_default},
+    )
+    return row
+
+
+def deactivate_address(
+    db: Session, *, row: ClientAddress, actor_uid: str | None = None
+) -> ClientAddress:
+    """Soft-delete an address (`active=False`); never a hard delete. Audited."""
+    row.active = False
+    row.is_default = False
+    db.flush()
+    audit.log(
+        db,
+        action="client.address_deactivated",
+        actor_uid=actor_uid,
+        entity="client_address",
+        entity_id=str(row.id),
+        detail={"client_id": row.client_id},
+    )
+    return row
+
+
+# ----------------------------------------------------------------- contacts
+
+
+def add_contact(
+    db: Session,
+    *,
+    client: ProjectClient,
+    name: str,
+    email: str | None = None,
+    phone: str | None = None,
+    designation: str | None = None,
+    is_default: bool = False,
+    actor_uid: str | None = None,
+) -> ClientContact:
+    """Attach a point-of-contact. Enforces one default per client. Audited."""
+    cleaned_name = _opt(name)
+    if not cleaned_name:
+        raise ProjectError("name is required")
+    row = ClientContact(
+        client_id=client.id,
+        name=cleaned_name,
+        email=_opt(email),
+        phone=_opt(phone),
+        designation=_opt(designation),
+        is_default=is_default,
+        created_by=actor_uid,
+    )
+    db.add(row)
+    db.flush()
+    if is_default:
+        _unset_sibling_defaults(db, ClientContact, client_id=client.id, keep_id=row.id)
+    audit.log(
+        db,
+        action="client.contact_added",
+        actor_uid=actor_uid,
+        entity="client_contact",
+        entity_id=str(row.id),
+        detail={"client_id": client.id, "is_default": is_default},
+    )
+    return row
+
+
+def get_contact(db: Session, contact_id: int) -> ClientContact | None:
+    return db.execute(
+        select(ClientContact).where(ClientContact.id == contact_id)
+    ).scalar_one_or_none()
+
+
+def update_contact(
+    db: Session,
+    *,
+    row: ClientContact,
+    name: str | _Unset = _UNSET,
+    email: str | None | _Unset = _UNSET,
+    phone: str | None | _Unset = _UNSET,
+    designation: str | None | _Unset = _UNSET,
+    is_default: bool | _Unset = _UNSET,
+    actor_uid: str | None = None,
+) -> ClientContact:
+    """Patch a contact row; setting `is_default=True` demotes the client's others.
+    Audited."""
+    if not isinstance(name, _Unset):
+        cleaned = _opt(name)
+        if not cleaned:
+            raise ProjectError("name is required")
+        row.name = cleaned
+    if not isinstance(email, _Unset):
+        row.email = _opt(email)
+    if not isinstance(phone, _Unset):
+        row.phone = _opt(phone)
+    if not isinstance(designation, _Unset):
+        row.designation = _opt(designation)
+    if not isinstance(is_default, _Unset):
+        row.is_default = is_default
+    db.flush()
+    if row.is_default:
+        _unset_sibling_defaults(db, ClientContact, client_id=row.client_id, keep_id=row.id)
+    audit.log(
+        db,
+        action="client.contact_updated",
+        actor_uid=actor_uid,
+        entity="client_contact",
+        entity_id=str(row.id),
+        detail={"client_id": row.client_id, "is_default": row.is_default},
+    )
+    return row
+
+
+def deactivate_contact(
+    db: Session, *, row: ClientContact, actor_uid: str | None = None
+) -> ClientContact:
+    """Soft-delete a contact (`active=False`); never a hard delete. Audited."""
+    row.active = False
+    row.is_default = False
+    db.flush()
+    audit.log(
+        db,
+        action="client.contact_deactivated",
+        actor_uid=actor_uid,
+        entity="client_contact",
+        entity_id=str(row.id),
+        detail={"client_id": row.client_id},
+    )
+    return row

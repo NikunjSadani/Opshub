@@ -81,11 +81,12 @@ Case-insensitive uniqueness on the natural identity uses a **`lower(...)` functi
 ### 5c. Purchase order + line items — `sales_orders` module
 
 ```
-purchase_order  (id, po_number String uniq, client_id FK, client_gstin_id FK,
+purchase_order  (id, po_number String, client_id FK, client_gstin_id FK NULL,
                  project_id FK→project, po_date Date, expected_procurement_date Date|NULL,
                  status String(16) [DRAFT|CONFIRMED|IN_PROGRESS|CLOSED|CANCELLED],
-                 soft_copy_file_id FK→files_stored_file|NULL,
+                 soft_copy_file_id FK→files_stored_file|NULL, notes String|NULL,
                  close_reason String(500)|NULL, closed_by/at, created_by/at)
+                 -- unique(client_id, po_number)
 
 po_line_item    (id, po_id FK CASCADE, product_id FK→product, description String(500),
                  uom String(20), ordered_qty Numeric,
@@ -98,7 +99,7 @@ po_line_item    (id, po_id FK CASCADE, product_id FK→product, description Stri
 po_amendment    (id, po_id FK, version int, summary String(500),
                  snapshot JSON, created_by/at)   -- immutable, versioned (never overwrite)
 ```
-`po_number` is minted from the numbering engine (§11). One project may have several POs; each PO belongs to one project. Bulk Excel upload **and** manual entry both land here; the Excel path reuses the resume-aware, dedup-by-identity+byte-hash discipline already proven on challan/expense (never silently drop a row).
+`po_number` is the **client's own PO reference** (received from the client, entered/uploaded — **not** minted by us), unique within a client. One project may have several POs; each PO belongs to one project. Bulk Excel upload **and** manual entry both land here; the Excel path reuses the resume-aware, dedup-by-identity+byte-hash discipline already proven on challan/expense (never silently drop a row).
 
 ### 5d. Delivery-challan linkage (change to the challan module)
 
@@ -232,7 +233,7 @@ Administrator (`role.is_system`) keeps MANAGE-everywhere + all platform perms. `
 
 ## 11. Numbering reuse (+ one small generalization)
 
-The numbering **ledger** (`numbering_counter` + `numbering_allocation`, `seed_series`/`allocate`/`issue`/`void`, `entity`/`entity_id` binding) is reused as-is for **PO / invoice / credit-note** series — each a distinct `series` (`"PO"`, `"INV"`, `"CN"`) seeded once via `seed_series`, then `allocate` + `issue(entity="purchase_order"|"billing_invoice"|"credit_note", entity_id=...)`. **Honest caveat:** `format_number` currently hardcodes `_ISSUER_PREFIX = "GIF/DC"` (challan format). PO/INV/CN need a **per-series prefix** — a small, real generalization of the formatter (make the prefix part of series config), **not** free. Scoped into the foundation wave.
+The numbering **ledger** (`numbering_counter` + `numbering_allocation`, `seed_series`/`allocate`/`issue`/`void`, `entity`/`entity_id` binding) is reused for **our outbound invoice / credit-note** numbers — each a distinct `series` (`"INV"`, `"CN"`) seeded once via `seed_series`, then `allocate` + `issue(entity="billing_invoice"|"credit_note", entity_id=...)`. (The **PO number is client-supplied**, so it is NOT minted here.) **Generalization (done in the foundation wave, Stage 0):** `format_number` hardcoded `_ISSUER_PREFIX = "GIF/DC"` (challan format); the counter now carries a per-series **`prefix`** (default `"GIF/DC"`, backward-compatible with the "L" challan series) so INV/CN can seed their own (`"GIF"` → `GIF/26-27/INV/000001`).
 
 ## 12. Cross-cutting principles (apply to every wave)
 

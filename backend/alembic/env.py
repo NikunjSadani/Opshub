@@ -19,6 +19,7 @@ import app.modules.files.models  # noqa: E402,F401
 import app.modules.masterdata.models  # noqa: E402,F401
 import app.modules.numbering.models  # noqa: E402,F401
 import app.modules.projects.models  # noqa: E402,F401
+import app.modules.sales_orders.models  # noqa: E402,F401
 import app.platform.jobs  # noqa: E402,F401
 import app.platform.models  # noqa: E402,F401
 # NOTE: import every model-defining module here before autogenerate.

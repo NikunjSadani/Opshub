@@ -16,7 +16,7 @@ from app.platform.models import (
     Role,
     RoleModulePermission,
 )
-from app.platform.rbac import CHALLAN, EXPENSE, PROJECTS
+from app.platform.rbac import CHALLAN, EXPENSE, PROJECTS, SALES_ORDERS
 
 ADMINISTRATOR = "Administrator"
 
@@ -36,7 +36,8 @@ _PRESETS: dict[str, tuple[str, dict[str, Level]]] = {
     ),
     "Viewer": (
         "Read-only access to every module.",
-        {CHALLAN: Level.VIEW, PROJECTS: Level.VIEW, EXPENSE: Level.VIEW},
+        {CHALLAN: Level.VIEW, PROJECTS: Level.VIEW, EXPENSE: Level.VIEW,
+         SALES_ORDERS: Level.VIEW},
     ),
 }
 

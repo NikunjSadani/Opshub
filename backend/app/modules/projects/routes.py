@@ -14,7 +14,7 @@ letters and unique; project ids are `<CLIENT_CODE>-<seq>` minted per client.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -50,6 +50,12 @@ def _require_admin(user: User) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "project.manage requires ADMIN")
 
 
+def _require_client_manage(user: User) -> None:
+    """Client-master writes require PROJECTS MANAGE (`client.manage`)."""
+    if not can(user, "client.manage"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "client.manage required")
+
+
 # ------------------------------------------------------------------- schemas
 
 class ClientIn(BaseModel):
@@ -64,6 +70,8 @@ class ClientOut(BaseModel):
     id: int
     name: str
     code: str
+    pan: str | None = None
+    credit_terms_days: int | None = None
     active: bool
 
 
@@ -237,3 +245,403 @@ def patch_project(
     db.commit()
     db.refresh(project)
     return _project_out(project)
+
+
+# ------------------------------------------------------------- client master
+#
+# The promoted client master: a client owns child GSTINs / addresses / contacts.
+# Reads need the `projects` module (VIEW); every write needs `client.manage`
+# (PROJECTS MANAGE) and is audited by the service. GSTINs are 15-char alphanumeric
+# and unique per client; deletes are soft (active=False).
+
+
+class ClientUpdateIn(BaseModel):
+    # All optional: a PATCH only changes the fields actually supplied. `pan`/
+    # `credit_terms_days` are nullable, so sending an explicit null CLEARS them
+    # (distinct from omitting the key, which leaves the value unchanged).
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    pan: str | None = Field(default=None, max_length=10)
+    credit_terms_days: int | None = Field(default=None, ge=0)
+    active: bool | None = None
+
+
+class GstinIn(BaseModel):
+    gstin: str = Field(min_length=1, max_length=15)
+    legal_name: str | None = Field(default=None, max_length=200)
+    state_code: str | None = Field(default=None, max_length=2)
+    is_default: bool = False
+
+
+class GstinUpdateIn(BaseModel):
+    gstin: str | None = Field(default=None, min_length=1, max_length=15)
+    legal_name: str | None = Field(default=None, max_length=200)
+    state_code: str | None = Field(default=None, max_length=2)
+    is_default: bool | None = None
+
+
+class AddressIn(BaseModel):
+    gstin_id: int | None = None
+    label: str | None = Field(default=None, max_length=120)
+    line1: str = Field(min_length=1, max_length=300)
+    line2: str | None = Field(default=None, max_length=300)
+    city: str | None = Field(default=None, max_length=120)
+    state: str | None = Field(default=None, max_length=120)
+    pincode: str | None = Field(default=None, max_length=10)
+    is_default: bool = False
+
+
+class AddressUpdateIn(BaseModel):
+    gstin_id: int | None = None
+    label: str | None = Field(default=None, max_length=120)
+    line1: str | None = Field(default=None, min_length=1, max_length=300)
+    line2: str | None = Field(default=None, max_length=300)
+    city: str | None = Field(default=None, max_length=120)
+    state: str | None = Field(default=None, max_length=120)
+    pincode: str | None = Field(default=None, max_length=10)
+    is_default: bool | None = None
+
+
+class ContactIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    email: str | None = Field(default=None, max_length=320)
+    phone: str | None = Field(default=None, max_length=20)
+    designation: str | None = Field(default=None, max_length=120)
+    is_default: bool = False
+
+
+class ContactUpdateIn(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    email: str | None = Field(default=None, max_length=320)
+    phone: str | None = Field(default=None, max_length=20)
+    designation: str | None = Field(default=None, max_length=120)
+    is_default: bool | None = None
+
+
+class GstinOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    gstin: str
+    legal_name: str | None
+    state_code: str | None
+    is_default: bool
+    active: bool
+
+
+class AddressOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    gstin_id: int | None
+    label: str | None
+    line1: str
+    line2: str | None
+    city: str | None
+    state: str | None
+    pincode: str | None
+    is_default: bool
+    active: bool
+
+
+class ContactOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    email: str | None
+    phone: str | None
+    designation: str | None
+    is_default: bool
+    active: bool
+
+
+class ClientDetailOut(BaseModel):
+    id: int
+    name: str
+    code: str
+    pan: str | None
+    credit_terms_days: int | None
+    active: bool
+    gstins: list[GstinOut]
+    addresses: list[AddressOut]
+    contacts: list[ContactOut]
+
+
+def _default_first(rows: list[Any]) -> list[Any]:
+    """Order children for display: the default first, then by id (stable)."""
+    return sorted(rows, key=lambda r: (not r.is_default, r.id))
+
+
+def _client_detail_out(client: ProjectClient) -> ClientDetailOut:
+    """Serialize a client with its ACTIVE children (soft-deleted rows are hidden)."""
+    gstins = [g for g in client.gstins if g.active]
+    addresses = [a for a in client.addresses if a.active]
+    contacts = [c for c in client.contacts if c.active]
+    return ClientDetailOut(
+        id=client.id,
+        name=client.name,
+        code=client.code,
+        pan=client.pan,
+        credit_terms_days=client.credit_terms_days,
+        active=client.active,
+        gstins=[GstinOut.model_validate(g) for g in _default_first(gstins)],
+        addresses=[AddressOut.model_validate(a) for a in _default_first(addresses)],
+        contacts=[ContactOut.model_validate(c) for c in _default_first(contacts)],
+    )
+
+
+def _load_client(db: Session, client_id: int) -> ProjectClient:
+    client = service.get_client(db, client_id)
+    if client is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "client not found")
+    return client
+
+
+def _map_client_error(exc: service.ProjectError) -> HTTPException:
+    """Translate a service typed error to the right HTTP status."""
+    if isinstance(exc, service.DuplicateClientGstin):
+        return HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    if isinstance(exc, service.ClientChildNotFound):
+        return HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
+    # InvalidGstin + any other ProjectError (bad name/terms) -> 422
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
+
+
+@router.get("/projects/clients/{client_id}", response_model=ClientDetailOut)
+def get_client_detail(
+    client_id: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ClientDetailOut:
+    _require_module(user)
+    client = _load_client(db, client_id)
+    return _client_detail_out(client)
+
+
+@router.patch("/projects/clients/{client_id}", response_model=ClientOut)
+def update_client(
+    client_id: int,
+    body: ClientUpdateIn,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ProjectClient:
+    _require_client_manage(user)
+    client = _load_client(db, client_id)
+    try:
+        service.update_client(
+            db,
+            client=client,
+            actor_uid=user.firebase_uid,
+            **body.model_dump(exclude_unset=True),
+        )
+    except service.ProjectError as exc:
+        raise _map_client_error(exc) from exc
+    db.commit()
+    db.refresh(client)
+    return client
+
+
+# ------------------------------------------------------------------ gstins
+
+
+@router.post(
+    "/projects/clients/{client_id}/gstins", response_model=GstinOut, status_code=201
+)
+def add_client_gstin(
+    client_id: int,
+    body: GstinIn,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> GstinOut:
+    _require_client_manage(user)
+    client = _load_client(db, client_id)
+    try:
+        row = service.add_gstin(
+            db,
+            client=client,
+            gstin=body.gstin,
+            legal_name=body.legal_name,
+            state_code=body.state_code,
+            is_default=body.is_default,
+            actor_uid=user.firebase_uid,
+        )
+    except service.ProjectError as exc:
+        raise _map_client_error(exc) from exc
+    db.commit()
+    db.refresh(row)
+    return GstinOut.model_validate(row)
+
+
+@router.patch("/projects/clients/gstins/{gstin_id}", response_model=GstinOut)
+def update_client_gstin(
+    gstin_id: int,
+    body: GstinUpdateIn,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> GstinOut:
+    _require_client_manage(user)
+    row = service.get_gstin(db, gstin_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "gstin not found")
+    try:
+        service.update_gstin(
+            db, row=row, actor_uid=user.firebase_uid, **body.model_dump(exclude_unset=True)
+        )
+    except service.ProjectError as exc:
+        raise _map_client_error(exc) from exc
+    db.commit()
+    db.refresh(row)
+    return GstinOut.model_validate(row)
+
+
+@router.delete("/projects/clients/gstins/{gstin_id}", response_model=GstinOut)
+def deactivate_client_gstin(
+    gstin_id: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> GstinOut:
+    _require_client_manage(user)
+    row = service.get_gstin(db, gstin_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "gstin not found")
+    service.deactivate_gstin(db, row=row, actor_uid=user.firebase_uid)
+    db.commit()
+    db.refresh(row)
+    return GstinOut.model_validate(row)
+
+
+# ---------------------------------------------------------------- addresses
+
+
+@router.post(
+    "/projects/clients/{client_id}/addresses", response_model=AddressOut, status_code=201
+)
+def add_client_address(
+    client_id: int,
+    body: AddressIn,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AddressOut:
+    _require_client_manage(user)
+    client = _load_client(db, client_id)
+    try:
+        row = service.add_address(
+            db,
+            client=client,
+            line1=body.line1,
+            gstin_id=body.gstin_id,
+            label=body.label,
+            line2=body.line2,
+            city=body.city,
+            state=body.state,
+            pincode=body.pincode,
+            is_default=body.is_default,
+            actor_uid=user.firebase_uid,
+        )
+    except service.ProjectError as exc:
+        raise _map_client_error(exc) from exc
+    db.commit()
+    db.refresh(row)
+    return AddressOut.model_validate(row)
+
+
+@router.patch("/projects/clients/addresses/{address_id}", response_model=AddressOut)
+def update_client_address(
+    address_id: int,
+    body: AddressUpdateIn,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AddressOut:
+    _require_client_manage(user)
+    row = service.get_address(db, address_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "address not found")
+    try:
+        service.update_address(
+            db, row=row, actor_uid=user.firebase_uid, **body.model_dump(exclude_unset=True)
+        )
+    except service.ProjectError as exc:
+        raise _map_client_error(exc) from exc
+    db.commit()
+    db.refresh(row)
+    return AddressOut.model_validate(row)
+
+
+@router.delete("/projects/clients/addresses/{address_id}", response_model=AddressOut)
+def deactivate_client_address(
+    address_id: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AddressOut:
+    _require_client_manage(user)
+    row = service.get_address(db, address_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "address not found")
+    service.deactivate_address(db, row=row, actor_uid=user.firebase_uid)
+    db.commit()
+    db.refresh(row)
+    return AddressOut.model_validate(row)
+
+
+# ----------------------------------------------------------------- contacts
+
+
+@router.post(
+    "/projects/clients/{client_id}/contacts", response_model=ContactOut, status_code=201
+)
+def add_client_contact(
+    client_id: int,
+    body: ContactIn,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ContactOut:
+    _require_client_manage(user)
+    client = _load_client(db, client_id)
+    row = service.add_contact(
+        db,
+        client=client,
+        name=body.name,
+        email=body.email,
+        phone=body.phone,
+        designation=body.designation,
+        is_default=body.is_default,
+        actor_uid=user.firebase_uid,
+    )
+    db.commit()
+    db.refresh(row)
+    return ContactOut.model_validate(row)
+
+
+@router.patch("/projects/clients/contacts/{contact_id}", response_model=ContactOut)
+def update_client_contact(
+    contact_id: int,
+    body: ContactUpdateIn,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ContactOut:
+    _require_client_manage(user)
+    row = service.get_contact(db, contact_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "contact not found")
+    try:
+        service.update_contact(
+            db, row=row, actor_uid=user.firebase_uid, **body.model_dump(exclude_unset=True)
+        )
+    except service.ProjectError as exc:
+        raise _map_client_error(exc) from exc
+    db.commit()
+    db.refresh(row)
+    return ContactOut.model_validate(row)
+
+
+@router.delete("/projects/clients/contacts/{contact_id}", response_model=ContactOut)
+def deactivate_client_contact(
+    contact_id: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ContactOut:
+    _require_client_manage(user)
+    row = service.get_contact(db, contact_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "contact not found")
+    service.deactivate_contact(db, row=row, actor_uid=user.firebase_uid)
+    db.commit()
+    db.refresh(row)
+    return ContactOut.model_validate(row)

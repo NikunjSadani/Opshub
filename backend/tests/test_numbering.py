@@ -83,6 +83,37 @@ def test_format_number() -> None:
     assert service.format_number("L", "26-27", 1) == "GIF/DC/26-27/L/000001"
 
 
+def test_format_number_custom_prefix() -> None:
+    # The default prefix keeps the challan format; a custom prefix (e.g. for our
+    # outbound invoice/credit-note series) replaces only the issuer segment.
+    assert service.format_number("INV", "26-27", 1, "GIF") == "GIF/26-27/INV/000001"
+    assert service.format_number("CN", "26-27", 42, "GIF") == "GIF/26-27/CN/000042"
+
+
+def test_seeded_prefix_stamps_allocations(db: Session) -> None:
+    # A series seeded with a custom prefix stamps that prefix onto its allocations,
+    # while the challan "L" series (default prefix) is unchanged — the two coexist.
+    service.seed_series(db, "INV", fy="26-27", last_number=0, prefix="GIF")
+    _configure(db, "L")  # default "GIF/DC"
+    inv = service.allocate(db, "INV", fy="26-27")
+    ell = service.allocate(db, "L", fy="26-27")
+    assert inv.formatted == "GIF/26-27/INV/000001"
+    assert ell.formatted == "GIF/DC/26-27/L/000001"
+
+
+def test_seed_does_not_rewrite_existing_prefix(db: Session) -> None:
+    # Re-seeding last_number on an existing series must NOT change its issuer prefix.
+    service.seed_series(db, "INV", fy="26-27", last_number=0, prefix="GIF")
+    service.seed_series(db, "INV", fy="26-27", last_number=5, prefix="OTHER")
+    counter = db.execute(
+        select(NumberingCounter).where(
+            NumberingCounter.series == "INV", NumberingCounter.fy == "26-27"
+        )
+    ).scalar_one()
+    assert counter.prefix == "GIF"
+    assert counter.last_number == 5
+
+
 # ----------------------------------------------------------------- allocate
 
 def test_allocate_requires_configured_series(db: Session) -> None:

@@ -30,6 +30,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
 
+# Client-master child tables (`client_gstin` / `client_address` / `client_contact`)
+# live in THIS module because they belong to `project_client` — the promoted client
+# master. A client may hold MANY GSTINs (state-wise registrations) and MANY billing
+# addresses/contacts. Edits are gated by `projects` MANAGE (`client.manage`). Other
+# modules (e.g. sales_orders.purchase_order) reference a client_gstin by ID via a
+# plain FK and resolve by join — no cross-module ORM relationship.
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
@@ -53,11 +60,98 @@ class ProjectClient(Base):
     # Exactly 3 uppercase A-Z (validated in the service); unique so a code maps to
     # exactly one client and the generated project ids are unambiguous.
     code: Mapped[str] = mapped_column(String(3), unique=True, index=True)
+    # Promoted client-master fields (inc 28). PAN is the org's golden key; credit
+    # terms (days) drive invoice due-date + AR aging downstream. Both nullable so
+    # existing clients (incl. the GEN overhead client) are unaffected.
+    pan: Mapped[str | None] = mapped_column(String(10))
+    credit_terms_days: Mapped[int | None] = mapped_column(Integer)
     active: Mapped[bool] = mapped_column(default=True)
     created_by: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     projects: Mapped[list["Project"]] = relationship(back_populates="client")
+    gstins: Mapped[list["ClientGstin"]] = relationship(
+        back_populates="client", cascade="all, delete-orphan"
+    )
+    addresses: Mapped[list["ClientAddress"]] = relationship(
+        back_populates="client", cascade="all, delete-orphan"
+    )
+    contacts: Mapped[list["ClientContact"]] = relationship(
+        back_populates="client", cascade="all, delete-orphan"
+    )
+
+
+class ClientGstin(Base):
+    """One GST registration held by a client (state-wise). A client may hold many."""
+
+    __tablename__ = "client_gstin"
+    __table_args__ = (
+        # A GSTIN appears at most once per client (normalized upper-case in the service).
+        UniqueConstraint("client_id", "gstin", name="uq_client_gstin"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("project_client.id", ondelete="CASCADE"), index=True
+    )
+    gstin: Mapped[str] = mapped_column(String(15))
+    legal_name: Mapped[str | None] = mapped_column(String(200))
+    state_code: Mapped[str | None] = mapped_column(String(2))  # first 2 digits of GSTIN
+    is_default: Mapped[bool] = mapped_column(default=False)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    client: Mapped[ProjectClient] = relationship(back_populates="gstins")
+
+
+class ClientAddress(Base):
+    """A billing/shipping address for a client, optionally tied to one GST registration."""
+
+    __tablename__ = "client_address"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("project_client.id", ondelete="CASCADE"), index=True
+    )
+    # Optional link to the GSTIN this address registers under (state-wise). SET NULL
+    # so removing a GSTIN never cascades away an address the client still uses.
+    gstin_id: Mapped[int | None] = mapped_column(
+        ForeignKey("client_gstin.id", ondelete="SET NULL"), index=True
+    )
+    label: Mapped[str | None] = mapped_column(String(120))  # e.g. "Head Office"
+    line1: Mapped[str] = mapped_column(String(300))
+    line2: Mapped[str | None] = mapped_column(String(300))
+    city: Mapped[str | None] = mapped_column(String(120))
+    state: Mapped[str | None] = mapped_column(String(120))
+    pincode: Mapped[str | None] = mapped_column(String(10))
+    is_default: Mapped[bool] = mapped_column(default=False)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    client: Mapped[ProjectClient] = relationship(back_populates="addresses")
+
+
+class ClientContact(Base):
+    """A point-of-contact person at a client."""
+
+    __tablename__ = "client_contact"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    client_id: Mapped[int] = mapped_column(
+        ForeignKey("project_client.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    email: Mapped[str | None] = mapped_column(String(320))
+    phone: Mapped[str | None] = mapped_column(String(20))
+    designation: Mapped[str | None] = mapped_column(String(120))
+    is_default: Mapped[bool] = mapped_column(default=False)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    client: Mapped[ProjectClient] = relationship(back_populates="contacts")
 
 
 class Project(Base):

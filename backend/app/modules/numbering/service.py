@@ -112,9 +112,14 @@ def current_fy() -> str:
     return fy_for(datetime.now(UTC))
 
 
-def format_number(series: str, fy: str, number: int) -> str:
-    """`GIF/DC/26-27/L/000189` — FY embedded, series letter, zero-padded number."""
-    return f"{_ISSUER_PREFIX}/{fy}/{series}/{number:0{_NUMBER_WIDTH}d}"
+def format_number(series: str, fy: str, number: int, prefix: str = _ISSUER_PREFIX) -> str:
+    """`GIF/DC/26-27/L/000189` — issuer prefix, FY, series, zero-padded number.
+
+    `prefix` defaults to the challan issuer "GIF/DC" so the delivery-challan format
+    (and every existing caller/test) is unchanged; a series configured with another
+    prefix (e.g. "GIF" for invoices) formats as `GIF/26-27/INV/000001`.
+    """
+    return f"{prefix}/{fy}/{series}/{number:0{_NUMBER_WIDTH}d}"
 
 
 # -------------------------------------------------------------------- allocate
@@ -131,19 +136,24 @@ def _lock_counter(db: Session, series: str, fy: str) -> NumberingCounter | None:
     ).scalar_one_or_none()
 
 
-def _lock_or_create_counter(db: Session, series: str, fy: str) -> NumberingCounter:
+def _lock_or_create_counter(
+    db: Session, series: str, fy: str, prefix: str = _ISSUER_PREFIX
+) -> NumberingCounter:
     """Return the (series, fy) counter row, locked FOR UPDATE, creating it at 0.
 
     Used by seeding — the one place allowed to bring a series into existence. On
     Postgres the row-lock serializes concurrent writers; on the create path a
     concurrent insert is contained with a SAVEPOINT + unique(series, fy): the
     loser rolls back its savepoint and re-selects the winner's row (locked).
+
+    `prefix` is applied only when the counter is CREATED — an existing series keeps
+    its configured prefix, so a re-seed of `last_number` never rewrites the issuer.
     """
     counter = _lock_counter(db, series, fy)
     if counter is not None:
         return counter
 
-    counter = NumberingCounter(series=series, fy=fy, last_number=0)
+    counter = NumberingCounter(series=series, fy=fy, last_number=0, prefix=prefix)
     try:
         with db.begin_nested():  # `with` releases the savepoint on success (no leak)
             db.add(counter)
@@ -240,7 +250,7 @@ def allocate(
             series=series,
             fy=fy,
             number=number,
-            formatted=format_number(series, fy, number),
+            formatted=format_number(series, fy, number, counter.prefix),
             status=AllocationStatus.RESERVED.value,
             idempotency_key=idempotency_key,
             reserved_by=reserved_by,
@@ -383,6 +393,7 @@ def seed_series(
     *,
     fy: str | None = None,
     last_number: int,
+    prefix: str = _ISSUER_PREFIX,
     actor_uid: str | None = None,
 ) -> NumberingCounter:
     """Mode-2 custom-start: set the high-water mark for (series, fy).
@@ -393,6 +404,10 @@ def seed_series(
     highest ACTIVE number already allocated for (series, fy) and >= the current
     high-water mark (I2: monotonic, no going backwards under issued numbers). A
     fat-finger past the sequence width is rejected up front.
+
+    `prefix` sets the issuer embedded in `formatted`, applied only when the series
+    is first created (an existing counter keeps its prefix). Defaults to "GIF/DC"
+    so existing callers (the challan "L" series) are unchanged.
     """
     series = _clean_series(series)
     fy = _clean_fy(fy)
@@ -401,7 +416,7 @@ def seed_series(
     if last_number > _MAX_NUMBER:
         raise NumberingError(f"last_number exceeds the {_NUMBER_WIDTH}-digit range")
 
-    counter = _lock_or_create_counter(db, series, fy)
+    counter = _lock_or_create_counter(db, series, fy, prefix)
     floor = max(counter.last_number, _max_active_number(db, series, fy))
     if last_number < floor:
         raise NumberingError(
