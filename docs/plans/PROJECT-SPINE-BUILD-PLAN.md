@@ -34,17 +34,19 @@ Critical path: Stage 0 (me) → PO+line-items BE (#3, heaviest) → integrate/ga
 | # | Submodule | Builder | Deliverable | Status |
 |---|---|---|---|---|
 | 0 | Schema + migration + numbering prefix + RBAC wiring + contract freeze | Me | new `sales_orders` module tables (`product`, `purchase_order`, `po_line_item`, `po_amendment`), extended `project_client` + `client_gstin/address/contact`, per-series numbering prefix, RBAC module + action catalog | ✅ migration `6bb6cbb06e4c`; gate BE ruff 0 · mypy 0 · pytest 414 · no-drift |
-| 1 | Product Master BE | Agent | CRUD service+routes, `lower()` unique index, autocomplete | ☐ |
-| 2 | Client Master BE | Agent | client + child GSTIN/address/contact + credit-terms, defaults | ☐ |
-| 3 | PO + line items BE | Agent | service (numbering, amendments), bulk Excel + manual entry (resume-aware, dedup), soft-copy upload, over-order guards | ☐ |
-| 4 | Quote/price-book search BE | Agent | search endpoint: multi-keyword + facets + price-trend + qty context | ☐ |
-| 5 | Product Master FE | Agent | list + add/edit screen | ☐ |
-| 6 | Client Master FE | Agent | multi-GSTIN/address/contact editor | ☐ |
-| 7 | PO entry FE | Agent | PO header + line-item grid + Excel upload + soft-copy upload | ☐ |
-| 8 | Quote search FE | Agent | search screen (filters, price history, trend) | ☐ |
-| A1 | Correctness audit | Agent | adversarial defects + failure scenarios | ☐ |
-| A2 | UI/UX audit | Agent | states/empty/async/copy/a11y | ☐ |
-| A3 | E2E | Agent | Playwright: product→client→PO→search | ☐ |
+| 1 | Product Master BE | Agent | CRUD service+routes, `lower()` unique index, autocomplete | ✅ 8 tests |
+| 2 | Client Master BE | Agent | client + child GSTIN/address/contact + credit-terms, defaults | ✅ 12 tests |
+| 3 | PO + line items BE | Agent | service (numbering, amendments), bulk Excel + manual entry (resume-aware, dedup), soft-copy upload, over-order guards | ✅ 15 tests |
+| 4 | Quote/price-book search BE | Agent | search endpoint: multi-keyword + facets + price-trend + qty context | ✅ 10 tests |
+| 5 | Product Master FE | Agent | list + add/edit screen | ✅ 5 tests |
+| 6 | Client Master FE | Agent | multi-GSTIN/address/contact editor | ✅ 5 tests |
+| 7 | PO entry FE | Agent | PO header + line-item grid + Excel upload (+ soft-copy on detail) | ✅ 7 tests |
+| 8 | Quote search FE | Agent | search screen (filters, price history, trend) | ✅ 4 tests |
+| A1 | Correctness audit | Agent | found H1 (cross-client project) + M1/M2/L2/L3 — **all fixed** + 4 regression tests | ✅ |
+| A2 | UI/UX audit | Agent | states/empty/async/copy/a11y | ⏳ running |
+| A3 | E2E | Agent | Playwright: product→client→PO→short-close/void→search + RBAC | ⏳ running |
+
+**Integration gate (BE+FE):** ✅ BE ruff·mypy·**pytest 463**·no-drift · FE typecheck·build·**vitest 94** · runtime-verified in-browser (all screens render live data, 0 console errors). Commits `44482d9` (BE), `b631c83` (FE + audit fixes).
 
 ## Known long poles / risks
 

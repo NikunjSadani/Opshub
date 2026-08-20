@@ -10,7 +10,7 @@ import {
   TextField,
   useToast,
 } from '../../ui';
-import { ApiError } from '../../api/client';
+import { ApiError, useApi } from '../../api/client';
 import { useClientsQuery, useProjectsQuery } from '../../api/projects';
 import {
   rupeesToPaise,
@@ -40,6 +40,7 @@ interface LineRow {
   freight: string;
   packaging: string;
   handling: string;
+  other: string;
   taxRate: string;
 }
 
@@ -56,6 +57,7 @@ function blankLine(): LineRow {
     freight: '',
     packaging: '',
     handling: '',
+    other: '',
     taxRate: '',
   };
 }
@@ -87,6 +89,7 @@ function lineValid(row: LineRow): boolean {
     optionalMoneyValid(row.freight) &&
     optionalMoneyValid(row.packaging) &&
     optionalMoneyValid(row.handling) &&
+    optionalMoneyValid(row.other) &&
     taxValid(row.taxRate)
   );
 }
@@ -104,7 +107,13 @@ export function POForm() {
   const [expectedDate, setExpectedDate] = useState('');
   const [notes, setNotes] = useState('');
   const [lines, setLines] = useState<LineRow[]>([blankLine()]);
+  // Optional soft-copy attachment: uploaded up-front to `/files/upload`, then its id
+  // is sent as `soft_copy_file_id` on create. Upload needs OPERATE (which PO create
+  // already requires), so no extra gate here.
+  const [softCopy, setSoftCopy] = useState<{ id: string; filename: string } | null>(null);
+  const [uploadingSoftCopy, setUploadingSoftCopy] = useState(false);
 
+  const { postForm } = useApi();
   const clientsQuery = useClientsQuery();
   // Projects filtered by the chosen client; only ACTIVE ones are choosable (the
   // backend rejects a non-active project). Reset project/GSTIN when the client changes.
@@ -131,6 +140,26 @@ export function POForm() {
     setGstinId('');
   }
 
+  async function onSoftCopyChange(fileList: FileList | null) {
+    const chosen = fileList?.[0];
+    if (!chosen) return;
+    setUploadingSoftCopy(true);
+    try {
+      const form = new FormData();
+      form.append('file', chosen);
+      form.append('module_key', 'sales_orders');
+      const out = await postForm<{ id: number | string; filename: string; size: number }>(
+        '/files/upload',
+        form,
+      );
+      setSoftCopy({ id: String(out.id), filename: out.filename });
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setUploadingSoftCopy(false);
+    }
+  }
+
   const linesValid = lines.every(lineValid);
   const canSubmit =
     poNumber.trim() !== '' &&
@@ -138,7 +167,8 @@ export function POForm() {
     !!projectId &&
     !!poDate &&
     lines.length > 0 &&
-    linesValid;
+    linesValid &&
+    !uploadingSoftCopy;
 
   function onSubmit() {
     if (!canSubmit) return;
@@ -153,6 +183,7 @@ export function POForm() {
       freight_paise: l.freight.trim() ? (rupeesToPaise(l.freight) as number) : 0,
       packaging_paise: l.packaging.trim() ? (rupeesToPaise(l.packaging) as number) : 0,
       handling_paise: l.handling.trim() ? (rupeesToPaise(l.handling) as number) : 0,
+      other_paise: l.other.trim() ? (rupeesToPaise(l.other) as number) : 0,
       tax_rate: l.taxRate.trim() ? Number(l.taxRate.trim()) : 0,
     }));
 
@@ -164,6 +195,7 @@ export function POForm() {
       po_date: poDate,
       expected_procurement_date: expectedDate || undefined,
       notes: notes.trim() || undefined,
+      soft_copy_file_id: softCopy?.id ?? undefined,
       lines: payloadLines,
     };
 
@@ -224,46 +256,78 @@ export function POForm() {
               </option>
             ))}
           </SelectField>
-          <SelectField
-            label="Project"
-            required
-            value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-            disabled={!clientId || projectsQuery.isPending}
-            hint={!clientId ? 'Choose a client first.' : undefined}
-          >
-            <option value="">
-              {!clientId
-                ? 'Select a client first…'
-                : projectsQuery.isPending
-                  ? 'Loading projects…'
-                  : projects.length === 0
-                    ? 'No active projects for this client'
-                    : 'Select a project…'}
-            </option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.code} — {p.name}
+          <div>
+            <SelectField
+              label="Project"
+              required
+              value={projectId}
+              onChange={(e) => setProjectId(e.target.value)}
+              disabled={!clientId || projectsQuery.isPending || projectsQuery.isError}
+              hint={!clientId ? 'Choose a client first.' : undefined}
+              error={
+                clientId && projectsQuery.isError ? "Couldn't load projects." : undefined
+              }
+            >
+              <option value="">
+                {!clientId
+                  ? 'Select a client first…'
+                  : projectsQuery.isPending
+                    ? 'Loading projects…'
+                    : projectsQuery.isError
+                      ? 'Failed to load projects'
+                      : projects.length === 0
+                        ? 'No active projects for this client'
+                        : 'Select a project…'}
               </option>
-            ))}
-          </SelectField>
-          <SelectField
-            label="Client GSTIN (optional)"
-            value={gstinId}
-            onChange={(e) => setGstinId(e.target.value)}
-            disabled={!clientId || gstinsQuery.isPending}
-          >
-            <option value="">
-              {!clientId ? 'Choose a client first…' : 'No specific GSTIN'}
-            </option>
-            {gstins.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.gstin}
-                {g.legal_name ? ` — ${g.legal_name}` : ''}
-                {g.is_default ? ' (default)' : ''}
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.code} — {p.name}
+                </option>
+              ))}
+            </SelectField>
+            {clientId && projectsQuery.isError && (
+              <button
+                type="button"
+                onClick={() => void projectsQuery.refetch()}
+                className="mt-1 text-xs font-medium text-brand-600 hover:text-brand-700"
+              >
+                Retry
+              </button>
+            )}
+          </div>
+          <div>
+            <SelectField
+              label="Client GSTIN (optional)"
+              value={gstinId}
+              onChange={(e) => setGstinId(e.target.value)}
+              disabled={!clientId || gstinsQuery.isPending || gstinsQuery.isError}
+              error={clientId && gstinsQuery.isError ? "Couldn't load GSTINs." : undefined}
+            >
+              <option value="">
+                {!clientId
+                  ? 'Choose a client first…'
+                  : gstinsQuery.isError
+                    ? 'Failed to load GSTINs'
+                    : 'No specific GSTIN'}
               </option>
-            ))}
-          </SelectField>
+              {gstins.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.gstin}
+                  {g.legal_name ? ` — ${g.legal_name}` : ''}
+                  {g.is_default ? ' (default)' : ''}
+                </option>
+              ))}
+            </SelectField>
+            {clientId && gstinsQuery.isError && (
+              <button
+                type="button"
+                onClick={() => void gstinsQuery.refetch()}
+                className="mt-1 text-xs font-medium text-brand-600 hover:text-brand-700"
+              >
+                Retry
+              </button>
+            )}
+          </div>
           <TextField
             label="PO date"
             type="date"
@@ -288,6 +352,39 @@ export function POForm() {
             rows={2}
             maxLength={1000}
           />
+        </div>
+
+        <div className="mt-3">
+          <span className="mb-1 block text-xs font-medium text-slate-600">
+            Soft copy (optional)
+          </span>
+          {softCopy ? (
+            <div className="flex items-center gap-3 text-sm">
+              <span className="font-medium text-slate-800">{softCopy.filename}</span>
+              <button
+                type="button"
+                onClick={() => setSoftCopy(null)}
+                className="text-xs font-medium text-rose-600 hover:text-rose-700"
+              >
+                Remove
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-3">
+              <input
+                id="po-soft-copy"
+                type="file"
+                disabled={uploadingSoftCopy}
+                onChange={(e) => void onSoftCopyChange(e.target.files)}
+                className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-brand-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-brand-700 hover:file:bg-brand-100 disabled:opacity-50"
+              />
+              {uploadingSoftCopy && <span className="text-xs text-slate-500">Uploading…</span>}
+            </div>
+          )}
+          <p className="mt-1 text-xs text-slate-400">
+            Attach the signed PO / supporting document. Uploaded now; linked when the PO is
+            created.
+          </p>
         </div>
 
         <div className="mt-6 mb-2 flex items-center justify-between">
@@ -408,6 +505,13 @@ export function POForm() {
                     value={line.handling}
                     onChange={(e) => updateLine(line.key, { handling: e.target.value })}
                     error={!optionalMoneyValid(line.handling) ? 'Invalid amount' : undefined}
+                  />
+                  <TextField
+                    label="Other ₹ (optional)"
+                    inputMode="decimal"
+                    value={line.other}
+                    onChange={(e) => updateLine(line.key, { other: e.target.value })}
+                    error={!optionalMoneyValid(line.other) ? 'Invalid amount' : undefined}
                   />
                   <TextField
                     label="Description (optional)"

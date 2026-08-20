@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -66,16 +66,21 @@ export function QuoteSearchPage() {
   const clientsQuery = useClientsQuery();
 
   // Debounce the filter set so each keystroke does not fire its own request; the
-  // list refetches ~300ms after typing settles.
-  const filters: QuoteFilters = {
-    q,
-    category,
-    client_id: clientId,
-    date_from: dateFrom,
-    date_to: dateTo,
-    budget_min: budgetMin,
-    budget_max: budgetMax,
-  };
+  // list refetches ~300ms after typing settles. Memoise on the primitive values so
+  // the object identity is stable — a fresh literal each render would make the
+  // debounced value churn forever (a perpetual 300ms re-render loop).
+  const filters: QuoteFilters = useMemo(
+    () => ({
+      q,
+      category,
+      client_id: clientId,
+      date_from: dateFrom,
+      date_to: dateTo,
+      budget_min: budgetMin,
+      budget_max: budgetMax,
+    }),
+    [q, category, clientId, dateFrom, dateTo, budgetMin, budgetMax],
+  );
   const debounced = useDebouncedValue(filters);
   const search = useQuoteSearch(debounced);
   const rows = search.data ?? [];
@@ -108,8 +113,11 @@ export function QuoteSearchPage() {
           label="Client"
           value={clientId}
           onChange={(e) => setClientId(e.target.value)}
+          error={clientsQuery.isError ? "Couldn't load clients." : undefined}
         >
-          <option value="">All clients</option>
+          <option value="">
+            {clientsQuery.isError ? 'Failed to load clients' : 'All clients'}
+          </option>
           {(clientsQuery.data ?? []).map((c) => (
             <option key={c.id} value={c.id}>
               {c.name}

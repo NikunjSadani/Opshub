@@ -380,3 +380,126 @@ describe('PO bulk upload', () => {
     expect(screen.getByText(/Row 5/i)).toBeInTheDocument();
   });
 });
+
+describe('PO detail live-updates after a mutation (E2)', () => {
+  it('reflects a void immediately — setQueryData lands on the SAME cache key', async () => {
+    // The backend returns `id` as a runtime NUMBER while the detail query is keyed on
+    // the URL param STRING. Before the fix the mutation wrote to a different (number)
+    // cache key, so the open detail never updated. It is normalised with String() now.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        if (/\/purchase-orders\/\d+\/void$/.test(url) && method === 'POST') {
+          return json({ ...PO_DETAIL, id: 1, status: 'CANCELLED' });
+        }
+        if (/\/purchase-orders\/\d+$/.test(url)) return json({ ...PO_DETAIL, id: 1 });
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/sales_orders/:id" element={<PODetail />} />
+      </Routes>,
+      ['/m/sales_orders/1'],
+    );
+
+    // Opens as Draft.
+    expect(await screen.findByText('Draft')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /^void$/i }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/reason/i), {
+      target: { value: 'Cancelled by client' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /void purchase order/i }));
+
+    // The open detail flips to Cancelled with NO manual refetch (the detail query is
+    // never invalidated — only the mutation's setQueryData drives this).
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument();
+  });
+});
+
+describe('PO create form — projects fetch error (M2)', () => {
+  it('surfaces a load error (not a false "No active projects") when projects fail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        // Client-detail (for the GSTIN picker) still succeeds — only the project list fails.
+        if (/\/projects\/clients\/\d+/.test(url)) return json(CLIENT_DETAIL);
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.includes('/products')) return json(PRODUCTS);
+        if (url.includes('/projects')) return json({ detail: 'boom' }, 500);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(<POForm />);
+
+    await selectByOption(/BRI — Britannia/, '10');
+
+    // A distinct load-failure message + retry — NOT the genuinely-empty copy.
+    expect(await screen.findByText(/Couldn't load projects/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+    expect(screen.queryByText(/No active projects for this client/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('PO create form — soft copy attachment (M4)', () => {
+  it('uploads a chosen file and sends its id as soft_copy_file_id on create', async () => {
+    let postedBody: Record<string, unknown> | null = null;
+    let uploadCalled = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        if (/\/projects\/clients\/\d+/.test(url)) return json(CLIENT_DETAIL);
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.includes('/products')) return json(PRODUCTS);
+        if (url.includes('/projects')) return json(PROJECTS);
+        if (url.includes('/files/upload') && method === 'POST') {
+          uploadCalled = true;
+          return json({ id: 42, filename: 'signed-po.pdf', size: 123 }, 201);
+        }
+        if (url.includes('/purchase-orders') && method === 'POST') {
+          postedBody = JSON.parse(String(init?.body));
+          return json({ ...PO_DETAIL }, 201);
+        }
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<POForm />);
+
+    fireEvent.change(await screen.findByLabelText(/po number/i), { target: { value: 'PO-NEW-2' } });
+    await selectByOption(/BRI — Britannia/, '10');
+    await selectByOption(/BRI-001 — Q3 Trade Rewards/, '20');
+    fireEvent.change(screen.getByLabelText(/^po date/i), { target: { value: '2026-05-10' } });
+    await selectByOption(/Widget/, '5');
+    fireEvent.change(screen.getByLabelText(/ordered qty/i), { target: { value: '2' } });
+    fireEvent.change(screen.getByLabelText(/cost price/i), { target: { value: '100' } });
+    fireEvent.change(screen.getByLabelText(/sell price/i), { target: { value: '250' } });
+
+    // Attach the soft copy → it uploads, then the filename is shown.
+    const fileInput = document.getElementById('po-soft-copy') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['x'], 'signed-po.pdf', { type: 'application/pdf' })] },
+    });
+    await waitFor(() => expect(uploadCalled).toBe(true));
+    expect(await screen.findByText('signed-po.pdf')).toBeInTheDocument();
+
+    const submit = screen.getByRole('button', { name: /create purchase order/i });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    expect((postedBody as unknown as { soft_copy_file_id: string }).soft_copy_file_id).toBe('42');
+  });
+});

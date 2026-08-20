@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AuthProvider } from '../../auth/AuthProvider';
 import { ToastProvider } from '../../ui';
 import { ClientDetail } from './ClientDetail';
+import { ClientsScreen } from './ClientsScreen';
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -216,6 +217,47 @@ describe('ClientDetail', () => {
     expect(deletedUrl).toMatch(/\/projects\/clients\/gstins\/1$/);
   });
 
+  it('adds the FIRST GSTIN to a client with an EMPTY collection (E1)', async () => {
+    // The empty-collection regression: Section hid its children (incl. the Add modal)
+    // in the empty branch, so Add mounted no modal. With the fix the modal renders in
+    // both branches.
+    const EMPTY_CLIENT = { ...CLIENT_DETAIL, gstins: [], addresses: [], contacts: [] };
+    let postedBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.match(/\/projects\/clients\/7\/gstins$/) && method === 'POST') {
+          postedBody = JSON.parse(String(init?.body));
+          return json(
+            { id: 9, gstin: '29AAACB1234C1Z8', legal_name: null, state_code: '29', is_default: false, active: true },
+            201,
+          );
+        }
+        if (url.match(/\/projects\/clients\/7$/)) return json(EMPTY_CLIENT);
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderDetail(<ClientDetail />);
+    await screen.findByText('Britannia Industries');
+    // The empty state is shown…
+    expect(screen.getByText('No GSTINs on file.')).toBeInTheDocument();
+
+    // …yet the first Add (GSTINs) still opens a working modal.
+    fireEvent.click(screen.getAllByRole('button', { name: 'Add' })[0]);
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/^GSTIN/i), {
+      target: { value: '29AAACB1234C1Z8' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add' }));
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    expect((postedBody as { gstin: string }).gstin).toBe('29AAACB1234C1Z8');
+  });
+
   it('is fully read-only for a VIEW-only user (no add / edit / deactivate)', async () => {
     vi.stubGlobal(
       'fetch',
@@ -238,5 +280,65 @@ describe('ClientDetail', () => {
     expect(screen.queryByRole('button', { name: /edit client/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Deactivate' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+  });
+});
+
+// M3: the Clients registry is readable at VIEW (so client detail — whose only inbound
+// link is this list — is reachable), but the New-client affordance is MANAGE-gated.
+describe('ClientsScreen (M3 — list readable at VIEW)', () => {
+  const CLIENTS_LIST = [
+    { id: 7, name: 'Britannia Industries', code: 'BRI', pan: null, credit_terms_days: null, active: true },
+  ];
+
+  function renderClients() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <AuthProvider>
+            <ToastProvider>
+              <ClientsScreen />
+            </ToastProvider>
+          </AuthProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('a VIEW user sees the client list + a link to detail, but no New client', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.match(/\/projects\/clients$/)) return json(CLIENTS_LIST);
+        if (url.endsWith('/me')) return meResponse('VIEW');
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderClients();
+
+    expect(await screen.findByText('Britannia Industries')).toBeInTheDocument();
+    // The name links to the client's detail (reachable at VIEW).
+    const link = screen.getByRole('link', { name: 'Britannia Industries' });
+    expect(link.getAttribute('href')).toContain('7');
+    // …but no create affordance.
+    expect(screen.queryByRole('button', { name: /new client/i })).not.toBeInTheDocument();
+  });
+
+  it('a MANAGE user gets the New client button', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.match(/\/projects\/clients$/)) return json(CLIENTS_LIST);
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderClients();
+
+    expect(await screen.findByRole('button', { name: /new client/i })).toBeInTheDocument();
   });
 });

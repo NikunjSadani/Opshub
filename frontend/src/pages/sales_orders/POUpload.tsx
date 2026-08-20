@@ -114,28 +114,44 @@ export function POUpload() {
               </option>
             ))}
           </SelectField>
-          <SelectField
-            label="Project"
-            required
-            value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-            disabled={!clientId || projectsQuery.isPending}
-          >
-            <option value="">
-              {!clientId
-                ? 'Select a client first…'
-                : projectsQuery.isPending
-                  ? 'Loading projects…'
-                  : projects.length === 0
-                    ? 'No active projects for this client'
-                    : 'Select a project…'}
-            </option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.code} — {p.name}
+          <div>
+            <SelectField
+              label="Project"
+              required
+              value={projectId}
+              onChange={(e) => setProjectId(e.target.value)}
+              disabled={!clientId || projectsQuery.isPending || projectsQuery.isError}
+              error={
+                clientId && projectsQuery.isError ? "Couldn't load projects." : undefined
+              }
+            >
+              <option value="">
+                {!clientId
+                  ? 'Select a client first…'
+                  : projectsQuery.isPending
+                    ? 'Loading projects…'
+                    : projectsQuery.isError
+                      ? 'Failed to load projects'
+                      : projects.length === 0
+                        ? 'No active projects for this client'
+                        : 'Select a project…'}
               </option>
-            ))}
-          </SelectField>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.code} — {p.name}
+                </option>
+              ))}
+            </SelectField>
+            {clientId && projectsQuery.isError && (
+              <button
+                type="button"
+                onClick={() => void projectsQuery.refetch()}
+                className="mt-1 text-xs font-medium text-brand-600 hover:text-brand-700"
+              >
+                Retry
+              </button>
+            )}
+          </div>
         </div>
 
         <label htmlFor="po-file" className="mb-1 block text-xs font-medium text-slate-600">

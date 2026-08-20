@@ -8,17 +8,15 @@ import { ClientDetail } from './ClientDetail';
 const BASE = '/m/projects';
 
 /**
- * Projects module shell: a tab bar + nested routes. Clients requires MANAGE on
- * the projects module (registering/managing a client is a Manage action).
- * Server-side RBAC is the real gate; hiding the tab is just UX.
- *
- * The Client Master detail (`clients/:id`) is a READ surface — it needs only
- * projects VIEW, so it is guarded on module access (not MANAGE); the edits inside
- * it are MANAGE-gated in the screen itself. It is a nested route, not a tab.
+ * Projects module shell: a tab bar + nested routes. The Clients registry is a READ
+ * surface — any projects-module user (VIEW+) may open the Clients tab, the list, and
+ * a client's detail; the CREATE/EDIT affordances inside are MANAGE-gated in the
+ * screens themselves (server-side RBAC is the real gate; the gating here is UX).
+ * Showing Clients at VIEW keeps client detail reachable — its only inbound link is
+ * the Clients list.
  */
 export function ProjectsModule() {
   const perms = usePermissions();
-  const canManage = perms.atLeast('projects', 'MANAGE');
   const canView = perms.canAccessModule('projects');
 
   const loadingEl = (
@@ -27,7 +25,7 @@ export function ProjectsModule() {
 
   const tabs: TabDef[] = [
     { to: BASE, label: 'Projects', end: true },
-    ...(canManage ? [{ to: `${BASE}/clients`, label: 'Clients' }] : []),
+    ...(canView ? [{ to: `${BASE}/clients`, label: 'Clients' }] : []),
   ];
 
   return (
@@ -38,12 +36,13 @@ export function ProjectsModule() {
         <Route
           path="clients"
           element={
-            // Defer the guard until /me resolves — a fresh deep-link to this
-            // route must not be bounced before permissions load (mirrors
-            // RequirePlatform's loading behaviour).
+            // A read surface: any projects-module user (VIEW+) may open the Clients
+            // list; the in-screen create/edit affordances are MANAGE-gated. Defer the
+            // guard until /me resolves — a fresh deep-link must not be bounced before
+            // permissions load (mirrors RequirePlatform's loading behaviour).
             perms.loading ? (
               loadingEl
-            ) : canManage ? (
+            ) : canView ? (
               <ClientsScreen />
             ) : (
               <Navigate to={BASE} replace />

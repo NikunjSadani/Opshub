@@ -16,18 +16,23 @@ import {
   Td,
   useToast,
 } from '../../ui';
+import { usePermissions } from '../../auth/AuthProvider';
 import { useClientsQuery, useCreateClient } from '../../api/projects';
 import { errorMessage } from './projectsFormat';
 
 const CODE_RE = /^[A-Z]{3}$/;
 
 /**
- * Clients registry (ADMIN). Lists registered clients and creates new ones. The
- * code is a 3-letter A–Z key, uppercased as typed and validated inline before
- * the create button enables; a 409 (duplicate/invalid) surfaces via toast.
+ * Clients registry. Lists registered clients (VIEW — any projects-module user can
+ * read the list and open a client's detail) and creates new ones (MANAGE). The code
+ * is a 3-letter A–Z key, uppercased as typed and validated inline before the create
+ * button enables; a 409 (duplicate/invalid) surfaces via toast. The backend enforces
+ * `client.manage` regardless; the New-client gating here is UX.
  */
 export function ClientsScreen() {
   const toast = useToast();
+  const perms = usePermissions();
+  const canManage = perms.atLeast('projects', 'MANAGE');
   const query = useClientsQuery();
   const createClient = useCreateClient();
 
@@ -73,9 +78,11 @@ export function ClientsScreen() {
         title="Clients"
         subtitle="Registered clients. Each has a unique 3-letter code used to number projects."
         actions={
-          <Button size="sm" onClick={openModal}>
-            New client
-          </Button>
+          canManage ? (
+            <Button size="sm" onClick={openModal}>
+              New client
+            </Button>
+          ) : undefined
         }
       />
 
@@ -123,43 +130,45 @@ export function ClientsScreen() {
         </Table>
       )}
 
-      <Modal
-        open={open}
-        title="Register client"
-        onClose={closeModal}
-        busy={createClient.isPending}
-        footer={
-          <>
-            <Button variant="secondary" onClick={closeModal} disabled={createClient.isPending}>
-              Cancel
-            </Button>
-            <Button onClick={submit} loading={createClient.isPending} disabled={!canSubmit}>
-              Register
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-3">
-          <TextField
-            label="Name"
-            required
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Britannia Industries"
-            maxLength={120}
-          />
-          <TextField
-            label="Code"
-            required
-            className="font-mono uppercase"
-            value={code}
-            error={codeError}
-            hint="Exactly 3 letters A–Z (e.g. BRI). Uppercased automatically."
-            onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3))}
-            maxLength={3}
-          />
-        </div>
-      </Modal>
+      {canManage && (
+        <Modal
+          open={open}
+          title="Register client"
+          onClose={closeModal}
+          busy={createClient.isPending}
+          footer={
+            <>
+              <Button variant="secondary" onClick={closeModal} disabled={createClient.isPending}>
+                Cancel
+              </Button>
+              <Button onClick={submit} loading={createClient.isPending} disabled={!canSubmit}>
+                Register
+              </Button>
+            </>
+          }
+        >
+          <div className="space-y-3">
+            <TextField
+              label="Name"
+              required
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Britannia Industries"
+              maxLength={120}
+            />
+            <TextField
+              label="Code"
+              required
+              className="font-mono uppercase"
+              value={code}
+              error={codeError}
+              hint="Exactly 3 letters A–Z (e.g. BRI). Uppercased automatically."
+              onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3))}
+              maxLength={3}
+            />
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

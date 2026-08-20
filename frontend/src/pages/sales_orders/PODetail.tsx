@@ -99,6 +99,8 @@ function PODetailBody({
   const [scReason, setScReason] = useState('');
   const [voidOpen, setVoidOpen] = useState(false);
   const [voidReason, setVoidReason] = useState('');
+  // Guard the soft-copy download so a double-click can't fire two downloads.
+  const [downloadingSoftCopy, setDownloadingSoftCopy] = useState(false);
 
   const terminal = po.status === 'CLOSED' || po.status === 'CANCELLED';
   const openLines = po.lines.filter((l) => l.line_status === 'OPEN');
@@ -209,14 +211,17 @@ function PODetailBody({
             {po.soft_copy_file ? (
               <button
                 type="button"
-                onClick={() =>
-                  void download(Number(po.soft_copy_file!.id), po.soft_copy_file!.filename).catch(
-                    (err) => toast.error(errorMessage(err)),
-                  )
-                }
-                className="font-medium text-brand-600 hover:text-brand-700"
+                disabled={downloadingSoftCopy}
+                onClick={() => {
+                  if (downloadingSoftCopy) return;
+                  setDownloadingSoftCopy(true);
+                  void download(Number(po.soft_copy_file!.id), po.soft_copy_file!.filename)
+                    .catch((err) => toast.error(errorMessage(err)))
+                    .finally(() => setDownloadingSoftCopy(false));
+                }}
+                className="font-medium text-brand-600 hover:text-brand-700 disabled:opacity-50"
               >
-                {po.soft_copy_file.filename}
+                {downloadingSoftCopy ? 'Downloading…' : po.soft_copy_file.filename}
               </button>
             ) : (
               '—'
@@ -244,6 +249,10 @@ function PODetailBody({
               <Th className="text-right">Qty</Th>
               <Th className="text-right">Cost</Th>
               <Th className="text-right">Sell</Th>
+              <Th className="text-right">Freight</Th>
+              <Th className="text-right">Packaging</Th>
+              <Th className="text-right">Handling</Th>
+              <Th className="text-right">Other</Th>
               <Th className="text-right">Tax %</Th>
               <Th>Status</Th>
               {canManage && !terminal && <Th className="text-right">Actions</Th>}
@@ -261,6 +270,18 @@ function PODetailBody({
                 <Td className="text-right tabular-nums">{line.ordered_qty}</Td>
                 <Td className="text-right tabular-nums">{rupees(line.cost_price_paise)}</Td>
                 <Td className="text-right tabular-nums">{rupees(line.sell_price_paise)}</Td>
+                <Td className="text-right tabular-nums text-slate-500">
+                  {rupees(line.freight_paise)}
+                </Td>
+                <Td className="text-right tabular-nums text-slate-500">
+                  {rupees(line.packaging_paise)}
+                </Td>
+                <Td className="text-right tabular-nums text-slate-500">
+                  {rupees(line.handling_paise)}
+                </Td>
+                <Td className="text-right tabular-nums text-slate-500">
+                  {rupees(line.other_paise)}
+                </Td>
                 <Td className="text-right tabular-nums">{line.tax_rate}</Td>
                 <Td>
                   <Badge tone={LINE_STATUS_TONE[line.line_status as LineStatus]}>
@@ -398,16 +419,45 @@ function AmendModal({
     po_date?: string;
     expected_procurement_date?: string | null;
     notes?: string | null;
+    soft_copy_file_id?: string | null;
     summary?: string;
   }) => void;
 }) {
+  const toast = useToast();
+  const { postForm } = useApi();
   const [poNumber, setPoNumber] = useState(po.po_number);
   const [poDate, setPoDate] = useState(po.po_date);
   const [expectedDate, setExpectedDate] = useState(po.expected_procurement_date ?? '');
   const [notes, setNotes] = useState(po.notes ?? '');
   const [summary, setSummary] = useState('');
+  // Soft copy: seeded from the PO's current attachment. Removing it clears the link
+  // on save (amend sends soft_copy_file_id: null); attaching uploads then links a new id.
+  const [softCopy, setSoftCopy] = useState<{ id: string; filename: string } | null>(
+    po.soft_copy_file ? { id: String(po.soft_copy_file.id), filename: po.soft_copy_file.filename } : null,
+  );
+  const [uploadingSoftCopy, setUploadingSoftCopy] = useState(false);
 
-  const valid = poNumber.trim() !== '' && poDate !== '';
+  async function onSoftCopyChange(fileList: FileList | null) {
+    const chosen = fileList?.[0];
+    if (!chosen) return;
+    setUploadingSoftCopy(true);
+    try {
+      const form = new FormData();
+      form.append('file', chosen);
+      form.append('module_key', 'sales_orders');
+      const out = await postForm<{ id: number | string; filename: string; size: number }>(
+        '/files/upload',
+        form,
+      );
+      setSoftCopy({ id: String(out.id), filename: out.filename });
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setUploadingSoftCopy(false);
+    }
+  }
+
+  const valid = poNumber.trim() !== '' && poDate !== '' && !uploadingSoftCopy;
 
   return (
     <Modal
@@ -427,6 +477,7 @@ function AmendModal({
                 po_date: poDate,
                 expected_procurement_date: expectedDate || null,
                 notes: notes.trim() || null,
+                soft_copy_file_id: softCopy?.id ?? null,
                 summary: summary.trim() || undefined,
               })
             }
@@ -472,6 +523,33 @@ function AmendModal({
           rows={2}
           maxLength={1000}
         />
+        <div>
+          <span className="mb-1 block text-xs font-medium text-slate-600">
+            Soft copy (optional)
+          </span>
+          {softCopy ? (
+            <div className="flex items-center gap-3 text-sm">
+              <span className="font-medium text-slate-800">{softCopy.filename}</span>
+              <button
+                type="button"
+                onClick={() => setSoftCopy(null)}
+                className="text-xs font-medium text-rose-600 hover:text-rose-700"
+              >
+                Remove
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-3">
+              <input
+                type="file"
+                disabled={uploadingSoftCopy}
+                onChange={(e) => void onSoftCopyChange(e.target.files)}
+                className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-brand-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-brand-700 hover:file:bg-brand-100 disabled:opacity-50"
+              />
+              {uploadingSoftCopy && <span className="text-xs text-slate-500">Uploading…</span>}
+            </div>
+          )}
+        </div>
         <TextField
           label="Amendment summary (optional)"
           value={summary}

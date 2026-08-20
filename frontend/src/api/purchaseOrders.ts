@@ -251,7 +251,11 @@ export function buildPurchaseOrdersQuery(filters: POFilters): string {
 
 export const poKeys = {
   list: (filters: POFilters) => ['purchase-orders', 'list', filters] as const,
-  detail: (id: string) => ['purchase-orders', 'detail', id] as const,
+  // Normalise the id to a string so the detail QUERY (URL param = string) and every
+  // mutation's setQueryData/invalidation (backend `po.id` = runtime number) land on
+  // the SAME cache key — otherwise the open detail never reflects a short-close / void
+  // / amend without a manual refetch.
+  detail: (id: string | number) => ['purchase-orders', 'detail', String(id)] as const,
   products: ['purchase-orders', 'product-picker'] as const,
   clientGstins: (clientId: string) => ['purchase-orders', 'client-gstins', clientId] as const,
 };

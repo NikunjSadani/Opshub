@@ -1,4 +1,4 @@
-import { useState, type ReactElement } from 'react';
+import { useMemo, useState, type ReactElement } from 'react';
 import { Link, Navigate, Route, Routes } from 'react-router-dom';
 import {
   Badge,
@@ -82,7 +82,13 @@ function Register({ canOperate }: { canOperate: boolean }) {
   // now-inactive project is still filterable); when no client is chosen, list all.
   const projectsQuery = useProjectsQuery({ client_id: clientId });
 
-  const filters: POFilters = { q, client_id: clientId, project_id: projectId, status };
+  // Memoise on the primitive filter values so the object identity is stable across
+  // renders — a fresh literal each render would make the debounced value churn
+  // forever (a perpetual 300ms re-render loop).
+  const filters: POFilters = useMemo(
+    () => ({ q, client_id: clientId, project_id: projectId, status }),
+    [q, clientId, projectId, status],
+  );
   const debouncedFilters = useDebouncedValue(filters);
   const query = usePurchaseOrdersQuery(debouncedFilters);
   const rows = query.data ?? [];
@@ -123,8 +129,11 @@ function Register({ canOperate }: { canOperate: boolean }) {
             setClientId(e.target.value);
             setProjectId('');
           }}
+          error={clientsQuery.isError ? "Couldn't load clients." : undefined}
         >
-          <option value="">All clients</option>
+          <option value="">
+            {clientsQuery.isError ? 'Failed to load clients' : 'All clients'}
+          </option>
           {(clientsQuery.data ?? []).map((c) => (
             <option key={c.id} value={c.id}>
               {c.code} — {c.name}
@@ -135,10 +144,13 @@ function Register({ canOperate }: { canOperate: boolean }) {
           label="Project"
           value={projectId}
           onChange={(e) => setProjectId(e.target.value)}
-          disabled={!clientId}
+          disabled={!clientId || projectsQuery.isError}
           hint={!clientId ? 'Pick a client to filter by project.' : undefined}
+          error={clientId && projectsQuery.isError ? "Couldn't load projects." : undefined}
         >
-          <option value="">All projects</option>
+          <option value="">
+            {clientId && projectsQuery.isError ? 'Failed to load projects' : 'All projects'}
+          </option>
           {(projectsQuery.data ?? []).map((p) => (
             <option key={p.id} value={p.id}>
               {p.code} — {p.name}

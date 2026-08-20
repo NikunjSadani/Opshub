@@ -388,48 +388,52 @@ function GstinSection({
   }
 
   return (
-    <Section
-      title="GSTINs"
-      count={gstins.length}
-      canManage={canManage}
-      onAdd={openAdd}
-      isEmpty={gstins.length === 0}
-      emptyText="No GSTINs on file."
-    >
-      <Table>
-        <THead>
-          <Tr>
-            <Th>GSTIN</Th>
-            <Th>Legal name</Th>
-            <Th>State</Th>
-            <Th>Default</Th>
-            {canManage && <Th>Actions</Th>}
-          </Tr>
-        </THead>
-        <tbody>
-          {gstins.map((g) => (
-            <Tr key={g.id}>
-              <Td className="font-mono text-slate-900">{g.gstin}</Td>
-              <Td>{g.legal_name ?? '—'}</Td>
-              <Td className="font-mono">{g.state_code ?? '—'}</Td>
-              <Td>{g.is_default ? <DefaultBadge /> : '—'}</Td>
-              {canManage && (
-                <Td>
-                  <div className="flex gap-2">
-                    <Button size="sm" variant="ghost" onClick={() => openEdit(g)}>
-                      Edit
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setConfirm(g)}>
-                      Deactivate
-                    </Button>
-                  </div>
-                </Td>
-              )}
+    <>
+      <Section
+        title="GSTINs"
+        count={gstins.length}
+        canManage={canManage}
+        onAdd={openAdd}
+        isEmpty={gstins.length === 0}
+        emptyText="No GSTINs on file."
+      >
+        <Table>
+          <THead>
+            <Tr>
+              <Th>GSTIN</Th>
+              <Th>Legal name</Th>
+              <Th>State</Th>
+              <Th>Default</Th>
+              {canManage && <Th>Actions</Th>}
             </Tr>
-          ))}
-        </tbody>
-      </Table>
+          </THead>
+          <tbody>
+            {gstins.map((g) => (
+              <Tr key={g.id}>
+                <Td className="font-mono text-slate-900">{g.gstin}</Td>
+                <Td>{g.legal_name ?? '—'}</Td>
+                <Td className="font-mono">{g.state_code ?? '—'}</Td>
+                <Td>{g.is_default ? <DefaultBadge /> : '—'}</Td>
+                {canManage && (
+                  <Td>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="ghost" onClick={() => openEdit(g)}>
+                        Edit
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setConfirm(g)}>
+                        Deactivate
+                      </Button>
+                    </div>
+                  </Td>
+                )}
+              </Tr>
+            ))}
+          </tbody>
+        </Table>
+      </Section>
 
+      {/* Modals live OUTSIDE <Section> so Add works even when the collection is
+          empty (Section hides its children in the empty branch). */}
       {canManage && (
         <>
           <GstinModal
@@ -454,7 +458,7 @@ function GstinSection({
           />
         </>
       )}
-    </Section>
+    </>
   );
 }
 
@@ -627,64 +631,67 @@ function AddressSection({
   }
 
   return (
-    <Section
-      title="Addresses"
-      count={addresses.length}
-      canManage={canManage}
-      onAdd={() => {
-        setEditing(null);
-        setModalOpen(true);
-      }}
-      isEmpty={addresses.length === 0}
-      emptyText="No addresses on file."
-    >
-      <Table>
-        <THead>
-          <Tr>
-            <Th>Label</Th>
-            <Th>Address</Th>
-            <Th>City</Th>
-            <Th>Pincode</Th>
-            <Th>Default</Th>
-            {canManage && <Th>Actions</Th>}
-          </Tr>
-        </THead>
-        <tbody>
-          {addresses.map((a) => (
-            <Tr key={a.id}>
-              <Td>{a.label ?? '—'}</Td>
-              <Td className="text-slate-900">
-                {a.line1}
-                {a.line2 ? `, ${a.line2}` : ''}
-                {a.state ? <span className="text-slate-500">{`, ${a.state}`}</span> : null}
-              </Td>
-              <Td>{a.city ?? '—'}</Td>
-              <Td className="font-mono">{a.pincode ?? '—'}</Td>
-              <Td>{a.is_default ? <DefaultBadge /> : '—'}</Td>
-              {canManage && (
-                <Td>
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setEditing(a);
-                        setModalOpen(true);
-                      }}
-                    >
-                      Edit
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setConfirm(a)}>
-                      Deactivate
-                    </Button>
-                  </div>
-                </Td>
-              )}
+    <>
+      <Section
+        title="Addresses"
+        count={addresses.length}
+        canManage={canManage}
+        onAdd={() => {
+          setEditing(null);
+          setModalOpen(true);
+        }}
+        isEmpty={addresses.length === 0}
+        emptyText="No addresses on file."
+      >
+        <Table>
+          <THead>
+            <Tr>
+              <Th>Label</Th>
+              <Th>Address</Th>
+              <Th>City</Th>
+              <Th>Pincode</Th>
+              <Th>Default</Th>
+              {canManage && <Th>Actions</Th>}
             </Tr>
-          ))}
-        </tbody>
-      </Table>
+          </THead>
+          <tbody>
+            {addresses.map((a) => (
+              <Tr key={a.id}>
+                <Td>{a.label ?? '—'}</Td>
+                <Td className="text-slate-900">
+                  {a.line1}
+                  {a.line2 ? `, ${a.line2}` : ''}
+                  {a.state ? <span className="text-slate-500">{`, ${a.state}`}</span> : null}
+                </Td>
+                <Td>{a.city ?? '—'}</Td>
+                <Td className="font-mono">{a.pincode ?? '—'}</Td>
+                <Td>{a.is_default ? <DefaultBadge /> : '—'}</Td>
+                {canManage && (
+                  <Td>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setEditing(a);
+                          setModalOpen(true);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setConfirm(a)}>
+                        Deactivate
+                      </Button>
+                    </div>
+                  </Td>
+                )}
+              </Tr>
+            ))}
+          </tbody>
+        </Table>
+      </Section>
 
+      {/* Modals live OUTSIDE <Section> so Add works even when the collection is empty. */}
       {canManage && (
         <>
           <AddressModal
@@ -706,7 +713,7 @@ function AddressSection({
           />
         </>
       )}
-    </Section>
+    </>
   );
 }
 
@@ -836,60 +843,63 @@ function ContactSection({
   }
 
   return (
-    <Section
-      title="Contacts"
-      count={contacts.length}
-      canManage={canManage}
-      onAdd={() => {
-        setEditing(null);
-        setModalOpen(true);
-      }}
-      isEmpty={contacts.length === 0}
-      emptyText="No contacts on file."
-    >
-      <Table>
-        <THead>
-          <Tr>
-            <Th>Name</Th>
-            <Th>Designation</Th>
-            <Th>Email</Th>
-            <Th>Phone</Th>
-            <Th>Default</Th>
-            {canManage && <Th>Actions</Th>}
-          </Tr>
-        </THead>
-        <tbody>
-          {contacts.map((c) => (
-            <Tr key={c.id}>
-              <Td className="text-slate-900">{c.name}</Td>
-              <Td>{c.designation ?? '—'}</Td>
-              <Td>{c.email ?? '—'}</Td>
-              <Td className="font-mono">{c.phone ?? '—'}</Td>
-              <Td>{c.is_default ? <DefaultBadge /> : '—'}</Td>
-              {canManage && (
-                <Td>
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setEditing(c);
-                        setModalOpen(true);
-                      }}
-                    >
-                      Edit
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setConfirm(c)}>
-                      Deactivate
-                    </Button>
-                  </div>
-                </Td>
-              )}
+    <>
+      <Section
+        title="Contacts"
+        count={contacts.length}
+        canManage={canManage}
+        onAdd={() => {
+          setEditing(null);
+          setModalOpen(true);
+        }}
+        isEmpty={contacts.length === 0}
+        emptyText="No contacts on file."
+      >
+        <Table>
+          <THead>
+            <Tr>
+              <Th>Name</Th>
+              <Th>Designation</Th>
+              <Th>Email</Th>
+              <Th>Phone</Th>
+              <Th>Default</Th>
+              {canManage && <Th>Actions</Th>}
             </Tr>
-          ))}
-        </tbody>
-      </Table>
+          </THead>
+          <tbody>
+            {contacts.map((c) => (
+              <Tr key={c.id}>
+                <Td className="text-slate-900">{c.name}</Td>
+                <Td>{c.designation ?? '—'}</Td>
+                <Td>{c.email ?? '—'}</Td>
+                <Td className="font-mono">{c.phone ?? '—'}</Td>
+                <Td>{c.is_default ? <DefaultBadge /> : '—'}</Td>
+                {canManage && (
+                  <Td>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setEditing(c);
+                          setModalOpen(true);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setConfirm(c)}>
+                        Deactivate
+                      </Button>
+                    </div>
+                  </Td>
+                )}
+              </Tr>
+            ))}
+          </tbody>
+        </Table>
+      </Section>
 
+      {/* Modals live OUTSIDE <Section> so Add works even when the collection is empty. */}
       {canManage && (
         <>
           <ContactModal
@@ -910,7 +920,7 @@ function ContactSection({
           />
         </>
       )}
-    </Section>
+    </>
   );
 }
 
