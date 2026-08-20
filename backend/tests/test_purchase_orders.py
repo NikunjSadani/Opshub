@@ -392,3 +392,82 @@ def test_bulk_upload_bad_row_error(client: TestClient, seeded: dict[str, int]) -
     # Two bad rows -> two errors; each poisons its own PO -> two skips.
     assert len(out["errors"]) == 2
     assert {s["po_number"] for s in out["skipped"]} == {"ERR-1", "ERR-2"}
+
+
+# ------------------------------------------- audit-fix regressions (Wave 1 audit)
+
+def _other_client_project(client: TestClient) -> tuple[int, int]:
+    """A SECOND client with its own ACTIVE project (for cross-client linkage tests)."""
+    db = client.app.state.TestSession()
+    other = ProjectClient(name="Other Co", code="OTH", active=True)
+    db.add(other)
+    db.flush()
+    proj = Project(client_id=other.id, seq=1, code="OTH-001", name="Other", status="ACTIVE")
+    db.add(proj)
+    db.flush()
+    ids = (other.id, proj.id)
+    db.commit()
+    db.close()
+    return ids
+
+
+def test_create_rejects_project_of_another_client(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    # H1: a PO must not reference a project owned by a DIFFERENT client.
+    _as(client, "operator")
+    _other_id, other_project = _other_client_project(client)
+    r = client.post("/api/v1/purchase-orders", json=_create_body(seeded, project_id=other_project))
+    assert r.status_code == 400, r.text
+    assert "does not belong to this client" in r.json()["detail"]
+
+
+def test_amend_rejects_project_of_another_client(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    # H1 (amend path): the same linkage guard applies when re-pointing the project.
+    _as(client, "operator")
+    _other_id, other_project = _other_client_project(client)
+    created = client.post("/api/v1/purchase-orders", json=_create_body(seeded)).json()
+    r = client.patch(
+        f"/api/v1/purchase-orders/{created['id']}", json={"project_id": other_project}
+    )
+    assert r.status_code in (400, 422), r.text
+    assert "does not belong to this client" in r.json()["detail"]
+
+
+def test_create_rejects_inactive_gstin(client: TestClient, seeded: dict[str, int]) -> None:
+    # M1: a soft-deleted (inactive) client GSTIN can't be attached to a new PO.
+    db = client.app.state.TestSession()
+    row = db.get(ClientGstin, seeded["gstin_id"])
+    assert row is not None
+    row.active = False
+    db.commit()
+    db.close()
+    _as(client, "operator")
+    r = client.post(
+        "/api/v1/purchase-orders", json=_create_body(seeded, client_gstin_id=seeded["gstin_id"])
+    )
+    assert r.status_code == 400, r.text
+    assert "inactive" in r.json()["detail"]
+
+
+def test_bulk_upload_honours_po_date_column(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    # M2: an optional po_date column dates each PO (else today); a bad date poisons its group.
+    _as(client, "operator")
+    header = [*_BULK_HEADER, "po_date"]
+    data = _xlsx(header, [
+        ["DATED-1", "W1", "", "", "1", "1.00", "2.00", "", "", "", "", "", "2026-01-15"],
+        ["BADDATE", "W1", "", "", "1", "1.00", "2.00", "", "", "", "", "", "nonsense"],
+    ])
+    r = client.post("/api/v1/purchase-orders/upload",
+                    files={"file": ("pos.xlsx", data, "application/xlsx")},
+                    data={"client_id": seeded["client_id"], "project_id": seeded["project_id"]})
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["created"] == ["DATED-1"]
+    assert {s["po_number"] for s in out["skipped"]} == {"BADDATE"}
+    listing = {p["po_number"]: p for p in client.get("/api/v1/purchase-orders").json()}
+    assert listing["DATED-1"]["po_date"] == "2026-01-15"

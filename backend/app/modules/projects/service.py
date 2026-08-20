@@ -528,8 +528,8 @@ def add_address(
         raise ProjectError("line1 is required")
     if gstin_id is not None:
         linked = get_gstin(db, gstin_id)
-        if linked is None or linked.client_id != client.id:
-            raise ClientChildNotFound(f"gstin {gstin_id} not found for this client")
+        if linked is None or linked.client_id != client.id or not linked.active:
+            raise ClientChildNotFound(f"gstin {gstin_id} not found (or inactive) for this client")
     row = ClientAddress(
         client_id=client.id,
         gstin_id=gstin_id,
@@ -582,8 +582,9 @@ def update_address(
     if not isinstance(gstin_id, _Unset):
         if gstin_id is not None:
             linked = get_gstin(db, gstin_id)
-            if linked is None or linked.client_id != row.client_id:
-                raise ClientChildNotFound(f"gstin {gstin_id} not found for this client")
+            if linked is None or linked.client_id != row.client_id or not linked.active:
+                raise ClientChildNotFound(
+                    f"gstin {gstin_id} not found (or inactive) for this client")
         row.gstin_id = gstin_id
     if not isinstance(label, _Unset):
         row.label = _opt(label)

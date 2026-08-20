@@ -316,7 +316,7 @@ def upload_purchase_orders(
     # Validate the allocation up-front (clean 400/404 before reading any bytes).
     try:
         po_service._ensure_client_active(db, client_id)
-        po_service._ensure_project_active(db, project_id)
+        po_service._ensure_project_active(db, project_id, client_id)
     except po_service.POError as err:
         raise _map_error(err) from err
 

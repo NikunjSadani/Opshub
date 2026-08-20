@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Badge,
   Button,
@@ -92,6 +93,8 @@ export function ClientsScreen() {
             <Tr>
               <Th>Code</Th>
               <Th>Name</Th>
+              <Th>PAN</Th>
+              <Th>Credit terms</Th>
               <Th>Status</Th>
             </Tr>
           </THead>
@@ -99,7 +102,16 @@ export function ClientsScreen() {
             {query.data.map((c) => (
               <Tr key={c.id}>
                 <Td className="font-mono font-medium text-slate-900">{c.code}</Td>
-                <Td>{c.name}</Td>
+                <Td>
+                  <Link
+                    to={`${c.id}`}
+                    className="font-medium text-brand-600 hover:text-brand-700 hover:underline"
+                  >
+                    {c.name}
+                  </Link>
+                </Td>
+                <Td className="font-mono">{c.pan ?? '—'}</Td>
+                <Td>{c.credit_terms_days == null ? '—' : `${c.credit_terms_days} days`}</Td>
                 <Td>
                   <Badge tone={c.active ? 'green' : 'slate'}>
                     {c.active ? 'Active' : 'Inactive'}

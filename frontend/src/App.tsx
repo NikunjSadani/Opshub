@@ -16,6 +16,7 @@ import { NotFound } from './pages/NotFound';
 import { ChallanModule } from './pages/challan/ChallanModule';
 import { ExpenseModule } from './pages/expense/ExpenseModule';
 import { ProjectsModule } from './pages/projects/ProjectsModule';
+import { SalesOrdersModule } from './pages/sales_orders/SalesOrdersModule';
 import { RolesModule } from './pages/roles/RolesModule';
 import { UsersModule } from './pages/users/UsersModule';
 import { RequirePlatform } from './auth/RequireRole';
@@ -67,6 +68,7 @@ export function AppRoutes() {
         <Route path="/m/document_automation/*" element={<ChallanModule />} />
         <Route path="/m/expense_invoice/*" element={<ExpenseModule />} />
         <Route path="/m/projects/*" element={<ProjectsModule />} />
+        <Route path="/m/sales_orders/*" element={<SalesOrdersModule />} />
         {/*
           User Management is a genuinely permission-scoped admin surface (unlike
           the per-user module grants above), so it's gated by the `iam` platform

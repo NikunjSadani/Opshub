@@ -28,6 +28,10 @@ export interface Client {
   name: string;
   /** Unique 3-letter uppercase code, e.g. "BRI". */
   code: string;
+  /** 10-char PAN, or null when not captured. */
+  pan: string | null;
+  /** Payment/credit terms in days, or null when not set. */
+  credit_terms_days: number | null;
   active: boolean;
 }
 
@@ -158,5 +162,225 @@ export function useUpdateProjectStatus(): UseMutationResult<
       qc.setQueryData(projectKeys.detail(project.id), project);
       void qc.invalidateQueries({ queryKey: ['projects', 'list'] });
     },
+  });
+}
+
+// ===========================================================================
+// Client Master — a client's full profile (PAN / credit terms) plus its child
+// collections (GSTINs, addresses, contacts). Reads need projects VIEW; every
+// mutation is a `client.manage` action = projects MANAGE (server-enforced).
+// ===========================================================================
+
+export interface Gstin {
+  id: string;
+  /** 15-char GSTIN. */
+  gstin: string;
+  legal_name: string | null;
+  /** 2-digit state code prefix of the GSTIN. */
+  state_code: string | null;
+  is_default: boolean;
+  active: boolean;
+}
+
+export interface Address {
+  id: string;
+  /** Optional GSTIN this address is registered under. */
+  gstin_id: string | null;
+  label: string | null;
+  line1: string;
+  line2: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  is_default: boolean;
+  active: boolean;
+}
+
+export interface Contact {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  designation: string | null;
+  is_default: boolean;
+  active: boolean;
+}
+
+/** A client's full profile — header fields + ACTIVE children (backend ClientDetailOut). */
+export interface ClientDetail {
+  id: string;
+  name: string;
+  code: string;
+  pan: string | null;
+  credit_terms_days: number | null;
+  active: boolean;
+  gstins: Gstin[];
+  addresses: Address[];
+  contacts: Contact[];
+}
+
+/** Editable client header fields (all optional — send only what changed). */
+export interface ClientPatch {
+  name?: string;
+  pan?: string | null;
+  credit_terms_days?: number | null;
+  active?: boolean;
+}
+
+export interface GstinInput {
+  gstin: string;
+  legal_name?: string;
+  state_code?: string;
+  is_default?: boolean;
+}
+export interface GstinPatch {
+  legal_name?: string;
+  state_code?: string;
+  is_default?: boolean;
+}
+
+export interface AddressInput {
+  gstin_id?: string;
+  label?: string;
+  line1: string;
+  line2?: string;
+  city?: string;
+  state?: string;
+  pincode?: string;
+  is_default?: boolean;
+}
+export type AddressPatch = Partial<AddressInput>;
+
+export interface ContactInput {
+  name: string;
+  email?: string;
+  phone?: string;
+  designation?: string;
+  is_default?: boolean;
+}
+export type ContactPatch = Partial<ContactInput>;
+
+// Client-detail query key. It nests UNDER `projectKeys.clients` so invalidating the
+// client list (`['projects','clients']`) also refreshes any loaded detail by prefix.
+export const clientKeys = {
+  detail: (id: string) => [...projectKeys.clients, 'detail', id] as const,
+};
+
+/** A single client's full profile (header + active children). Needs projects VIEW. */
+export function useClientDetail(id: string | null): UseQueryResult<ClientDetail, Error> {
+  const { get } = useApi();
+  return useQuery<ClientDetail, Error>({
+    queryKey: clientKeys.detail(id ?? ''),
+    enabled: id != null,
+    queryFn: ({ signal }) => get<ClientDetail>(`/projects/clients/${id}`, signal),
+  });
+}
+
+/**
+ * Invalidate a client's detail AND the client list on any client-master mutation.
+ * The detail key is a prefix-child of the list key, so this refreshes both the
+ * open profile and the list's header columns (pan / credit terms / default flags).
+ */
+function useInvalidateClient(clientId: string): () => void {
+  const qc = useQueryClient();
+  return () => {
+    void qc.invalidateQueries({ queryKey: clientKeys.detail(clientId) });
+    void qc.invalidateQueries({ queryKey: projectKeys.clients });
+  };
+}
+
+/** Edit a client's header (name / pan / credit terms / active). client.manage. */
+export function useUpdateClient(clientId: string): UseMutationResult<Client, ApiError, ClientPatch> {
+  const { patch } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<Client, ApiError, ClientPatch>({
+    mutationFn: (body) => patch<Client>(`/projects/clients/${clientId}`, body),
+    onSuccess: invalidate,
+  });
+}
+
+// ------------------------------------------------------------------- GSTINs
+export function useAddGstin(clientId: string): UseMutationResult<Gstin, ApiError, GstinInput> {
+  const { post } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<Gstin, ApiError, GstinInput>({
+    mutationFn: (body) => post<Gstin>(`/projects/clients/${clientId}/gstins`, body),
+    onSuccess: invalidate,
+  });
+}
+export function useUpdateGstin(
+  clientId: string,
+): UseMutationResult<Gstin, ApiError, { gstin_id: string; patch: GstinPatch }> {
+  const { patch } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<Gstin, ApiError, { gstin_id: string; patch: GstinPatch }>({
+    mutationFn: ({ gstin_id, patch: body }) => patch<Gstin>(`/projects/clients/gstins/${gstin_id}`, body),
+    onSuccess: invalidate,
+  });
+}
+export function useDeactivateGstin(clientId: string): UseMutationResult<void, ApiError, string> {
+  const { del } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<void, ApiError, string>({
+    mutationFn: (gstinId) => del<void>(`/projects/clients/gstins/${gstinId}`),
+    onSuccess: invalidate,
+  });
+}
+
+// ----------------------------------------------------------------- Addresses
+export function useAddAddress(clientId: string): UseMutationResult<Address, ApiError, AddressInput> {
+  const { post } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<Address, ApiError, AddressInput>({
+    mutationFn: (body) => post<Address>(`/projects/clients/${clientId}/addresses`, body),
+    onSuccess: invalidate,
+  });
+}
+export function useUpdateAddress(
+  clientId: string,
+): UseMutationResult<Address, ApiError, { address_id: string; patch: AddressPatch }> {
+  const { patch } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<Address, ApiError, { address_id: string; patch: AddressPatch }>({
+    mutationFn: ({ address_id, patch: body }) =>
+      patch<Address>(`/projects/clients/addresses/${address_id}`, body),
+    onSuccess: invalidate,
+  });
+}
+export function useDeactivateAddress(clientId: string): UseMutationResult<void, ApiError, string> {
+  const { del } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<void, ApiError, string>({
+    mutationFn: (addressId) => del<void>(`/projects/clients/addresses/${addressId}`),
+    onSuccess: invalidate,
+  });
+}
+
+// ------------------------------------------------------------------ Contacts
+export function useAddContact(clientId: string): UseMutationResult<Contact, ApiError, ContactInput> {
+  const { post } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<Contact, ApiError, ContactInput>({
+    mutationFn: (body) => post<Contact>(`/projects/clients/${clientId}/contacts`, body),
+    onSuccess: invalidate,
+  });
+}
+export function useUpdateContact(
+  clientId: string,
+): UseMutationResult<Contact, ApiError, { contact_id: string; patch: ContactPatch }> {
+  const { patch } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<Contact, ApiError, { contact_id: string; patch: ContactPatch }>({
+    mutationFn: ({ contact_id, patch: body }) =>
+      patch<Contact>(`/projects/clients/contacts/${contact_id}`, body),
+    onSuccess: invalidate,
+  });
+}
+export function useDeactivateContact(clientId: string): UseMutationResult<void, ApiError, string> {
+  const { del } = useApi();
+  const invalidate = useInvalidateClient(clientId);
+  return useMutation<void, ApiError, string>({
+    mutationFn: (contactId) => del<void>(`/projects/clients/contacts/${contactId}`),
+    onSuccess: invalidate,
   });
 }

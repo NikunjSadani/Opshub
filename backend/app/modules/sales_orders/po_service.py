@@ -125,24 +125,36 @@ def _ensure_client_active(db: Session, client_id: int) -> ProjectClient:
     return client
 
 
-def _ensure_project_active(db: Session, project_id: int) -> Project:
+def _ensure_project_active(db: Session, project_id: int, client_id: int) -> Project:
+    """A referenced project must exist, be ACTIVE, AND belong to this PO's client.
+
+    The client↔project linkage check is the spine invariant: a PO's client and its
+    project's client must agree, or downstream P&L / quote joins surface a mismatched
+    pair. (Mirrors the ownership check the GSTIN reference already enforces.)"""
     project = db.execute(
         select(Project).where(Project.id == project_id)
     ).scalar_one_or_none()
     if project is None:
         raise PONotFound(f"project {project_id} not found")
+    if project.client_id != client_id:
+        raise POValidationError("project does not belong to this client")
     if project.status != ProjectStatus.ACTIVE.value:
         raise POValidationError(f"project {project_id} is not Active")
     return project
 
 
 def _ensure_gstin(db: Session, client_id: int, gstin_id: int) -> None:
-    """A referenced client GSTIN must exist AND belong to this client."""
+    """A referenced client GSTIN must exist, belong to this client, AND be active.
+
+    Rejecting an inactive (soft-deleted) GSTIN on a NEW/amended reference mirrors the
+    inactive-product rule; a historical PO keeps its old reference via ``label_maps``."""
     row = db.get(ClientGstin, gstin_id)
     if row is None:
         raise PONotFound(f"client gstin {gstin_id} not found")
     if row.client_id != client_id:
         raise POValidationError("client_gstin_id does not belong to this client")
+    if not row.active:
+        raise POValidationError("client_gstin_id is inactive")
 
 
 def _ensure_file(db: Session, file_id: int) -> None:
@@ -237,7 +249,7 @@ def create_po(
     if not lines:
         raise POValidationError("at least one line item is required")
     _ensure_client_active(db, client_id)
-    _ensure_project_active(db, project_id)
+    _ensure_project_active(db, project_id, client_id)
     if client_gstin_id is not None:
         _ensure_gstin(db, client_id, client_gstin_id)
     if soft_copy_file_id is not None:
@@ -487,8 +499,15 @@ def amend_po(
         with db.begin_nested():
             db.flush()
     except IntegrityError as exc:
-        raise DuplicatePO(
-            f"a PO '{po.po_number}' already exists for this client") from exc
+        # Two uniques can trip here: the PO number (only if po_number was edited) or
+        # the amendment version (a concurrent amend of the SAME PO). Only call it a
+        # duplicate PO when the number actually changed; otherwise it's amendment
+        # contention — surface it as retryable, not a misleading "duplicate PO".
+        if "po_number" in header:
+            raise DuplicatePO(
+                f"a PO '{po.po_number}' already exists for this client") from exc
+        raise POValidationError(
+            "this purchase order was amended concurrently — please retry") from exc
 
     audit.log(
         db,
@@ -511,7 +530,7 @@ def _apply_header(db: Session, po: PurchaseOrder, header: dict[str, Any]) -> Non
         po.po_number = _clean_po_number(str(header["po_number"]))
     if "project_id" in header and header["project_id"] != po.project_id:
         project_id = int(header["project_id"])
-        _ensure_project_active(db, project_id)
+        _ensure_project_active(db, project_id, po.client_id)
         po.project_id = project_id
     if "client_gstin_id" in header:
         gstin_id = header["client_gstin_id"]
@@ -640,6 +659,7 @@ _BULK_ALIASES: dict[str, str] = {
     "freight": "freight", "packaging": "packaging", "handling": "handling",
     "other": "other",
     "tax_rate": "tax_rate", "tax": "tax_rate", "gst": "tax_rate", "gst_rate": "tax_rate",
+    "po_date": "po_date", "date": "po_date", "order_date": "po_date",
 }
 _BULK_REQUIRED = ("po_number", "ordered_qty", "cost_price", "sell_price")
 
@@ -779,6 +799,24 @@ def _build_bulk_line(db: Session, cells: dict[str, str]) -> LineInput | str:
     )
 
 
+def _parse_bulk_date(raw: str) -> date | None | str:
+    """Parse an optional po_date cell. Returns a ``date`` when parseable, ``None`` when
+    blank (caller defaults to today), or an error string when present-but-unparseable.
+
+    Accepts ISO ``YYYY-MM-DD`` (openpyxl stringifies date cells to ``YYYY-MM-DD 00:00:00``,
+    handled by the leading-10 slice) and the common Indian ``DD/MM/YYYY`` / ``DD-MM-YYYY``."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    iso = raw[:10]
+    for fmt, text in ((("%Y-%m-%d"), iso), ("%d/%m/%Y", raw), ("%d-%m-%Y", raw)):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return "po_date must be a date (YYYY-MM-DD or DD/MM/YYYY)"
+
+
 def _po_exists(db: Session, client_id: int, po_number: str) -> bool:
     return db.execute(
         select(PurchaseOrder.id).where(
@@ -797,14 +835,16 @@ def bulk_create_from_excel(
     actor_uid: str | None = None,
 ) -> BulkResult:
     """Parse an ``.xlsx`` and create one PO per ``po_number`` group under the given
-    client + project (po_date defaults to today — the template carries no date column).
+    client + project. An optional ``po_date`` column sets each PO's date (so a batch of
+    back-dated client POs keeps its real dates for the price-history timeline); a blank
+    date falls back to today, a bad date poisons that group.
 
     Discipline: NO row is silently dropped. A malformed / unresolved row lands in
     ``errors`` and POISONS its whole po_number group (a partial PO is never created);
     a po_number already present (in the DB or created earlier this run) is a skip.
     Returns created / skipped / errors. Caller commits."""
     _ensure_client_active(db, client_id)
-    _ensure_project_active(db, project_id)
+    _ensure_project_active(db, project_id, client_id)
 
     rows, parse_errors = _parse_bulk_workbook(data)
     result = BulkResult(errors=list(parse_errors))
@@ -812,6 +852,7 @@ def bulk_create_from_excel(
         return result
 
     groups: dict[str, list[LineInput]] = {}
+    group_dates: dict[str, date] = {}  # first valid po_date per group; else today
     order: list[str] = []
     poisoned: set[str] = set()
     for sheet_row, cells in rows:
@@ -823,6 +864,14 @@ def bulk_create_from_excel(
         if po_number not in groups:
             groups[po_number] = []
             order.append(po_number)
+        # Optional po_date column: a bad value poisons the group (never silently
+        # ignored); a valid one sets the group's date; blank falls back to today.
+        parsed_date = _parse_bulk_date(cells.get("po_date", ""))
+        if isinstance(parsed_date, str):
+            result.errors.append((sheet_row, parsed_date))
+            poisoned.add(po_number)
+        elif parsed_date is not None and po_number not in group_dates:
+            group_dates[po_number] = parsed_date
         if isinstance(line, str):
             result.errors.append((sheet_row, line))
             poisoned.add(po_number)
@@ -847,7 +896,7 @@ def bulk_create_from_excel(
                 po_number=po_number,
                 client_id=client_id,
                 project_id=project_id,
-                po_date=date.today(),
+                po_date=group_dates.get(po_number, date.today()),
                 lines=lines,
                 actor_uid=actor_uid,
             )
