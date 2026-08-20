@@ -33,7 +33,7 @@ router = APIRouter()
 
 def _require_admin(user: User) -> None:
     if not can(user, "user.manage"):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "user.manage requires ADMIN")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "managing users requires the IAM permission")
 
 
 # ------------------------------------------------------------------- schemas
@@ -41,15 +41,13 @@ def _require_admin(user: User) -> None:
 class UserCreate(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     name: str = Field(min_length=1, max_length=200)
-    role: str
-    module_keys: list[str] = Field(default_factory=list)
+    role_id: int
 
 
 class UserUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
-    role: str | None = None
+    role_id: int | None = None
     active: bool | None = None
-    module_keys: list[str] | None = None
 
 
 class UserOut(BaseModel):
@@ -57,9 +55,9 @@ class UserOut(BaseModel):
     id: int
     email: str
     name: str
-    role: str
+    role_id: int | None
+    role_name: str | None
     active: bool
-    module_keys: list[str]
     is_provisioned: bool
     created_at: datetime
 
@@ -80,9 +78,9 @@ def _user_out(u: User) -> UserOut:
         id=u.id,
         email=u.email,
         name=u.name,
-        role=u.role.value,
+        role_id=u.role_id,
+        role_name=u.role.name if u.role is not None else None,
         active=u.active,
-        module_keys=sorted(m.module_key for m in u.module_access),
         is_provisioned=not u.firebase_uid.startswith("local:"),
         created_at=u.created_at,
     )
@@ -90,7 +88,7 @@ def _user_out(u: User) -> UserOut:
 
 def _load(db: Session, user_id: int) -> User:
     user = db.execute(
-        select(User).options(selectinload(User.module_access)).where(User.id == user_id)
+        select(User).options(selectinload(User.role)).where(User.id == user_id)
     ).scalar_one_or_none()
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
@@ -121,8 +119,7 @@ def create_user(
             db,
             email=body.email,
             name=body.name,
-            role=body.role,
-            module_keys=body.module_keys,
+            role_id=body.role_id,
             actor_uid=user.firebase_uid,
             provisioner=provisioner,
         )
@@ -149,9 +146,8 @@ def patch_user(
             db,
             target,
             name=body.name,
-            role=body.role,
+            role_id=body.role_id,
             active=body.active,
-            module_keys=body.module_keys,
             actor_uid=user.firebase_uid,
             acting_user=user,
         )

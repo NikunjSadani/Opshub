@@ -1,6 +1,11 @@
 """Platform tables (unprefixed). Module tables live in each module, prefixed.
 
-user · role · user_module_access · audit_log · setting
+user · role · role_module_permission · role_platform_permission · audit_log · setting
+
+RBAC v2 (inc 26): access is a NAMED ROLE composed of per-module access LEVELS
+(View < Operate < Manage) plus a small set of cross-cutting PLATFORM permissions.
+A user holds exactly one role; the role is the single source of what they can do.
+See `app/platform/rbac.py` for enforcement and `docs/plans/RBAC-ROLES-DESIGN.md`.
 """
 import enum
 from datetime import UTC, datetime
@@ -16,11 +21,76 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-class Role(str, enum.Enum):
-    ADMIN = "ADMIN"
-    MIS = "MIS"
-    OPERATIONS = "OPERATIONS"
-    FINANCE = "FINANCE"
+class Level(str, enum.Enum):
+    """Per-module access level, strictly ordered VIEW < OPERATE < MANAGE (see LEVEL_RANK)."""
+
+    VIEW = "VIEW"        # read-only: see + download
+    OPERATE = "OPERATE"  # do the day-to-day work (upload/generate/confirm/create)
+    MANAGE = "MANAGE"    # sensitive/destructive/module-admin (void/delete/edit-master)
+
+
+# Numeric rank for "at least this level" comparisons. Higher includes lower.
+LEVEL_RANK: dict["Level", int] = {Level.VIEW: 1, Level.OPERATE: 2, Level.MANAGE: 3}
+
+
+class PlatformPerm(str, enum.Enum):
+    """Cross-cutting capabilities not tied to a single module."""
+
+    IAM = "iam"            # manage users AND roles (create/edit/deactivate/assign)
+    SETTINGS = "settings"  # edit platform settings
+
+
+class Role(Base):
+    """A named, admin-composed bundle of per-module levels + platform permissions.
+
+    `is_system` marks the protected built-in **Administrator** role (all modules at
+    MANAGE + every platform permission) — it can't be edited or deleted, and at least
+    one active user must always hold it.
+    """
+
+    __tablename__ = "role"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    description: Mapped[str] = mapped_column(String(400), default="")
+    is_system: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_by: Mapped[str | None] = mapped_column(String(128), default=None)
+
+    module_permissions: Mapped[list["RoleModulePermission"]] = relationship(
+        back_populates="role", cascade="all, delete-orphan"
+    )
+    platform_permissions: Mapped[list["RolePlatformPermission"]] = relationship(
+        back_populates="role", cascade="all, delete-orphan"
+    )
+    users: Mapped[list["User"]] = relationship(back_populates="role")
+
+
+class RoleModulePermission(Base):
+    """One module grant on a role: `module_key` at `level`. Absent row = no access."""
+
+    __tablename__ = "role_module_permission"
+    __table_args__ = (UniqueConstraint("role_id", "module_key", name="uq_role_module"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    role_id: Mapped[int] = mapped_column(ForeignKey("role.id", ondelete="CASCADE"), index=True)
+    module_key: Mapped[str] = mapped_column(String(64))
+    level: Mapped[Level] = mapped_column(Enum(Level))
+
+    role: Mapped[Role] = relationship(back_populates="module_permissions")
+
+
+class RolePlatformPermission(Base):
+    """One platform permission granted to a role."""
+
+    __tablename__ = "role_platform_permission"
+    __table_args__ = (UniqueConstraint("role_id", "permission_key", name="uq_role_platform"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    role_id: Mapped[int] = mapped_column(ForeignKey("role.id", ondelete="CASCADE"), index=True)
+    permission_key: Mapped[PlatformPerm] = mapped_column(Enum(PlatformPerm))
+
+    role: Mapped[Role] = relationship(back_populates="platform_permissions")
 
 
 class User(Base):
@@ -30,26 +100,12 @@ class User(Base):
     firebase_uid: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(200), default="")
-    role: Mapped[Role] = mapped_column(Enum(Role), default=Role.OPERATIONS)
+    # A user without a role has NO access anywhere (fail-closed). Normally always set.
+    role_id: Mapped[int | None] = mapped_column(ForeignKey("role.id"), index=True, default=None)
     active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    module_access: Mapped[list["UserModuleAccess"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
-    )
-
-
-class UserModuleAccess(Base):
-    """EXPLICIT per-user module grants (not role-derived). One row = one granted module."""
-
-    __tablename__ = "user_module_access"
-    __table_args__ = (UniqueConstraint("user_id", "module_key", name="uq_user_module"),)
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
-    module_key: Mapped[str] = mapped_column(String(64))
-
-    user: Mapped[User] = relationship(back_populates="module_access")
+    role: Mapped[Role | None] = relationship(back_populates="users")
 
 
 class AuditLog(Base):

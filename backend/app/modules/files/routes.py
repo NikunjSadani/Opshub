@@ -23,9 +23,9 @@ from app.db import get_db
 from app.modules.files.models import StoredFile
 from app.platform import audit
 from app.platform.auth import current_user
-from app.platform.models import Role, User
+from app.platform.models import Level, User
 from app.platform.module_registry import ModuleSpec
-from app.platform.rbac import can_access_module
+from app.platform.rbac import can_access_module, has_any_module, has_at_least, is_administrator
 from app.platform.storage import get_storage
 
 router = APIRouter()
@@ -41,18 +41,18 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _may_download(user: User, row: StoredFile) -> bool:
-    if user.role == Role.ADMIN or row.uploaded_by == user.firebase_uid:
+    if is_administrator(user) or row.uploaded_by == user.firebase_uid:
         return True
     return row.module_key is not None and can_access_module(user, row.module_key)
 
 
 def _may_upload(user: User) -> bool:
-    """Gate the upload endpoint: an active caller may upload only if they hold at
-    least one module grant (Admins access all modules, so they always qualify).
-    A user with ZERO grants has no business stashing blobs in the app."""
+    """Gate the upload endpoint: uploading is a WRITE, so an active caller may upload
+    only if they hold OPERATE (or higher) on at least one module (Administrators
+    always qualify). A View-only or no-grant user has no business stashing blobs."""
     if not user.active:
         return False
-    return user.role == Role.ADMIN or bool(user.module_access)
+    return has_any_module(user, Level.OPERATE)
 
 
 @router.post("/upload")
@@ -68,8 +68,8 @@ def upload_file(
     # a blob into a module they don't hold). 403 on either failure.
     if not _may_upload(user):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "no module access")
-    if module_key is not None and not can_access_module(user, module_key):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "no access to that module")
+    if module_key is not None and not has_at_least(user, module_key, Level.OPERATE):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "no write access to that module")
 
     max_bytes = get_settings().max_upload_bytes
     data = bytearray()

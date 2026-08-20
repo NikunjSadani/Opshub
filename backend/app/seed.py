@@ -14,7 +14,8 @@ from app.db import SessionLocal
 from app.modules.numbering import service as numbering
 from app.modules.numbering.models import NumberingCounter
 from app.platform import audit
-from app.platform.models import Role, Setting, User, UserModuleAccess
+from app.platform.models import Role, Setting, User
+from app.platform.roles_builtin import ensure_builtin_roles
 
 
 def assert_seedable() -> None:
@@ -30,12 +31,10 @@ def _ensure_user(
     email: str,
     name: str,
     role: Role,
-    modules: list[str] | None = None,
 ) -> None:
     if db.execute(select(User).where(User.firebase_uid == uid)).scalar_one_or_none() is not None:
         return
-    user = User(firebase_uid=uid, email=email, name=name, role=role, active=True)
-    user.module_access = [UserModuleAccess(module_key=m) for m in (modules or [])]
+    user = User(firebase_uid=uid, email=email, name=name, role_id=role.id, active=True)
     db.add(user)
     db.flush()
     audit.log(
@@ -44,24 +43,23 @@ def _ensure_user(
         actor_uid="seed",
         entity="user",
         entity_id=str(user.id),
-        detail={"role": role.value},
+        detail={"role": role.name},
     )
 
 
 def seed(db: Session) -> None:
     """Idempotent: safe to run repeatedly (no duplicates)."""
     assert_seedable()
-    # Initial Admin (sees all modules via the Admin bypass — no explicit grants needed).
-    _ensure_user(db, uid="dev-admin", email="admin@opshub.local", name="Dev Admin", role=Role.ADMIN)
-    # A non-admin MIS user with an EXPLICIT per-user module grant (proves the model).
-    _ensure_user(
-        db,
-        uid="dev-mis",
-        email="mis@opshub.local",
-        name="Dev MIS",
-        role=Role.MIS,
-        modules=["document_automation"],
-    )
+    roles = ensure_builtin_roles(db)
+    # Dev users, one per access shape, so every level is exercisable locally + in E2E.
+    _ensure_user(db, uid="dev-admin", email="admin@opshub.local", name="Dev Admin",
+                 role=roles["Administrator"])
+    _ensure_user(db, uid="dev-manager", email="manager@opshub.local", name="Dev Challan Manager",
+                 role=roles["Challan Manager"])
+    _ensure_user(db, uid="dev-operator", email="operator@opshub.local", name="Dev Challan Operator",
+                 role=roles["Challan Operator"])
+    _ensure_user(db, uid="dev-viewer", email="viewer@opshub.local", name="Dev Viewer",
+                 role=roles["Viewer"])
     # A default config setting (config, never secrets — those go to Secret Manager).
     if db.get(Setting, "eway_threshold") is None:
         db.add(Setting(key="eway_threshold", value={"amount": 50000}, updated_by="seed"))

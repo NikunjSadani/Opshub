@@ -17,8 +17,10 @@ from app.modules.files.routes import router as files_router
 from app.modules.health.routes import SPEC as HEALTH
 from app.modules.jobs.routes import router as jobs_router
 from app.modules.masterdata.routes import router as masterdata_router
+from app.modules.me.routes import router as me_router
 from app.modules.numbering.routes import router as numbering_router
 from app.modules.projects.routes import router as projects_router
+from app.modules.roles.routes import router as roles_router
 from app.modules.settings.routes import router as settings_router
 from app.modules.users.routes import router as users_router
 from app.platform.module_registry import REGISTRY, ModuleSpec, register_module
@@ -69,9 +71,12 @@ def create_app() -> FastAPI:
     app.include_router(numbering_router, prefix="/api/v1", tags=["numbering"])
     app.include_router(projects_router, prefix="/api/v1", tags=["projects"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
-    # User Management — a platform primitive (admin-managed accounts + module
-    # grants); NOT a nav ModuleSpec, mounted like files/settings above.
+    # User Management + Roles — platform primitives (admin-managed accounts and the
+    # roles that grant access); NOT nav ModuleSpecs, mounted like files/settings above.
     app.include_router(users_router, prefix="/api/v1", tags=["users"])
+    app.include_router(roles_router, prefix="/api/v1", tags=["roles"])
+    # The current user's identity + effective permissions (any authenticated user).
+    app.include_router(me_router, prefix="/api/v1", tags=["me"])
     _mount_spa(app, settings.static_dir)
     return app
 

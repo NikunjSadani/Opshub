@@ -22,17 +22,17 @@ from app.db import get_db
 from app.modules.settings import registry
 from app.platform import audit
 from app.platform.auth import current_user
-from app.platform.models import Role, Setting, User
-from app.platform.rbac import can
+from app.platform.models import PlatformPerm, Setting, User
+from app.platform.rbac import can, has_platform
 
 router = APIRouter()
 
 
 def _is_admin(user: User) -> bool:
-    # Match rbac.can(): an inactive account is NEVER admin, even with a still-valid
-    # token — defense-in-depth so read-visibility doesn't rely solely on the upstream
-    # auth gate rejecting inactive users.
-    return user.active and user.role == Role.ADMIN
+    # Admin-visibility settings are readable by whoever may edit settings (the SETTINGS
+    # platform permission — always true for the Administrator role). Inactive accounts
+    # never qualify (has_platform checks `active`), defense-in-depth vs the auth gate.
+    return has_platform(user, PlatformPerm.SETTINGS)
 
 
 class SettingOut(BaseModel):

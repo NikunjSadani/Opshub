@@ -58,6 +58,7 @@ def _verify_token(id_token: str) -> dict[str, Any]:
 def current_user(
     db: Annotated[Session, Depends(get_db)],
     authorization: Annotated[str | None, Header()] = None,
+    x_dev_uid: Annotated[str | None, Header()] = None,
 ) -> User:
     """FastAPI dependency: the authenticated, ACTIVE app user (else 401)."""
     settings = get_settings()
@@ -65,14 +66,18 @@ def current_user(
     # LOCAL-ONLY dev shim: skip Firebase and resolve to a seeded user so the SPA
     # (with its mock token) can drive the real backend before Firebase is wired.
     # DOUBLE-guarded (env must be 'local' AND dev_auth on) — inert in staging/prod.
+    # An optional `X-Dev-Uid` header picks WHICH seeded user to act as (so different
+    # ROLES are exercisable in dev + E2E); it is honoured ONLY inside this shim, so it
+    # can never be used to impersonate anyone once real Firebase auth is on.
     if settings.env == "local" and settings.dev_auth:
         if not authorization or not authorization.lower().startswith("bearer "):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing bearer token")
+        acting_uid = x_dev_uid.strip() if x_dev_uid and x_dev_uid.strip() else settings.dev_auth_uid
         user = db.execute(
-            select(User).where(User.firebase_uid == settings.dev_auth_uid)
+            select(User).where(User.firebase_uid == acting_uid)
         ).scalar_one_or_none()
         if user is None or not user.active:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "dev_auth_uid has no active account")
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"no active account for {acting_uid!r}")
         return user
 
     if not authorization or not authorization.lower().startswith("bearer "):

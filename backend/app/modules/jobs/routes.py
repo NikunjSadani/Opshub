@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.platform.auth import current_user
 from app.platform.jobs import Job
-from app.platform.models import Role, User
+from app.platform.models import User
+from app.platform.rbac import is_administrator
 
 router = APIRouter()
 
@@ -28,7 +29,7 @@ def get_job(
 ) -> dict[str, Any]:
     """Poll a job. 404 if it does not exist OR the caller isn't its creator/Admin."""
     job = db.get(Job, job_id)
-    if job is None or not (user.role == Role.ADMIN or job.created_by == user.firebase_uid):
+    if job is None or not (is_administrator(user) or job.created_by == user.firebase_uid):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
     return {
         "id": job.id,

@@ -31,3 +31,23 @@ def register_module(spec: ModuleSpec) -> ModuleSpec:
         raise ValueError(f"duplicate module key: {spec.key}")
     REGISTRY.append(spec)
     return spec
+
+
+def grantable_modules() -> list[ModuleSpec]:
+    """Real, user-facing modules a role may be granted access to.
+
+    Excludes the `_system` nav group, the health module, and any `coming_soon`
+    placeholder (a not-yet-live module must not be grantable — an early grant could
+    reach it the moment it ships a router). Read from the live REGISTRY, so a newly
+    registered module becomes grantable with no change here. Used by the roles editor
+    (per-module level pickers) and to validate role/module grants server-side.
+    """
+    return [
+        m for m in REGISTRY
+        if m.nav_group != "_system" and m.key != "health" and not m.coming_soon
+    ]
+
+
+def grantable_module_keys() -> set[str]:
+    """The set of module keys `grantable_modules()` exposes (for validation)."""
+    return {m.key for m in grantable_modules()}
