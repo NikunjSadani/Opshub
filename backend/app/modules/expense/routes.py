@@ -377,10 +377,11 @@ def delete_invoice(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> DeleteOut:
-    """Delete an invoice. Deleting a CONFIRMED (immutable) record requires the
-    admin `expense.delete` action; an unconfirmed record is module-gated (so a bad
-    upload / a hard-duplicate can be removed and re-uploaded)."""
-    _require_module(user)
+    """Delete an invoice. Deleting is a WRITE, so it needs at least OPERATE on the
+    module (a read-only Viewer can never delete). Deleting a CONFIRMED (immutable)
+    record additionally requires the `expense.delete` Manage action; an unconfirmed
+    record only needs OPERATE (so a bad upload / hard-duplicate can be re-uploaded)."""
+    rbac.require_level(user, rbac.EXPENSE, Level.OPERATE)
     invoice = _get_invoice(db, invoice_id)
     can_delete_confirmed = can(user, "expense.delete")
     if invoice.status == InvoiceStatus.CONFIRMED.value and not can_delete_confirmed:

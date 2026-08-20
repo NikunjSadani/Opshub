@@ -151,6 +151,47 @@ def test_non_iam_user_forbidden(client: TestClient) -> None:
                                               "platform": []}).status_code == 403
 
 
+def test_role_can_be_cleared_to_zero_grants(client: TestClient) -> None:
+    _as(client, "admin")
+    rid = client.post("/api/v1/roles", json={
+        "name": "Temp", "module_levels": {"document_automation": "MANAGE"},
+        "platform": ["iam"]}).json()["id"]
+    # Editing down to NO grants must persist as an empty set (no stale rows left behind).
+    r = client.patch(f"/api/v1/roles/{rid}", json={
+        "name": "Temp", "module_levels": {}, "platform": []})
+    assert r.status_code == 200, r.text
+    assert r.json()["module_levels"] == {} and r.json()["platform"] == []
+
+
+def test_role_name_clash_is_case_insensitive(client: TestClient) -> None:
+    _as(client, "admin")
+    assert client.post("/api/v1/roles", json={
+        "name": "Ops", "module_levels": {}, "platform": []}).status_code == 201
+    # "ops" collides with "Ops" (case-insensitive) -> 409, not a second role.
+    assert client.post("/api/v1/roles", json={
+        "name": "ops", "module_levels": {}, "platform": []}).status_code == 409
+
+
+def test_delete_nonexistent_role_404(client: TestClient) -> None:
+    _as(client, "admin")
+    assert client.delete("/api/v1/roles/999999").status_code == 404
+
+
+def test_roleless_user_is_fully_denied(client: TestClient) -> None:
+    # A user whose role_id is NULL (e.g. a migrated non-admin) has NO access anywhere.
+    db = client.app.state.TestSession()
+    db.add(User(firebase_uid="roleless", email="none@t.local", name="None",
+                role_id=None, active=True))
+    db.commit()
+    db.close()
+    _as(client, "roleless")
+    me = client.get("/api/v1/me").json()
+    assert me["role_name"] is None
+    assert me["module_levels"] == {} and me["platform"] == []
+    assert me["is_administrator"] is False
+    assert client.get("/api/v1/roles").status_code == 403  # no iam
+
+
 def test_me_reflects_effective_permissions(client: TestClient) -> None:
     _as(client, "admin")
     me = client.get("/api/v1/me").json()

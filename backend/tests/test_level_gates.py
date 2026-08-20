@@ -99,6 +99,20 @@ def test_view_forbidden_on_expense_upload(client: TestClient) -> None:
     assert r.status_code == 403, r.text
 
 
+def test_view_forbidden_on_expense_delete(client: TestClient) -> None:
+    # A read-only Viewer must never delete an invoice (deleting is a write; the level
+    # gate runs before the record is loaded, so it's 403 regardless of the id).
+    _as(client, VIEW)
+    assert client.delete("/api/v1/expense/invoices/1").status_code == 403
+
+
+def test_operate_passes_expense_delete_gate(client: TestClient) -> None:
+    # OPERATE clears the delete gate (then 404s on a missing invoice) — proving the gate
+    # is OPERATE, not VIEW.
+    _as(client, OPERATE)
+    assert client.delete("/api/v1/expense/invoices/999999").status_code == 404
+
+
 # ---------------------------------------------- OPERATE is 403 on MANAGE actions
 
 def test_operate_forbidden_on_void(client: TestClient) -> None:
