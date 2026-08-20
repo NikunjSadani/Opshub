@@ -14,16 +14,35 @@ const EXPENSE = '/m/expense_invoice';
  */
 test.describe('Expense / Invoice', () => {
   test('upload -> extract -> review -> confirm an invoice', async ({ page }) => {
-    // --- upload + real extraction ---
+    // Cost allocation (inc 27) is now REQUIRED at upload, so seed a project + a payment
+    // method via the real API (dev-auth acts as dev-admin) and select them below.
+    const H = { Authorization: 'Bearer e2e' };
+    const client = await (await page.request.post('/api/v1/projects/clients', {
+      headers: H, data: { name: 'Expense Co', code: 'EXC' },
+    })).json();
+    const project = await (await page.request.post('/api/v1/projects', {
+      headers: H, data: { client_id: client.id, name: 'Expense Project' },
+    })).json();
+    const method = await (await page.request.post('/api/v1/expense/payment-methods', {
+      headers: H, data: { name: 'Cash' },
+    })).json();
+
+    // --- upload + real extraction (with the required allocation) ---
     await page.goto(EXPENSE);
+    await page.getByLabel('Project').selectOption(String(project.id));
+    await page.getByLabel('Payment method').selectOption(String(method.id));
     await page.setInputFiles('#expense-files', INVOICE);
     await page.getByRole('button', { name: /Upload \d+ file/ }).click();
 
-    // The clean fixture extracts fully → an EXTRACTED outcome with a "View" action.
+    // The clean fixture extracts fully → an EXTRACTED outcome.
     await expect(page.getByText('Extracted').first()).toBeVisible({ timeout: 20_000 });
-    await page.getByRole('link', { name: 'View' }).first().click();
 
-    // --- the extracted canonical record + confirm ---
+    // --- open the invoice from the Register (the reliable detail path) + confirm ---
+    await page.getByRole('link', { name: 'Register', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Register' })).toBeVisible();
+    const invRow = page.getByRole('row').filter({ hasText: project.code });
+    await invRow.getByRole('link', { name: 'View' }).click();
+
     const confirm = page.getByRole('button', { name: 'Confirm invoice' });
     await expect(confirm).toBeEnabled({ timeout: 15_000 });
     await confirm.click();

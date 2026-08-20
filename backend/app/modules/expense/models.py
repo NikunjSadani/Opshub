@@ -24,10 +24,12 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -94,6 +96,11 @@ class ExpensePaymentMethod(Base):
     (Manage level)."""
 
     __tablename__ = "expense_payment_method"
+    __table_args__ = (
+        # Case-insensitive backstop so "UPI"/"upi" can't both persist and split one
+        # cost centre into two dashboard buckets (the app-layer check races otherwise).
+        Index("uq_expense_payment_method_lower_name", text("lower(name)"), unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)

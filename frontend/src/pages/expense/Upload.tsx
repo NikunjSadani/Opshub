@@ -253,9 +253,13 @@ export function Upload() {
               Clear
             </Button>
           )}
-          {files.length > 0 && (!projectId || !paymentMethodId) && (
-            <span className="text-xs text-slate-400">
-              Select a project and payment method to enable upload.
+          {!busy && (!canSubmit || !canUpload) && (
+            <span className="text-xs text-slate-500">
+              {!perms.loading && !canUpload
+                ? 'You need Operate access to this module to upload.'
+                : files.length === 0
+                  ? 'Choose at least one PDF to upload.'
+                  : 'Select a project and payment method to enable upload.'}
             </span>
           )}
         </div>

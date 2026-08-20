@@ -163,6 +163,7 @@ export function Register() {
           {(projectsQuery.data ?? []).map((p) => (
             <option key={p.id} value={p.id}>
               {p.code} — {p.name}
+              {p.status !== 'ACTIVE' ? ` (${p.status.toLowerCase()})` : ''}
             </option>
           ))}
         </SelectField>
@@ -175,6 +176,7 @@ export function Register() {
           {(methodsQuery.data ?? []).map((m) => (
             <option key={m.id} value={m.id}>
               {m.name}
+              {m.active ? '' : ' (inactive)'}
             </option>
           ))}
         </SelectField>

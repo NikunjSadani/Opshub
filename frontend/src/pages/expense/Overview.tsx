@@ -134,8 +134,8 @@ export function Overview() {
               emptyLabel="No project spend yet"
               headers={['Project', 'Spend']}
               rows={query.data.by_project.map((r) => ({
-                key: `p-${r.project_id}`,
-                label: r.project_code,
+                key: `p-${r.project_id ?? 'none'}`,
+                label: r.project_code ?? 'Unallocated',
                 total_paise: r.total_paise,
                 count: r.count,
               }))}
@@ -145,8 +145,8 @@ export function Overview() {
               emptyLabel="No payment-method spend yet"
               headers={['Payment method', 'Spend']}
               rows={query.data.by_payment_method.map((r) => ({
-                key: `m-${r.payment_method_id}`,
-                label: r.name,
+                key: `m-${r.payment_method_id ?? 'none'}`,
+                label: r.name ?? 'Unallocated',
                 total_paise: r.total_paise,
                 count: r.count,
               }))}

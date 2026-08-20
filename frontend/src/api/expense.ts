@@ -92,19 +92,22 @@ export interface PaymentMethodUpdate {
   active?: boolean;
 }
 
-/** One project's confirmed-spend rollup (backend summary `by_project` row). */
+/** One project's confirmed-spend rollup (backend summary `by_project` row). A NULL
+ * id/code is the "Unallocated" bucket (pre-inc-27 confirmed rows) that keeps the group
+ * totals reconciling to the grand total. */
 export interface ProjectSpend {
-  project_id: number;
-  project_code: string;
+  project_id: number | null;
+  project_code: string | null;
   /** PAISE. */
   total_paise: number;
   count: number;
 }
 
-/** One payment method's confirmed-spend rollup (backend summary `by_payment_method` row). */
+/** One payment method's confirmed-spend rollup (backend summary `by_payment_method` row).
+ * A NULL id/name is the "Unallocated" bucket. */
 export interface PaymentMethodSpend {
-  payment_method_id: number;
-  name: string;
+  payment_method_id: number | null;
+  name: string | null;
   /** PAISE. */
   total_paise: number;
   count: number;
