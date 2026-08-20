@@ -32,10 +32,10 @@ from app.modules.masterdata.consignee_master import (
 )
 from app.modules.masterdata.models import Consignee, ConsigneeParty, Consignor, HsnCode, Series
 from app.modules.masterdata.normalize import collapse_ws, gstin_matches_state, valid_gstin
-from app.platform import audit
+from app.platform import audit, rbac
 from app.platform.auth import current_user
 from app.platform.models import User
-from app.platform.rbac import can, can_access_module
+from app.platform.rbac import can
 
 router = APIRouter()
 
@@ -95,8 +95,7 @@ def _flush_unique(db: Session) -> None:
 
 
 def _require_read(user: User) -> None:
-    if not can_access_module(user, MODULE_KEY):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "no access to document automation")
+    rbac.require_module(user, MODULE_KEY)
 
 
 def _require_edit(user: User) -> None:

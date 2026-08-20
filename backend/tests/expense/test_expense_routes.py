@@ -37,15 +37,14 @@ from app.modules.expense.models import Invoice, InvoiceCorrection
 from app.modules.expense.routes import router
 from app.modules.files.models import StoredFile
 from app.platform.auth import current_user
-from app.platform.models import AuditLog, Role, User, UserModuleAccess
+from app.platform.models import AuditLog, Level, User
+from tests.rbac_util import make_role, make_user
 
 SUPPLIER_GSTIN = "27AAPFU0939F1ZV"
 
-ADMIN = User(firebase_uid="adm", email="a@x.com", name="A", role=Role.ADMIN, active=True)
-MIS = User(firebase_uid="mis", email="m@x.com", name="M", role=Role.MIS, active=True,
-           module_access=[UserModuleAccess(module_key="expense_invoice")])
-OUTSIDER = User(firebase_uid="out", email="o@x.com", name="O", role=Role.OPERATIONS,
-                active=True)
+ADMIN = make_user("adm", role=make_role("Administrator", is_system=True))
+MIS = make_user("mis", role=make_role(module_levels={"expense_invoice": Level.OPERATE}))
+OUTSIDER = make_user("out", role=make_role())
 
 
 # ------------------------------------------------- fake extractor + specs

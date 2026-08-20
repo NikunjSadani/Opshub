@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 from app.config import get_settings
 from app.db import Base
 from app.platform import auth
-from app.platform.models import Role, User
+from app.platform.models import User
 
 
 @pytest.fixture
@@ -27,8 +27,7 @@ def db() -> Iterator[Session]:
     )
     Base.metadata.create_all(engine, tables=[User.__table__])
     session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)()
-    session.add(User(firebase_uid="dev-admin", email="a@x.com", name="Dev Admin",
-                     role=Role.ADMIN, active=True))
+    session.add(User(firebase_uid="dev-admin", email="a@x.com", name="Dev Admin", active=True))
     session.commit()
     try:
         yield session
@@ -47,7 +46,7 @@ def test_dev_auth_bypasses_firebase_in_local(db: Session, monkeypatch: pytest.Mo
     get_settings.cache_clear()
     monkeypatch.setattr(auth, "_verify_token", _boom)  # must NOT be called
     user = auth.current_user(db, "Bearer mock-token.not-real")
-    assert user.firebase_uid == "dev-admin" and user.role == Role.ADMIN
+    assert user.firebase_uid == "dev-admin"
     get_settings.cache_clear()
 
 

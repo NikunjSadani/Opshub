@@ -1,28 +1,21 @@
 import { useEffect, useState } from 'react';
-import { Button, Modal, SelectField, TextField, useToast } from '../../ui';
-import { ROLES } from '../../auth/AuthProvider';
+import { Button, Modal, TextField, useToast } from '../../ui';
 import {
+  useAssignableRoles,
   useUpdateUser,
   useUserSetupLink,
-  type Role,
   type UpdateUserInput,
   type UserOut,
 } from '../../api/users';
-import { ModuleCheckboxes } from './ModuleCheckboxes';
+import { RoleSelectField } from './InviteUserModal';
 import { SetupLinkPanel } from './SetupLinkPanel';
-import { errorMessage, ROLE_LABEL } from './usersFormat';
-
-/** Compare two module-key sets order-independently. */
-function sameKeys(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  const setB = new Set(b);
-  return a.every((k) => setB.has(k));
-}
+import { errorMessage } from './usersFormat';
 
 /**
- * Edit-user modal (ADMIN). Change name / role / active / module grants, and
- * re-issue a one-time setup link. Only changed fields are sent. Server guards
- * (last-admin, self-lockout) surface as readable toast messages.
+ * Edit-user modal (ADMIN, RBAC v2). Change name / role / active, and re-issue a
+ * one-time setup link. The role is picked from the list of existing roles. Only
+ * changed fields are sent. Server guards (last-admin, self-lockout) surface as
+ * readable toast messages.
  */
 export function EditUserModal({
   open,
@@ -36,19 +29,18 @@ export function EditUserModal({
   const toast = useToast();
   const updateUser = useUpdateUser();
   const setupLink = useUserSetupLink();
+  const roles = useAssignableRoles();
 
   const [name, setName] = useState('');
-  const [role, setRole] = useState<Role>('OPERATIONS');
+  const [roleId, setRoleId] = useState<number | null>(null);
   const [active, setActive] = useState(true);
-  const [moduleKeys, setModuleKeys] = useState<string[]>([]);
   const [reissued, setReissued] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
     if (!open || !user) return;
     setName(user.name);
-    setRole(user.role);
+    setRoleId(user.role_id);
     setActive(user.active);
-    setModuleKeys(user.module_keys);
     setReissued(undefined);
     updateUser.reset();
     setupLink.reset();
@@ -64,18 +56,11 @@ export function EditUserModal({
   // Build the partial patch of only the fields that actually changed.
   const patch: UpdateUserInput = {};
   if (trimmedName && trimmedName !== user.name) patch.name = trimmedName;
-  if (role !== user.role) patch.role = role;
+  if (roleId !== null && roleId !== user.role_id) patch.role_id = roleId;
   if (active !== user.active) patch.active = active;
-  if (!sameKeys(moduleKeys, user.module_keys)) patch.module_keys = moduleKeys;
 
   const hasChanges = Object.keys(patch).length > 0;
   const canSubmit = hasChanges && trimmedName.length > 0 && !busy;
-
-  function toggleModule(key: string, checked: boolean) {
-    setModuleKeys((prev) =>
-      checked ? [...new Set([...prev, key])] : prev.filter((k) => k !== key),
-    );
-  }
 
   function close() {
     if (busy) return;
@@ -138,18 +123,14 @@ export function EditUserModal({
           onChange={(e) => setName(e.target.value)}
           maxLength={120}
         />
-        <SelectField
-          label="Role"
-          required
-          value={role}
-          onChange={(e) => setRole(e.target.value as Role)}
-        >
-          {ROLES.map((r) => (
-            <option key={r} value={r}>
-              {ROLE_LABEL[r]}
-            </option>
-          ))}
-        </SelectField>
+        <RoleSelectField
+          value={roleId}
+          onChange={setRoleId}
+          roles={roles.data}
+          loading={roles.isPending}
+          error={roles.isError}
+          disabled={busy}
+        />
 
         <div className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2">
           <div>
@@ -168,8 +149,6 @@ export function EditUserModal({
             {active ? 'Disable' : 'Enable'}
           </Button>
         </div>
-
-        <ModuleCheckboxes selected={moduleKeys} onToggle={toggleModule} disabled={busy} />
 
         <div className="border-t border-slate-100 pt-3">
           {reissued !== undefined ? (

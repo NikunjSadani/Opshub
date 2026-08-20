@@ -3,20 +3,25 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
-import { MockAuthProvider, type Role } from '../../auth/AuthProvider';
-import { RequireRole } from '../../auth/RequireRole';
+import { MockAuthProvider } from '../../auth/AuthProvider';
 import { ToastProvider } from '../../ui';
-import { Sidebar } from '../../components/Sidebar';
 import { UsersModule } from './UsersModule';
 
+/**
+ * User Management tests (RBAC v2). A user holds ONE named role (role_id/role_name);
+ * the invite/edit forms pick from the roles list served by GET /roles. There are
+ * no more per-user module grants.
+ */
+
+// Two users: an admin with a role, and an unprovisioned/disabled user with none.
 const USERS = [
   {
     id: 1,
     email: 'ops.admin@gifsy.in',
     name: 'Ops Admin',
-    role: 'ADMIN',
+    role_id: 10,
+    role_name: 'Administrator',
     active: true,
-    module_keys: ['document_automation'],
     is_provisioned: true,
     created_at: '2026-01-01T00:00:00Z',
   },
@@ -24,20 +29,31 @@ const USERS = [
     id: 2,
     email: 'jane@gifsy.in',
     name: 'Jane Doe',
-    role: 'OPERATIONS',
+    role_id: null,
+    role_name: null,
     active: false,
-    module_keys: [],
     is_provisioned: false,
     created_at: '2026-02-01T00:00:00Z',
   },
 ];
 
-const MODULES = [
-  { key: 'document_automation', title: 'Document Automation', nav_group: 'Modules', coming_soon: false },
-  { key: 'projects', title: 'Projects', nav_group: 'Modules', coming_soon: false },
-  // Filtered out by useAssignableModules (system + health).
-  { key: 'health', title: 'Health', nav_group: '_system', coming_soon: false },
+// The assignable roles served to the picker by GET /roles.
+const ROLES = [
+  { id: 10, name: 'Administrator', description: 'Full access', is_system: true },
+  { id: 20, name: 'Operations', description: 'Ops desk', is_system: false },
 ];
+
+// GET /me for the signed-in (mock) admin, so the AuthProvider can resolve.
+const ME = {
+  id: 1,
+  email: 'ops.admin@gifsy.in',
+  name: 'Ops Admin',
+  role_id: 10,
+  role_name: 'Administrator',
+  is_administrator: true,
+  module_levels: {},
+  platform: ['iam'],
+};
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -46,13 +62,13 @@ function json(data: unknown, status = 200) {
   });
 }
 
-/** Wrap a subtree with the app's providers, pinned to a role via the mock. */
-function renderWithProviders(node: ReactNode, role: Role = 'ADMIN') {
+/** Wrap a subtree with the app's providers (mock auth signs in as the seeded admin). */
+function renderWithProviders(node: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={qc}>
       <MemoryRouter>
-        <MockAuthProvider initialRole={role}>
+        <MockAuthProvider>
           <ToastProvider>{node}</ToastProvider>
         </MockAuthProvider>
       </MemoryRouter>
@@ -66,13 +82,14 @@ afterEach(() => {
 });
 
 describe('UsersModule', () => {
-  it('renders the user list from GET /users', async () => {
+  it('renders the user list with the assigned role from GET /users', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.includes('/roles')) return json(ROLES);
         if (url.includes('/users')) return json(USERS);
-        if (url.includes('/modules')) return json(MODULES);
+        if (url.includes('/me')) return json(ME);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -81,14 +98,17 @@ describe('UsersModule', () => {
 
     expect(await screen.findByText('ops.admin@gifsy.in')).toBeInTheDocument();
     expect(screen.getByText('jane@gifsy.in')).toBeInTheDocument();
-    // Granted-module chip resolves to the human title.
-    expect(await screen.findByText('Document Automation')).toBeInTheDocument();
+    // The assigned role shows as a badge.
+    expect(screen.getByText('Administrator')).toBeInTheDocument();
+    // The role-less user renders an em dash, not "null".
+    expect(screen.getByText('—')).toBeInTheDocument();
+    expect(screen.queryByText(/null/i)).not.toBeInTheDocument();
     // The disabled + unprovisioned user is flagged.
     expect(screen.getByText('Disabled')).toBeInTheDocument();
     expect(screen.getByText(/setup pending/i)).toBeInTheDocument();
   });
 
-  it('posts the right body on invite and shows the one-time setup link', async () => {
+  it('posts { email, name, role_id } on invite and shows the one-time setup link', async () => {
     let postBody: unknown = null;
     vi.stubGlobal(
       'fetch',
@@ -103,9 +123,9 @@ describe('UsersModule', () => {
                 id: 3,
                 email: 'new@gifsy.in',
                 name: 'New User',
-                role: 'OPERATIONS',
+                role_id: 20,
+                role_name: 'Operations',
                 active: true,
-                module_keys: ['document_automation'],
                 is_provisioned: false,
                 created_at: '2026-03-01T00:00:00Z',
               },
@@ -114,8 +134,9 @@ describe('UsersModule', () => {
             201,
           );
         }
+        if (url.includes('/roles')) return json(ROLES);
         if (url.includes('/users')) return json(USERS);
-        if (url.includes('/modules')) return json(MODULES);
+        if (url.includes('/me')) return json(ME);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -128,8 +149,12 @@ describe('UsersModule', () => {
       target: { value: 'new@gifsy.in' },
     });
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: 'New User' } });
-    // Grant a module.
-    fireEvent.click(await screen.findByLabelText('Document Automation'));
+
+    // The role picker lists the roles from GET /roles; choose one by id.
+    const roleSelect = (await screen.findByLabelText(/role/i)) as HTMLSelectElement;
+    expect(screen.getByRole('option', { name: 'Administrator' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Operations' })).toBeInTheDocument();
+    fireEvent.change(roleSelect, { target: { value: '20' } });
 
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }));
 
@@ -144,8 +169,7 @@ describe('UsersModule', () => {
     expect(postBody).toEqual({
       email: 'new@gifsy.in',
       name: 'New User',
-      role: 'OPERATIONS',
-      module_keys: ['document_automation'],
+      role_id: 20,
     });
   });
 
@@ -162,9 +186,9 @@ describe('UsersModule', () => {
                 id: 4,
                 email: 'z@gifsy.in',
                 name: 'Zoe',
-                role: 'FINANCE',
+                role_id: 20,
+                role_name: 'Operations',
                 active: true,
-                module_keys: [],
                 is_provisioned: false,
                 created_at: '2026-03-02T00:00:00Z',
               },
@@ -173,8 +197,9 @@ describe('UsersModule', () => {
             201,
           );
         }
+        if (url.includes('/roles')) return json(ROLES);
         if (url.includes('/users')) return json(USERS);
-        if (url.includes('/modules')) return json(MODULES);
+        if (url.includes('/me')) return json(ME);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -183,11 +208,10 @@ describe('UsersModule', () => {
     fireEvent.click(await screen.findByRole('button', { name: /invite user/i }));
     fireEvent.change(await screen.findByLabelText(/email/i), { target: { value: 'z@gifsy.in' } });
     fireEvent.change(screen.getByLabelText(/name/i), { target: { value: 'Zoe' } });
+    // Role auto-defaults to the first available role; just submit.
     fireEvent.click(screen.getByRole('button', { name: /send invite/i }));
 
-    expect(
-      await screen.findByText(/no setup link yet/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/no setup link yet/i)).toBeInTheDocument();
     // Must NOT imply an email was already sent, or that one will be.
     expect(screen.queryByText(/email sent/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/receive a set-password email/i)).not.toBeInTheDocument();
@@ -202,8 +226,9 @@ describe('UsersModule', () => {
         if (url.includes('/users/1') && method === 'PATCH') {
           return json({ detail: 'You cannot disable your own account.' }, 409);
         }
+        if (url.includes('/roles')) return json(ROLES);
         if (url.includes('/users')) return json(USERS);
-        if (url.includes('/modules')) return json(MODULES);
+        if (url.includes('/me')) return json(ME);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -220,47 +245,5 @@ describe('UsersModule', () => {
     expect(
       await screen.findByText(/you cannot disable your own account/i),
     ).toBeInTheDocument();
-  });
-
-  it('blocks a non-admin at the route guard', async () => {
-    // No /users fetch should be needed — the guard renders first.
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        throw new Error(`Unexpected fetch: ${String(input)}`);
-      }),
-    );
-
-    renderWithProviders(
-      <RequireRole allow={['ADMIN']}>
-        <UsersModule />
-      </RequireRole>,
-      'OPERATIONS',
-    );
-
-    expect(screen.getByText(/not authorized/i)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /invite user/i })).not.toBeInTheDocument();
-  });
-
-  it('hides the Users nav tile from a non-admin and shows it to an admin', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes('/modules')) return json(MODULES);
-        throw new Error(`Unexpected fetch: ${url}`);
-      }),
-    );
-
-    const { unmount } = renderWithProviders(<Sidebar />, 'OPERATIONS');
-    await waitFor(() =>
-      expect(screen.queryByText('Administration')).not.toBeInTheDocument(),
-    );
-    expect(screen.queryByRole('link', { name: /^users$/i })).not.toBeInTheDocument();
-    unmount();
-
-    renderWithProviders(<Sidebar />, 'ADMIN');
-    expect(await screen.findByText('Administration')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: /^users$/i })).toBeInTheDocument();
   });
 });

@@ -10,8 +10,9 @@ import { useMockDevControls } from './AuthProvider';
  *
  * Under the real Firebase provider `useMockDevControls()` returns null and this
  * component disappears — the switching mechanism never leaks into production.
- * Role comes from a signed custom claim there; there is no client-side setter,
- * which is exactly why this lives outside the `AuthContextValue` contract.
+ * It picks which SEEDED user to act as; the backend dev-auth shim resolves that
+ * user (via `X-Dev-Uid`) and `GET /me` returns their real permissions, so both the
+ * UI gating and the server enforcement reflect the selected role consistently.
  */
 export function DevRoleSwitcher() {
   const dev = useMockDevControls();
@@ -20,16 +21,16 @@ export function DevRoleSwitcher() {
 
   return (
     <label className="pointer-events-auto flex items-center gap-1.5 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 shadow-sm">
-      <span className="uppercase tracking-wide text-amber-500">Role (dev)</span>
+      <span className="uppercase tracking-wide text-amber-500">Act as (dev)</span>
       <select
-        aria-label="Dev role switcher"
-        value={dev.role}
-        onChange={(e) => dev.setRole(e.target.value as (typeof dev.roles)[number])}
+        aria-label="Dev user switcher"
+        value={dev.actingUid}
+        onChange={(e) => dev.setActingUid(e.target.value)}
         className="rounded bg-transparent text-[11px] font-semibold text-amber-900 focus:outline-none"
       >
-        {dev.roles.map((r) => (
-          <option key={r} value={r}>
-            {r}
+        {dev.users.map((u) => (
+          <option key={u.uid} value={u.uid}>
+            {u.label}
           </option>
         ))}
       </select>

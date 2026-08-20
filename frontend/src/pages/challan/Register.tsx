@@ -16,7 +16,7 @@ import {
   Td,
   useToast,
 } from '../../ui';
-import { useAuth } from '../../auth/AuthProvider';
+import { usePermissions } from '../../auth/AuthProvider';
 import { useApi } from '../../api/client';
 import {
   buildChallanCsvQuery,
@@ -37,9 +37,10 @@ function formatDate(iso: string): string {
 
 export function Register() {
   const toast = useToast();
-  const { user } = useAuth();
+  const perms = usePermissions();
   const { download, downloadUrl } = useApi();
-  const isAdmin = user?.role === 'ADMIN';
+  // Voiding a challan mutates issued records — gated on MANAGE for the module.
+  const isAdmin = perms.atLeast('document_automation', 'MANAGE');
 
   const [series, setSeries] = useState('');
   const [fy, setFy] = useState('');

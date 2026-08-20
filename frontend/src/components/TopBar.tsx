@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { useAuth } from '../auth/AuthProvider';
+import { useAuth, usePermissions } from '../auth/AuthProvider';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -10,6 +10,7 @@ function initials(name: string): string {
 
 export function TopBar() {
   const { user, signOut } = useAuth();
+  const perms = usePermissions();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -62,7 +63,7 @@ export function TopBar() {
                 {user.name}
               </span>
               <span className="block text-[11px] leading-tight text-slate-500">
-                {user.role}
+                {perms.roleName}
               </span>
             </span>
           </button>

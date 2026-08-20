@@ -15,7 +15,7 @@ import {
   Td,
   useToast,
 } from '../../ui';
-import { useAuth } from '../../auth/AuthProvider';
+import { usePermissions } from '../../auth/AuthProvider';
 import { useApi } from '../../api/client';
 import {
   useBatchesQuery,
@@ -32,9 +32,10 @@ const SERIES_RE = /^[A-Za-z0-9]{1,8}$/;
 
 export function Batches() {
   const toast = useToast();
-  const { user } = useAuth();
+  const perms = usePermissions();
   const { download } = useApi();
-  const isAdmin = user?.role === 'ADMIN';
+  // Recovering a stuck batch mutates generation state — gated on MANAGE.
+  const isAdmin = perms.atLeast('document_automation', 'MANAGE');
   const query = useBatchesQuery(50);
   // Which NEEDS_REVIEW batch (if any) has its inline review panel expanded, so a
   // batch stuck in review is resolvable here — not only inside the upload session.

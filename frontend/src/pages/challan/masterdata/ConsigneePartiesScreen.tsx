@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { useAuth } from '../../../auth/AuthProvider';
+import { usePermissions } from '../../../auth/AuthProvider';
 import {
   Badge,
   Button,
@@ -79,8 +79,9 @@ function friendlyError(err: unknown): string {
  */
 export function ConsigneePartiesScreen() {
   const toast = useToast();
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'ADMIN';
+  const perms = usePermissions();
+  // Creating/editing master data requires MANAGE on the document_automation module.
+  const isAdmin = perms.atLeast('document_automation', 'MANAGE');
 
   const [q, setQ] = useState('');
   // Debounce the search that feeds the query key so each keystroke does not fire

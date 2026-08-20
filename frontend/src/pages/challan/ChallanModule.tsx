@@ -1,5 +1,5 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
-import { useAuth } from '../../auth/AuthProvider';
+import { usePermissions } from '../../auth/AuthProvider';
 import { Tabs, type TabDef } from '../../ui';
 import { Overview } from './Overview';
 import { NewChallan } from './NewChallan';
@@ -12,13 +12,14 @@ import { MasterData } from './MasterData';
 const BASE = '/m/document_automation';
 
 /**
- * Delivery Challan module shell: a tab bar + nested routes. Master Data is
- * admin-only (config the challan flow depends on). Server-side RBAC is the real
- * gate; hiding the tab is just UX.
+ * Delivery Challan module shell: a tab bar + nested routes. Master Data edits
+ * the shared config the challan flow depends on, so it needs MANAGE on the
+ * document_automation module. Server-side RBAC is the real gate; hiding the tab
+ * is just UX.
  */
 export function ChallanModule() {
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'ADMIN';
+  const perms = usePermissions();
+  const canManage = perms.atLeast('document_automation', 'MANAGE');
 
   const tabs: TabDef[] = [
     { to: BASE, label: 'Overview', end: true },
@@ -27,7 +28,7 @@ export function ChallanModule() {
     { to: `${BASE}/register`, label: 'Register' },
     { to: `${BASE}/download`, label: 'Download' },
     { to: `${BASE}/numbering`, label: 'Numbering' },
-    ...(isAdmin ? [{ to: `${BASE}/master-data`, label: 'Master Data' }] : []),
+    ...(canManage ? [{ to: `${BASE}/master-data`, label: 'Master Data' }] : []),
   ];
 
   return (
@@ -42,7 +43,7 @@ export function ChallanModule() {
         <Route path="numbering" element={<Numbering />} />
         <Route
           path="master-data/*"
-          element={isAdmin ? <MasterData /> : <Navigate to={BASE} replace />}
+          element={canManage ? <MasterData /> : <Navigate to={BASE} replace />}
         />
         <Route path="*" element={<Navigate to={BASE} replace />} />
       </Routes>

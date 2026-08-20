@@ -19,11 +19,11 @@ from app.modules.challan import parsing, template
 from app.modules.challan.routes import router
 from app.modules.challan.schema import CHALLAN_COLUMNS, COLUMN_HEADERS
 from app.platform.auth import current_user
-from app.platform.models import Role, User, UserModuleAccess
+from app.platform.models import Level
+from tests.rbac_util import make_role, make_user
 
-MIS = User(firebase_uid="mis", email="m@x.com", name="M", role=Role.MIS, active=True,
-           module_access=[UserModuleAccess(module_key="document_automation")])
-OUTSIDER = User(firebase_uid="out", email="o@x.com", name="O", role=Role.OPERATIONS, active=True)
+MIS = make_user("mis", role=make_role(module_levels={"document_automation": Level.OPERATE}))
+OUTSIDER = make_user("out", role=make_role())
 
 
 @pytest.fixture

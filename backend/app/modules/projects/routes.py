@@ -24,9 +24,10 @@ from sqlalchemy.orm import Session, joinedload
 from app.db import get_db
 from app.modules.projects import service
 from app.modules.projects.models import Project, ProjectClient
+from app.platform import rbac
 from app.platform.auth import current_user
-from app.platform.models import User
-from app.platform.rbac import can, can_access_module
+from app.platform.models import Level, User
+from app.platform.rbac import can
 
 router = APIRouter()
 
@@ -41,8 +42,7 @@ def _escape_like(term: str) -> str:
 
 
 def _require_module(user: User) -> None:
-    if not can_access_module(user, MODULE_KEY):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "no access to projects")
+    rbac.require_module(user, MODULE_KEY)
 
 
 def _require_admin(user: User) -> None:
@@ -150,7 +150,7 @@ def create_project(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ProjectOut:
-    _require_module(user)
+    rbac.require_level(user, rbac.PROJECTS, Level.OPERATE)
     try:
         project = service.create_project(
             db,

@@ -1,46 +1,81 @@
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import { MockAuthProvider, type Role } from './AuthProvider';
-import { RequireRole } from './RequireRole';
+import type { ReactNode } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
+import { MockAuthProvider } from './AuthProvider';
+import { RequirePlatform } from './RequireRole';
 
 /**
- * Render RequireRole under the mock provider pinned to a given role. The
- * mock-only `initialRole` prop drives the same role state the dev switcher
- * flips at runtime, so this exercises the real guard path.
+ * Stub `GET /me` so the permissions context resolves to a set that either
+ * holds `iam` (dev-admin) or holds nothing (dev-viewer), keyed off the
+ * `X-Dev-Uid` header the mock provider sends. Any other call fails loudly.
  */
-function renderAsRole(role: Role, allow: Role[]) {
+function stubMe() {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/me')) {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        const uid = headers['X-Dev-Uid'] ?? 'dev-admin';
+        const isAdmin = uid === 'dev-admin';
+        return new Response(
+          JSON.stringify({
+            id: 1,
+            email: 'test@example.com',
+            name: 'Test User',
+            role_id: 1,
+            role_name: isAdmin ? 'Administrator' : 'Viewer',
+            is_administrator: isAdmin,
+            module_levels: {},
+            platform: isAdmin ? ['iam', 'settings'] : [],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    }),
+  );
+}
+
+/** Render RequirePlatform under the mock provider acting as a given seeded user. */
+function renderAs(uid: string, perm: string, fallback?: ReactNode) {
+  stubMe();
   return render(
-    <MockAuthProvider initialRole={role}>
-      <RequireRole allow={allow}>
+    <MockAuthProvider initialUid={uid}>
+      <RequirePlatform perm={perm} fallback={fallback}>
         <p>Secret admin panel</p>
-      </RequireRole>
+      </RequirePlatform>
     </MockAuthProvider>,
   );
 }
 
-describe('RequireRole', () => {
-  it('renders children when the role is allowed', () => {
-    renderAsRole('ADMIN', ['ADMIN', 'OPERATIONS']);
-    expect(screen.getByText('Secret admin panel')).toBeInTheDocument();
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('RequirePlatform', () => {
+  it('renders children when the user holds the permission', async () => {
+    renderAs('dev-admin', 'iam');
+    expect(await screen.findByText('Secret admin panel')).toBeInTheDocument();
     expect(screen.queryByText('Not authorized')).not.toBeInTheDocument();
   });
 
-  it('shows the not-authorized panel when the role is disallowed', () => {
-    renderAsRole('FINANCE', ['ADMIN']);
-    expect(screen.queryByText('Secret admin panel')).not.toBeInTheDocument();
-    const alert = screen.getByRole('alert');
+  it('shows the not-authorized panel when the permission is missing', async () => {
+    renderAs('dev-viewer', 'iam');
+    const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('Not authorized');
-    // The panel names the roles that would have access.
-    expect(alert).toHaveTextContent('ADMIN');
+    // The panel names the permission that would grant access.
+    expect(alert).toHaveTextContent('iam');
+    expect(screen.queryByText('Secret admin panel')).not.toBeInTheDocument();
   });
 
-  it('renders the custom fallback (nothing) on a role miss when provided', () => {
-    render(
-      <MockAuthProvider initialRole="MIS">
-        <RequireRole allow={['ADMIN']} fallback={null}>
-          <p>Secret admin panel</p>
-        </RequireRole>
-      </MockAuthProvider>,
+  it('renders the custom fallback (nothing) on a permission miss when provided', async () => {
+    renderAs('dev-viewer', 'iam', null);
+    // Once /me resolves, the loading placeholder is gone and — with a null
+    // fallback — neither the children nor the not-authorized panel render.
+    await waitFor(() =>
+      expect(screen.queryByText('Loading…')).not.toBeInTheDocument(),
     );
     expect(screen.queryByText('Secret admin panel')).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();

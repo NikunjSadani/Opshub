@@ -1,24 +1,18 @@
 import type { ReactNode } from 'react';
-import { useAuth, type Role } from './AuthProvider';
+import { usePermissions } from './AuthProvider';
 
 /**
- * Reusable, UX-only role guard.
+ * Reusable, UX-only permission guard (RBAC v2).
  *
  * NOTE: server-side RBAC is the REAL gate — the backend authorizes every
- * request and serves each user only the modules they may access. This
- * component (and {@link useHasRole}) merely hides UI a user can't act on, to
- * avoid dead-ends. It is convenience, not security. (Same stance as the
- * Master Data tab check in `pages/challan/ChallanModule.tsx`.)
+ * request and serves each user only the modules/actions they may access. This
+ * component merely hides UI a user can't act on, to avoid dead-ends. It is
+ * convenience, not security. (Same stance as the Master Data tab check in
+ * `pages/challan/ChallanModule.tsx`.)
  */
 
-/** True when the signed-in user's role is one of `roles`. */
-export function useHasRole(...roles: Role[]): boolean {
-  const { user } = useAuth();
-  return user != null && roles.includes(user.role);
-}
-
-/** Small, friendly "you don't have access" panel for a role miss. */
-function NotAuthorized({ allow }: { allow: Role[] }) {
+/** Small, friendly "you don't have access" panel for a permission miss. */
+function NotAuthorized({ perm }: { perm: string }) {
   return (
     <div
       role="alert"
@@ -26,36 +20,43 @@ function NotAuthorized({ allow }: { allow: Role[] }) {
     >
       <p className="text-sm font-semibold text-amber-800">Not authorized</p>
       <p className="mt-1 text-xs text-amber-700">
-        This area is limited to: {allow.join(', ')}.
+        You don't have the <span className="font-medium">{perm}</span> permission for this area.
       </p>
     </div>
   );
 }
 
-export interface RequireRoleProps {
-  /** Roles permitted to see `children`. */
-  allow: Role[];
+export interface RequirePlatformProps {
+  /** Platform permission required to see `children` (e.g. "iam", "settings"). */
+  perm: string;
   children: ReactNode;
   /**
-   * What to render on a role miss. Defaults to a visible "Not authorized"
-   * panel (friendlier than a silent redirect for a role mismatch). Pass
+   * What to render on a permission miss. Defaults to a visible "Not authorized"
+   * panel (friendlier than a silent redirect for a permission mismatch). Pass
    * `null` to render nothing (e.g. when guarding an optional nav item).
    */
   fallback?: ReactNode;
 }
 
 /**
- * Renders `children` only when the current user's role is in `allow`;
- * otherwise renders `fallback` (a "Not authorized" panel by default).
+ * Renders `children` only when the current user holds the platform permission
+ * `perm`; otherwise renders `fallback` (a "Not authorized" panel by default).
+ * While permissions are still loading, renders nothing to avoid flashing the
+ * not-authorized panel before `GET /me` resolves.
  *
  * @example
- * <RequireRole allow={['ADMIN']}>
- *   <DangerZone />
- * </RequireRole>
+ * <RequirePlatform perm="iam">
+ *   <UsersModule />
+ * </RequirePlatform>
  */
-export function RequireRole({ allow, children, fallback }: RequireRoleProps) {
-  const ok = useHasRole(...allow);
-  if (ok) return <>{children}</>;
+export function RequirePlatform({ perm, children, fallback }: RequirePlatformProps) {
+  const perms = usePermissions();
+  if (perms.loading) {
+    return (
+      <div className="grid place-items-center py-10 text-sm text-slate-400">Loading…</div>
+    );
+  }
+  if (perms.hasPlatform(perm)) return <>{children}</>;
   if (fallback !== undefined) return <>{fallback}</>;
-  return <NotAuthorized allow={allow} />;
+  return <NotAuthorized perm={perm} />;
 }

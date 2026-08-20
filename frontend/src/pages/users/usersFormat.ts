@@ -1,5 +1,4 @@
 import { ApiError } from '../../api/client';
-import type { Role } from '../../api/users';
 
 /** Shared formatting + label helpers for the User Management screens. */
 
@@ -11,13 +10,10 @@ export function errorMessage(err: unknown): string {
   return 'Something went wrong.';
 }
 
-/** Human labels for the role union. */
-export const ROLE_LABEL: Record<Role, string> = {
-  ADMIN: 'Admin',
-  MIS: 'MIS',
-  OPERATIONS: 'Operations',
-  FINANCE: 'Finance',
-};
+/** Display a user's role name, falling back to an em dash when unassigned. */
+export function roleLabel(roleName: string | null): string {
+  return roleName && roleName.length > 0 ? roleName : '—';
+}
 
 /** Basic email shape check (UI hint only; the server is authoritative). */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

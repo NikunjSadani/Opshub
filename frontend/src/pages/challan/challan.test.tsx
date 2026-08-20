@@ -3,10 +3,36 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
-import { AuthProvider, MockAuthProvider, type Role } from '../../auth/AuthProvider';
+import { AuthProvider, MockAuthProvider } from '../../auth/AuthProvider';
 import { ToastProvider } from '../../ui';
 import { NewChallan } from './NewChallan';
 import { Batches } from './Batches';
+
+/**
+ * Build the `GET /me` permission payload for the acting dev user (read off the
+ * `X-Dev-Uid` header the mock provider sends). dev-admin/dev-manager get MANAGE
+ * on the challan module (so admin-gated actions like Recover / Update master
+ * show); everyone else gets OPERATE. Every fetch stub below returns this for /me
+ * so the RBAC gates resolve deterministically.
+ */
+function meResponse(init?: RequestInit): Response {
+  const headers = (init?.headers ?? {}) as Record<string, string>;
+  const uid = headers['X-Dev-Uid'] ?? 'dev-admin';
+  const manage = uid === 'dev-admin' || uid === 'dev-manager';
+  return new Response(
+    JSON.stringify({
+      id: 1,
+      email: 'test@example.com',
+      name: 'Test User',
+      role_id: 1,
+      role_name: manage ? 'Administrator' : 'Challan Operator',
+      is_administrator: uid === 'dev-admin',
+      module_levels: { document_automation: manage ? 'MANAGE' : 'OPERATE' },
+      platform: uid === 'dev-admin' ? ['iam', 'settings'] : [],
+    }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  );
+}
 
 function renderNewChallan() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -23,13 +49,13 @@ function renderNewChallan() {
   );
 }
 
-function renderBatches(role?: Role) {
+function renderBatches(uid?: string) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  // Default AuthProvider signs in as ADMIN; pass a role to exercise the non-admin
-  // gates via the mock provider directly.
+  // Default AuthProvider acts as dev-admin (MANAGE); pass a seeded uid (e.g.
+  // 'dev-operator') to exercise the non-admin gates via the mock provider.
   const auth = (children: ReactNode) =>
-    role ? (
-      <MockAuthProvider initialRole={role}>{children}</MockAuthProvider>
+    uid ? (
+      <MockAuthProvider initialUid={uid}>{children}</MockAuthProvider>
     ) : (
       <AuthProvider>{children}</AuthProvider>
     );
@@ -53,7 +79,7 @@ describe('NewChallan upload flow', () => {
     // renders its empty state; any OTHER call fails loudly instead of hanging.
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes('/challan/batches')) {
           return new Response('[]', {
@@ -61,6 +87,7 @@ describe('NewChallan upload flow', () => {
             headers: { 'content-type': 'application/json' },
           });
         }
+        if (url.endsWith('/me')) return meResponse(init);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -114,6 +141,7 @@ describe('NewChallan upload flow', () => {
             headers: { 'content-type': 'application/json' },
           });
         }
+        if (url.endsWith('/me')) return meResponse(init);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -199,6 +227,7 @@ describe('NewChallan upload flow', () => {
         if (url.includes('/challan/batches')) {
           return json([]);
         }
+        if (url.endsWith('/me')) return meResponse(init);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -301,6 +330,7 @@ describe('NewChallan upload flow', () => {
         if (url.includes('/challan/batches')) {
           return json([]);
         }
+        if (url.endsWith('/me')) return meResponse(init);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -361,7 +391,7 @@ describe('Batches review affordance', () => {
 
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const json = (data: unknown) =>
           new Response(JSON.stringify(data), {
@@ -370,6 +400,7 @@ describe('Batches review affordance', () => {
           });
         if (url.includes('/decisions')) return json(DECISIONS);
         if (url.includes('/challan/batches')) return json([NEEDS_REVIEW_BATCH]);
+        if (url.endsWith('/me')) return meResponse(init);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -426,6 +457,7 @@ describe('Batches review affordance', () => {
           return json({ ...FAILED, status: 'GENERATING' });
         }
         if (url.includes('/challan/batches')) return json([FAILED, GENERATING]);
+        if (url.endsWith('/me')) return meResponse(init);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -457,18 +489,19 @@ describe('Batches review affordance', () => {
     };
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes('/challan/batches'))
           return new Response(JSON.stringify([GENERATING]), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           });
+        if (url.endsWith('/me')) return meResponse(init);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
 
-    renderBatches('OPERATIONS');
+    renderBatches('dev-operator');
 
     expect(await screen.findByText(/an admin can recover it/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^recover$/i })).not.toBeInTheDocument();
@@ -498,7 +531,7 @@ describe('Batches review affordance', () => {
     ];
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const json = (data: unknown) =>
           new Response(JSON.stringify(data), {
@@ -507,11 +540,12 @@ describe('Batches review affordance', () => {
           });
         if (url.includes('/decisions')) return json(DECISIONS);
         if (url.includes('/challan/batches')) return json([NEEDS_REVIEW_BATCH]);
+        if (url.endsWith('/me')) return meResponse(init);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
 
-    renderBatches('OPERATIONS');
+    renderBatches('dev-operator');
 
     fireEvent.click(await screen.findByRole('button', { name: /^review$/i }));
     // The UPDATE_MASTER radio is present but disabled; the two safe options are not.

@@ -8,7 +8,7 @@ import {
   StatePanel,
   useToast,
 } from '../../ui';
-import { useAuth } from '../../auth/AuthProvider';
+import { usePermissions } from '../../auth/AuthProvider';
 import {
   useDeleteInvoice,
   useUploadInvoices,
@@ -29,8 +29,15 @@ function hasDetail(r: UploadResult): boolean {
 
 export function Upload() {
   const toast = useToast();
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'ADMIN';
+  const perms = usePermissions();
+  // Deleting an ALREADY-CONFIRMED invoice (as the delete-and-re-upload path can
+  // require) needs MANAGE on the module; uploading needs OPERATE. The backend
+  // enforces both — these gates just set honest expectations in the UI.
+  const canManage = perms.atLeast('expense_invoice', 'MANAGE');
+  // Keep the upload control enabled while permissions are still loading (so we
+  // don't flash a disabled button); once /me resolves, a View-only user without
+  // OPERATE sees it disabled rather than clicking through to a 403.
+  const canUpload = perms.loading || perms.atLeast('expense_invoice', 'OPERATE');
   const upload = useUploadInvoices();
   const del = useDeleteInvoice();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -155,7 +162,7 @@ export function Upload() {
         </p>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          <Button onClick={onUpload} disabled={files.length === 0 || busy} loading={upload.isPending && resolvingId == null}>
+          <Button onClick={onUpload} disabled={files.length === 0 || busy || !canUpload} loading={upload.isPending && resolvingId == null}>
             {files.length > 0
               ? `Upload ${files.length} file${files.length === 1 ? '' : 's'}`
               : 'Upload'}
@@ -252,10 +259,11 @@ export function Upload() {
                 <span className="font-semibold">{dupTarget.result.filename}</span>? This permanently
                 removes the existing invoice and cannot be undone.
               </p>
-              {!isAdmin && (
+              {!canManage && (
                 <p className="mt-2 text-xs text-amber-700">
-                  Note: if the existing invoice has already been confirmed, only an admin can remove
-                  it — this will fail with a permission error and you'll need an admin to delete it.
+                  Note: if the existing invoice has already been confirmed, removing it needs the
+                  Manage permission — this will fail with a permission error and you'll need someone
+                  with Manage access to delete it.
                 </p>
               )}
             </div>

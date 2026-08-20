@@ -16,6 +16,24 @@ function json(data: unknown, status = 200) {
   });
 }
 
+/**
+ * `GET /me` payload the mock provider fetches on sign-in. Grants MANAGE on the
+ * expense module so the upload (OPERATE) and delete-confirmed (MANAGE) gates
+ * resolve to enabled — matching the default dev-admin the AuthProvider uses.
+ */
+function meResponse(): Response {
+  return json({
+    id: 1,
+    email: 'admin@example.com',
+    name: 'Ada Admin',
+    role_id: 1,
+    role_name: 'Administrator',
+    is_administrator: true,
+    module_levels: { expense_invoice: 'MANAGE' },
+    platform: ['iam', 'settings'],
+  });
+}
+
 /** Wrap a subtree with the app's providers. `initialEntries` drives the router. */
 function renderWithProviders(node: ReactNode, initialEntries: string[] = ['/']) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -63,6 +81,7 @@ describe('Register', () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes('/expense/invoices')) return json([INVOICE_ROW]);
+        if (url.endsWith('/me')) return meResponse();
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -103,6 +122,7 @@ describe('Upload', () => {
             ],
           });
         }
+        if (url.endsWith('/me')) return meResponse();
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -171,6 +191,7 @@ describe('Upload', () => {
           deleted = url;
           return new Response(null, { status: 204 });
         }
+        if (url.endsWith('/me')) return meResponse();
         throw new Error(`Unexpected fetch: ${method} ${url}`);
       }),
     );
@@ -255,6 +276,7 @@ describe('ReviewPanel', () => {
           return json({ ...detail(), status: 'CONFIRMED' });
         }
         if (url.match(/\/expense\/invoices\/5$/)) return json(detail());
+        if (url.endsWith('/me')) return meResponse();
         throw new Error(`Unexpected fetch: ${method} ${url}`);
       }),
     );
@@ -317,6 +339,7 @@ describe('ReviewPanel', () => {
             }),
           );
         }
+        if (url.endsWith('/me')) return meResponse();
         throw new Error(`Unexpected fetch: ${method} ${url}`);
       }),
     );

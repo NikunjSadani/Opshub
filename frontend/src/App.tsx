@@ -16,8 +16,9 @@ import { NotFound } from './pages/NotFound';
 import { ChallanModule } from './pages/challan/ChallanModule';
 import { ExpenseModule } from './pages/expense/ExpenseModule';
 import { ProjectsModule } from './pages/projects/ProjectsModule';
+import { RolesModule } from './pages/roles/RolesModule';
 import { UsersModule } from './pages/users/UsersModule';
-import { RequireRole } from './auth/RequireRole';
+import { RequirePlatform } from './auth/RequireRole';
 import { ToastProvider } from './ui';
 
 export function createQueryClient(): QueryClient {
@@ -59,24 +60,34 @@ export function AppRoutes() {
           list (surfaced via GET /modules and used to build the nav), NOT by role
           — so no role allowlist is gated here. The backend enforces every call;
           a future RequireModule guard (reading the modules list) is the correct
-          FE affordance for direct-URL hits. RequireRole (see its file) is for
-          genuinely role-scoped surfaces; the dev role switcher exercises it.
+          FE affordance for direct-URL hits. RequirePlatform (see its file) is
+          for genuinely permission-scoped surfaces; the dev user switcher
+          exercises it.
         */}
         <Route path="/m/document_automation/*" element={<ChallanModule />} />
         <Route path="/m/expense_invoice/*" element={<ExpenseModule />} />
         <Route path="/m/projects/*" element={<ProjectsModule />} />
         {/*
-          User Management is a genuinely role-scoped admin surface (unlike the
-          per-user module grants above), so it's gated by RequireRole. The
-          backend enforces ADMIN on every /users call; this just avoids a
-          dead-end for a non-admin who hits the URL directly.
+          User Management is a genuinely permission-scoped admin surface (unlike
+          the per-user module grants above), so it's gated by the `iam` platform
+          permission. The backend enforces `iam` on every /users call; this just
+          avoids a dead-end for someone without it who hits the URL directly.
         */}
         <Route
           path="/admin/users"
           element={
-            <RequireRole allow={['ADMIN']}>
+            <RequirePlatform perm="iam">
               <UsersModule />
-            </RequireRole>
+            </RequirePlatform>
+          }
+        />
+        {/* Roles — the same `iam` platform permission governs who can define access. */}
+        <Route
+          path="/admin/roles"
+          element={
+            <RequirePlatform perm="iam">
+              <RolesModule />
+            </RequirePlatform>
           }
         />
         <Route path="/m/:key" element={<ModulePlaceholder />} />

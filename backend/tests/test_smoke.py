@@ -7,8 +7,9 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.platform.audit import compute_row_hash
-from app.platform.models import Role, User, UserModuleAccess
+from app.platform.models import Level
 from app.platform.rbac import can, can_access_module
+from tests.rbac_util import make_role, make_user
 
 client = TestClient(app)
 
@@ -34,14 +35,8 @@ def test_audit_chain_is_tamper_evident():
 
 
 def test_rbac_axes():
-    admin = User(firebase_uid="u1", email="a@x.com", role=Role.ADMIN, active=True, module_access=[])
-    ops = User(
-        firebase_uid="u2",
-        email="o@x.com",
-        role=Role.OPERATIONS,
-        active=True,
-        module_access=[UserModuleAccess(module_key="document_automation")],
-    )
+    admin = make_user("u1", role=make_role("Administrator", is_system=True))
+    ops = make_user("u2", role=make_role(module_levels={"document_automation": Level.OPERATE}))
     # admin-only action
     assert can(admin, "challan.void") is True
     assert can(ops, "challan.void") is False

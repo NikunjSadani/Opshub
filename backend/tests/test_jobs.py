@@ -25,7 +25,8 @@ from app.platform.jobs import (
     mark_running,
     set_progress,
 )
-from app.platform.models import Role, User
+from app.platform.models import User
+from tests.rbac_util import make_role, make_user
 
 engine = create_engine(
     "sqlite://",
@@ -53,7 +54,7 @@ def db() -> Iterator[Session]:
 
 
 def _admin() -> User:
-    return User(id=1, firebase_uid="u1", email="a@x.com", role=Role.ADMIN, active=True)
+    return make_user("u1", role=make_role("Administrator", is_system=True))
 
 
 def _make_client(db: Session, user: User) -> TestClient:
@@ -120,11 +121,11 @@ def test_get_job_scoped_to_creator_or_admin(db: Session) -> None:
     assert admin_res.json()["status"] == "PENDING"
 
     # A different, non-admin user cannot read it — 404 (not 403), no existence leak.
-    other = User(id=2, firebase_uid="u2", email="o@x.com", role=Role.OPERATIONS, active=True)
+    other = make_user("u2", role=make_role())
     assert _make_client(db, other).get(f"/api/v1/jobs/{job.id}").status_code == 404
 
     # The creator can read their own job.
-    owner = User(id=3, firebase_uid="owner-uid", email="w@x.com", role=Role.MIS, active=True)
+    owner = make_user("owner-uid", role=make_role())
     assert _make_client(db, owner).get(f"/api/v1/jobs/{job.id}").status_code == 200
 
 

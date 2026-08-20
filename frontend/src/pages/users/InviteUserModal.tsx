@@ -1,24 +1,22 @@
 import { useEffect, useState } from 'react';
 import { Button, Modal, SelectField, TextField, useToast } from '../../ui';
-import { ROLES } from '../../auth/AuthProvider';
-import { useCreateUser, type CreateUserResult, type Role } from '../../api/users';
-import { ModuleCheckboxes } from './ModuleCheckboxes';
+import { useAssignableRoles, useCreateUser, type CreateUserResult } from '../../api/users';
 import { SetupLinkPanel } from './SetupLinkPanel';
-import { errorMessage, isValidEmail, ROLE_LABEL } from './usersFormat';
+import { errorMessage, isValidEmail, roleLabel } from './usersFormat';
 
 /**
- * Invite-user modal. Collects email / name / role / module grants, POSTs, then
- * flips to a success view showing the one-time setup link. NEVER collects a
- * password.
+ * Invite-user modal (RBAC v2). Collects email / name / role, POSTs, then flips
+ * to a success view showing the one-time setup link. The role is chosen from the
+ * list of existing roles (managed on the Roles screen). NEVER collects a password.
  */
 export function InviteUserModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const toast = useToast();
   const createUser = useCreateUser();
+  const roles = useAssignableRoles();
 
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
-  const [role, setRole] = useState<Role>('OPERATIONS');
-  const [moduleKeys, setModuleKeys] = useState<string[]>([]);
+  const [roleId, setRoleId] = useState<number | null>(null);
   const [result, setResult] = useState<CreateUserResult | null>(null);
 
   // Reset fields + mutation state whenever the modal opens.
@@ -26,24 +24,26 @@ export function InviteUserModal({ open, onClose }: { open: boolean; onClose: () 
     if (!open) return;
     setEmail('');
     setName('');
-    setRole('OPERATIONS');
-    setModuleKeys([]);
+    setRoleId(null);
     setResult(null);
     createUser.reset();
     // Only re-run on open transitions.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // Default to the first available role once the list loads (nothing chosen yet).
+  const roleList = roles.data;
+  useEffect(() => {
+    if (roleId === null && roleList && roleList.length > 0) {
+      setRoleId(roleList[0].id);
+    }
+  }, [roleId, roleList]);
+
   const trimmedName = name.trim();
   const emailValid = isValidEmail(email);
   const emailError = email.length > 0 && !emailValid ? 'Enter a valid email address.' : undefined;
-  const canSubmit = emailValid && trimmedName.length > 0 && !createUser.isPending;
-
-  function toggleModule(key: string, checked: boolean) {
-    setModuleKeys((prev) =>
-      checked ? [...new Set([...prev, key])] : prev.filter((k) => k !== key),
-    );
-  }
+  const canSubmit =
+    emailValid && trimmedName.length > 0 && roleId !== null && !createUser.isPending;
 
   function close() {
     if (createUser.isPending) return;
@@ -51,9 +51,9 @@ export function InviteUserModal({ open, onClose }: { open: boolean; onClose: () 
   }
 
   function submit() {
-    if (!canSubmit) return;
+    if (!canSubmit || roleId === null) return;
     createUser.mutate(
-      { email: email.trim(), name: trimmedName, role, module_keys: moduleKeys },
+      { email: email.trim(), name: trimmedName, role_id: roleId },
       {
         onSuccess: (res) => {
           setResult(res);
@@ -71,14 +71,12 @@ export function InviteUserModal({ open, onClose }: { open: boolean; onClose: () 
         open={open}
         title="User invited"
         onClose={onClose}
-        footer={
-          <Button onClick={onClose}>Done</Button>
-        }
+        footer={<Button onClick={onClose}>Done</Button>}
       >
         <div className="space-y-3">
           <p className="text-sm text-slate-600">
             <span className="font-medium text-slate-900">{result.user.name}</span> (
-            {result.user.email}) was created as {ROLE_LABEL[result.user.role]}.
+            {result.user.email}) was created as {roleLabel(result.user.role_name)}.
           </p>
           <SetupLinkPanel setupLink={result.setup_link} />
         </div>
@@ -122,20 +120,66 @@ export function InviteUserModal({ open, onClose }: { open: boolean; onClose: () 
           placeholder="e.g. Jane Doe"
           maxLength={120}
         />
-        <SelectField
-          label="Role"
-          required
-          value={role}
-          onChange={(e) => setRole(e.target.value as Role)}
-        >
-          {ROLES.map((r) => (
-            <option key={r} value={r}>
-              {ROLE_LABEL[r]}
-            </option>
-          ))}
-        </SelectField>
-        <ModuleCheckboxes selected={moduleKeys} onToggle={toggleModule} />
+        <RoleSelectField
+          value={roleId}
+          onChange={setRoleId}
+          roles={roles.data}
+          loading={roles.isPending}
+          error={roles.isError}
+        />
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Role picker shared by the invite + edit forms. Renders one option per existing
+ * role (value = role id, label = role name), with honest disabled placeholders
+ * while the list is loading, errored, or empty.
+ */
+export function RoleSelectField({
+  value,
+  onChange,
+  roles,
+  loading,
+  error,
+  disabled = false,
+}: {
+  value: number | null;
+  onChange: (id: number) => void;
+  roles: { id: number; name: string }[] | undefined;
+  loading: boolean;
+  error: boolean;
+  disabled?: boolean;
+}) {
+  const hasRoles = !!roles && roles.length > 0;
+  const placeholder = loading
+    ? 'Loading roles…'
+    : error
+      ? 'Failed to load roles'
+      : hasRoles
+        ? 'Select a role…'
+        : 'No roles available';
+
+  return (
+    <SelectField
+      label="Role"
+      required
+      value={value === null ? '' : String(value)}
+      disabled={disabled || !hasRoles}
+      onChange={(e) => {
+        const next = Number.parseInt(e.target.value, 10);
+        if (Number.isFinite(next)) onChange(next);
+      }}
+    >
+      <option value="" disabled>
+        {placeholder}
+      </option>
+      {roles?.map((r) => (
+        <option key={r.id} value={String(r.id)}>
+          {r.name}
+        </option>
+      ))}
+    </SelectField>
   );
 }

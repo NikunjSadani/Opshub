@@ -9,6 +9,22 @@ const MODULES: ModuleDescriptor[] = [
   { key: 'user-management', title: 'User Management', nav_group: 'Platform', coming_soon: false },
 ];
 
+/** The permissions payload the mock provider fetches from GET /me on sign-in. */
+const ME = {
+  id: 1,
+  email: 'admin@example.com',
+  name: 'Ada Admin',
+  role_id: 1,
+  role_name: 'Administrator',
+  is_administrator: true,
+  module_levels: {
+    document_automation: 'MANAGE',
+    projects: 'MANAGE',
+    expense_invoice: 'MANAGE',
+  },
+  platform: ['iam', 'settings'],
+};
+
 function jsonResponse(body: unknown): Response {
   return {
     ok: true,
@@ -26,6 +42,7 @@ describe('OpsHub app shell', () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = typeof input === 'string' ? input : input.toString();
         if (url.endsWith('/api/v1/modules')) return jsonResponse(MODULES);
+        if (url.endsWith('/api/v1/me')) return jsonResponse(ME);
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
@@ -47,10 +64,11 @@ describe('OpsHub app shell', () => {
     // A coming-soon module still renders, badged as such (tile-only text).
     expect(await screen.findByText('Coming Soon')).toBeInTheDocument();
 
-    // The signed-in user's identity shows in the top bar. (Scoped to the
-    // header: the dev role switcher also renders an "ADMIN" <option>.)
-    const header = screen.getByRole('banner');
-    expect(within(header).getByText('ADMIN')).toBeInTheDocument();
+    // The signed-in user's role name (from GET /me) shows in the top bar.
+    // (Scoped to the header: the dev user switcher renders its labels outside
+    // the <header> banner.)
+    const header = await screen.findByRole('banner');
+    expect(await within(header).findByText('Administrator')).toBeInTheDocument();
   });
 
   it('called the modules endpoint with a bearer token', async () => {

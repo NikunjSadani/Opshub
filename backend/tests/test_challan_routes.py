@@ -32,14 +32,14 @@ from app.modules.numbering import service as numbering
 from app.modules.numbering.models import NumberingAllocation
 from app.modules.projects import service as projects_service
 from app.platform.auth import current_user
-from app.platform.models import Role, Setting, User, UserModuleAccess
+from app.platform.models import Level, Setting, User
+from tests.rbac_util import make_role, make_user
 
 GSTIN = "27AAAAA0000A1Z5"                 # consignor / direct-insert snapshots (not checksummed)
 CONSIGNEE_GSTIN = "27AAPFU0939F1ZV"       # valid checksum, Maharashtra — the upload path
-ADMIN = User(firebase_uid="adm", email="a@x.com", name="A", role=Role.ADMIN, active=True)
-MIS = User(firebase_uid="mis", email="m@x.com", name="M", role=Role.MIS, active=True,
-           module_access=[UserModuleAccess(module_key="document_automation")])
-OUTSIDER = User(firebase_uid="out", email="o@x.com", name="O", role=Role.OPERATIONS, active=True)
+ADMIN = make_user("adm", role=make_role("Administrator", is_system=True))
+MIS = make_user("mis", role=make_role(module_levels={"document_automation": Level.OPERATE}))
+OUTSIDER = make_user("out", role=make_role())
 
 
 @pytest.fixture

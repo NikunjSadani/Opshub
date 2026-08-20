@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.config import get_settings
 from app.db import Base
-from app.platform.models import Role, Setting, User
+from app.platform.models import Level, Setting, User
 from app.seed import assert_seedable, seed
 
 engine = create_engine(
@@ -30,12 +30,15 @@ def db() -> Iterator[Session]:
         Base.metadata.drop_all(engine)
 
 
-def test_seed_creates_admin_mis_and_setting(db: Session) -> None:
+def test_seed_creates_role_based_users_and_setting(db: Session) -> None:
     seed(db)
     admin = db.execute(select(User).where(User.firebase_uid == "dev-admin")).scalar_one()
-    assert admin.role is Role.ADMIN
-    mis = db.execute(select(User).where(User.firebase_uid == "dev-mis")).scalar_one()
-    assert [m.module_key for m in mis.module_access] == ["document_automation"]
+    assert admin.role is not None and admin.role.is_system  # the protected Administrator role
+    operator = db.execute(select(User).where(User.firebase_uid == "dev-operator")).scalar_one()
+    assert operator.role is not None and operator.role.name == "Challan Operator"
+    assert {mp.module_key: mp.level for mp in operator.role.module_permissions} == {
+        "document_automation": Level.OPERATE
+    }
     assert db.get(Setting, "eway_threshold") is not None
 
 
@@ -43,7 +46,7 @@ def test_seed_is_idempotent(db: Session) -> None:
     seed(db)
     seed(db)  # second run must not duplicate
     count = db.execute(select(func.count()).select_from(User)).scalar_one()
-    assert count == 2
+    assert count == 4  # dev-admin, dev-manager, dev-operator, dev-viewer
 
 
 def test_seed_refuses_prod(monkeypatch: pytest.MonkeyPatch) -> None:

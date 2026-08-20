@@ -20,13 +20,11 @@ from app.modules.projects import service
 from app.modules.projects.models import Project, ProjectClient
 from app.modules.projects.routes import router
 from app.platform.auth import current_user
-from app.platform.models import AuditLog, Role, User, UserModuleAccess
+from app.platform.models import AuditLog, Level, User
+from tests.rbac_util import make_role, make_user
 
-ADMIN = User(firebase_uid="adm", email="a@x.com", name="A", role=Role.ADMIN, active=True)
-MODULE_USER = User(
-    firebase_uid="mod", email="m@x.com", name="M", role=Role.MIS, active=True,
-    module_access=[UserModuleAccess(module_key="projects")],
-)
+ADMIN = make_user("adm", role=make_role("Administrator", is_system=True))
+MODULE_USER = make_user("mod", role=make_role(module_levels={"projects": Level.OPERATE}))
 
 
 @pytest.fixture

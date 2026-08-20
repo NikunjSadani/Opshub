@@ -43,9 +43,10 @@ from app.db import get_db
 from app.modules.challan import download, render, service, template
 from app.modules.challan.models import BatchStatus, Challan, ChallanBatch, ChallanStatus
 from app.modules.files.models import StoredFile
+from app.platform import rbac
 from app.platform.auth import current_user
-from app.platform.models import User
-from app.platform.rbac import can, can_access_module
+from app.platform.models import Level, User
+from app.platform.rbac import can
 from app.platform.storage import get_storage
 
 router = APIRouter()
@@ -65,8 +66,7 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _require_module(user: User) -> None:
-    if not can_access_module(user, MODULE_KEY):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "no access to document automation")
+    rbac.require_module(user, MODULE_KEY)
 
 
 # ------------------------------------------------------------------- schemas
@@ -183,7 +183,7 @@ def upload_batch(
     file: Annotated[UploadFile, File()],
 ) -> ChallanBatch:
     """Upload an Excel workbook and validate it synchronously (no rendering)."""
-    _require_module(user)
+    rbac.require_level(user, rbac.CHALLAN, Level.OPERATE)
     max_bytes = get_settings().max_upload_bytes
     data = bytearray()
     while chunk := file.file.read(_UPLOAD_CHUNK):  # cap BEFORE appending, so peak
@@ -238,7 +238,7 @@ def generate_batch(
     db: Annotated[Session, Depends(get_db)],
 ) -> ChallanBatch:
     """Kick off reserve->render->issue in the background for a VALIDATED batch."""
-    _require_module(user)
+    rbac.require_level(user, rbac.CHALLAN, Level.OPERATE)
     batch = db.get(ChallanBatch, batch_id)
     if batch is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "batch not found")
@@ -295,7 +295,7 @@ def submit_batch_decisions(
 ) -> ChallanBatch:
     """Record per-field review choices. When none remain PENDING the batch becomes
     VALIDATED (ready to generate)."""
-    _require_module(user)
+    rbac.require_level(user, rbac.CHALLAN, Level.OPERATE)
     batch = db.get(ChallanBatch, batch_id)
     if batch is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "batch not found")

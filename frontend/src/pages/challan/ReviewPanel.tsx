@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { Badge, Button, ConfirmDialog, ErrorState, Loading, useToast } from '../../ui';
-import { useAuth } from '../../auth/AuthProvider';
+import { usePermissions } from '../../auth/AuthProvider';
 import { ApiError } from '../../api/client';
 import {
   challanKeys,
@@ -73,12 +73,12 @@ export function ReviewPanel({
   onResolved: (updated: BatchOut) => void;
 }) {
   const toast = useToast();
-  const { user } = useAuth();
+  const perms = usePermissions();
   // "Update master" permanently edits shared master data — the backend requires
-  // `masterdata.edit` (ADMIN). Gate it in the UI too so a non-admin can't pick an
-  // option that only earns them a 403 after clearing the danger confirm. Mirrors
-  // how the Register gates Void behind isAdmin.
-  const isAdmin = user?.role === 'ADMIN';
+  // MANAGE on the document_automation module. Gate it in the UI too so a user
+  // without MANAGE can't pick an option that only earns them a 403 after clearing
+  // the danger confirm. Mirrors how the Register gates Void.
+  const isAdmin = perms.atLeast('document_automation', 'MANAGE');
   const qc = useQueryClient();
   const submit = useSubmitDecisions();
   const decisionsQuery = useBatchDecisions(batch.id);

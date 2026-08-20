@@ -36,14 +36,12 @@ from app.modules.masterdata.models import (
 )
 from app.modules.masterdata.routes import router
 from app.platform.auth import current_user
-from app.platform.models import AuditLog, Role, User, UserModuleAccess
+from app.platform.models import AuditLog, Level, User
+from tests.rbac_util import make_role, make_user
 
-ADMIN = User(firebase_uid="adm", email="a@x.com", name="A", role=Role.ADMIN, active=True)
-MIS = User(
-    firebase_uid="mis", email="m@x.com", name="M", role=Role.MIS, active=True,
-    module_access=[UserModuleAccess(module_key="document_automation")],
-)
-OUTSIDER = User(firebase_uid="out", email="o@x.com", name="O", role=Role.OPERATIONS, active=True)
+ADMIN = make_user("adm", role=make_role("Administrator", is_system=True))
+MIS = make_user("mis", role=make_role(module_levels={"document_automation": Level.OPERATE}))
+OUTSIDER = make_user("out", role=make_role())
 
 GSTIN_A = "27AAAAA0000A1Z2"  # valid checksum, state 27 = Maharashtra
 GSTIN_B = "29AAAAA0000A1ZY"  # valid checksum, state 29 = Karnataka

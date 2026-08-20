@@ -17,7 +17,7 @@ import {
   Td,
   useToast,
 } from '../../ui';
-import { useAuth } from '../../auth/AuthProvider';
+import { usePermissions } from '../../auth/AuthProvider';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import {
   PROJECT_STATUSES,
@@ -189,8 +189,11 @@ function NewProjectModal({
 
 /** The projects register: filters + a create action + the project table. */
 export function ProjectsList() {
-  const { user } = useAuth();
-  const isAdmin = user?.role === 'ADMIN';
+  const perms = usePermissions();
+  // Changing a project's status is a Manage action; creating a project is an
+  // Operate (write) action. Gate each on the right level for the projects module.
+  const canManage = perms.atLeast('projects', 'MANAGE');
+  const canCreate = perms.atLeast('projects', 'OPERATE');
 
   const [clientId, setClientId] = useState('');
   const [status, setStatus] = useState<ProjectStatus | ''>('');
@@ -214,14 +217,16 @@ export function ProjectsList() {
         title="Projects"
         subtitle="Projects across all clients, newest first."
         actions={
-          <Button
-            size="sm"
-            onClick={() => setModalOpen(true)}
-            disabled={!hasClients}
-            title={hasClients ? undefined : 'Register a client first.'}
-          >
-            New project
-          </Button>
+          canCreate ? (
+            <Button
+              size="sm"
+              onClick={() => setModalOpen(true)}
+              disabled={!hasClients}
+              title={hasClients ? undefined : 'Register a client first.'}
+            >
+              New project
+            </Button>
+          ) : undefined
         }
       />
 
@@ -294,7 +299,7 @@ export function ProjectsList() {
                 </Td>
                 <Td className="whitespace-nowrap">{formatDate(p.start_date)}</Td>
                 <Td>
-                  {isAdmin ? (
+                  {canManage ? (
                     <StatusControl project={p} />
                   ) : (
                     <Badge tone={PROJECT_STATUS_TONE[p.status]}>

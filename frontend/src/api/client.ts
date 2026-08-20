@@ -85,6 +85,9 @@ export interface RequestOptions {
   /** JSON-serializable request body. */
   body?: unknown;
   token?: string | null;
+  /** LOCAL dev only: act as a specific seeded user (backend honours `X-Dev-Uid` only
+   * inside the double-guarded dev-auth shim). Null/undefined under real auth. */
+  devUid?: string | null;
   signal?: AbortSignal;
 }
 
@@ -97,6 +100,7 @@ export async function apiFetch<T>(path: string, opts: RequestOptions = {}): Prom
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
   if (opts.token) headers.Authorization = `Bearer ${opts.token}`;
+  if (opts.devUid) headers['X-Dev-Uid'] = opts.devUid;
 
   const res = await fetch(`${API_BASE}${path}`, {
     method: opts.method ?? 'GET',
@@ -122,21 +126,32 @@ export async function apiFetch<T>(path: string, opts: RequestOptions = {}): Prom
  * always used), then delegates to `apiFetch`.
  */
 export function useApi() {
-  const { getToken } = useAuth();
+  const { getToken, devUid } = useAuth();
+
+  // Dev-only header so a dev-switched role reaches the backend shim (null under real auth).
+  const authHeaders = useCallback(
+    (token: string | null): Record<string, string> | undefined => {
+      const h: Record<string, string> = {};
+      if (token) h.Authorization = `Bearer ${token}`;
+      if (devUid) h['X-Dev-Uid'] = devUid;
+      return Object.keys(h).length ? h : undefined;
+    },
+    [devUid],
+  );
 
   const request = useCallback(
     async <T>(path: string, opts: Omit<RequestOptions, 'token'> = {}): Promise<T> => {
       const token = await getToken();
-      return apiFetch<T>(path, { ...opts, token });
+      return apiFetch<T>(path, { ...opts, token, devUid });
     },
-    [getToken],
+    [getToken, devUid],
   );
 
   const download = useCallback(
     async (fileId: number, fallbackName = 'download') => {
       const token = await getToken();
       const res = await fetch(`${API_BASE}/files/${fileId}/download`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        headers: authHeaders(token),
       });
       if (!res.ok) throw await downloadError(res);
       const blob = await res.blob();
@@ -152,14 +167,14 @@ export function useApi() {
       a.remove();
       URL.revokeObjectURL(url);
     },
-    [getToken],
+    [getToken, authHeaders],
   );
 
   const downloadUrl = useCallback(
     async (path: string, fallbackName = 'download'): Promise<DownloadResult> => {
       const token = await getToken();
       const res = await fetch(`${API_BASE}${path}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        headers: authHeaders(token),
       });
       if (!res.ok) throw await downloadError(res);
       const blob = await res.blob();
@@ -183,7 +198,7 @@ export function useApi() {
         skippedUnavailable: parseNumberList(res.headers.get('X-Skipped-Unavailable')),
       };
     },
-    [getToken],
+    [getToken, authHeaders],
   );
 
   return {

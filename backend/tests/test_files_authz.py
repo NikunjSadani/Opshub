@@ -22,14 +22,12 @@ from app.db import Base, get_db
 from app.modules.files.models import StoredFile  # noqa: F401 - registers the table
 from app.modules.files.routes import router
 from app.platform.auth import current_user
-from app.platform.models import Role, User, UserModuleAccess
+from app.platform.models import Level, User
+from tests.rbac_util import make_role, make_user
 
-NO_GRANT = User(firebase_uid="nogrant", email="n@x.com", role=Role.OPERATIONS, active=True)
-DOCAUTO = User(
-    firebase_uid="doc", email="d@x.com", role=Role.OPERATIONS, active=True,
-    module_access=[UserModuleAccess(module_key="document_automation")],
-)
-ADMIN = User(firebase_uid="adm", email="a@x.com", role=Role.ADMIN, active=True)
+NO_GRANT = make_user("nogrant", role=make_role())
+DOCAUTO = make_user("doc", role=make_role(module_levels={"document_automation": Level.OPERATE}))
+ADMIN = make_user("adm", role=make_role("Administrator", is_system=True))
 
 
 @pytest.fixture

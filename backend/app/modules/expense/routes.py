@@ -38,9 +38,10 @@ from app.db import get_db
 from app.modules.expense import service
 from app.modules.expense.models import Invoice, InvoiceStatus
 from app.modules.files.models import StoredFile
+from app.platform import rbac
 from app.platform.auth import current_user
-from app.platform.models import User
-from app.platform.rbac import can, can_access_module
+from app.platform.models import Level, User
+from app.platform.rbac import can
 from app.platform.storage import get_storage
 
 router = APIRouter()
@@ -56,8 +57,7 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _require_module(user: User) -> None:
-    if not can_access_module(user, MODULE_KEY):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "no access to expense & invoice")
+    rbac.require_module(user, MODULE_KEY)
 
 
 def _get_invoice(db: Session, invoice_id: int) -> Invoice:
@@ -214,7 +214,7 @@ def upload_invoices(
     summary. When the WHOLE request is duplicates (nothing new persisted) the HTTP
     status is 409; otherwise 201.
     """
-    _require_module(user)
+    rbac.require_level(user, rbac.EXPENSE, Level.OPERATE)
     if not files:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "no files uploaded")
     if len(files) > MAX_UPLOAD_FILES:
@@ -349,7 +349,7 @@ def submit_review(
     Corrections run first (each flips its field to CORRECTED, source "human", and
     overwrites the snapshot scalar), then — if `confirm` is set — the invoice is
     frozen to CONFIRMED (blocked while a required field is still weak)."""
-    _require_module(user)
+    rbac.require_level(user, rbac.EXPENSE, Level.OPERATE)
     invoice = _get_invoice(db, invoice_id)
     if not body.corrections and not body.confirm:
         raise HTTPException(

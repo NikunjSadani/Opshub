@@ -2,145 +2,259 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from 'react';
+import { apiFetch } from '../api/client';
 
 /**
- * OpsHub roles (see docs/DESIGN.md §3). A user's `role` governs actions;
- * a separate per-user module-access list (served by the backend) governs
- * which modules are visible. The shell only needs the identity + a token
- * getter here — authorization is enforced server-side.
+ * Auth + permissions for the whole app (RBAC v2).
+ *
+ * Identity + a token come from the auth provider (mock today, Firebase later). The
+ * user's ACCESS is fetched from the backend `GET /me` — the single source of truth —
+ * and exposed via {@link usePermissions}: per-module levels (View/Operate/Manage) plus
+ * platform permissions. The UI gates on these; the backend enforces them.
  */
-export type Role = 'ADMIN' | 'MIS' | 'OPERATIONS' | 'FINANCE';
+export type LevelName = 'VIEW' | 'OPERATE' | 'MANAGE';
 
-/** All roles, in a stable display order. Handy for guards and the dev switcher. */
-export const ROLES: readonly Role[] = ['ADMIN', 'MIS', 'OPERATIONS', 'FINANCE'];
+const LEVEL_RANK: Record<LevelName, number> = { VIEW: 1, OPERATE: 2, MANAGE: 3 };
 
 export interface AuthUser {
   uid: string;
   email: string;
   name: string;
-  role: Role;
 }
 
-/**
- * The single auth contract the whole app depends on. The mock implementation
- * below satisfies it today; a real `FirebaseAuthProvider` will implement the
- * exact same shape later (see the TODO) so nothing downstream changes.
- */
+/** Effective permissions for the current user, as returned by `GET /me`. */
+export interface Permissions {
+  roleName: string | null;
+  isAdministrator: boolean;
+  /** module_key -> granted level; absent key = no access to that module. */
+  moduleLevels: Record<string, LevelName>;
+  /** platform permission keys held ("iam", "settings"). */
+  platform: string[];
+}
+
+interface MeResponse {
+  id: number;
+  email: string;
+  name: string;
+  role_id: number | null;
+  role_name: string | null;
+  is_administrator: boolean;
+  module_levels: Record<string, LevelName>;
+  platform: string[];
+}
+
 export interface AuthContextValue {
   user: AuthUser | null;
-  /** True while the initial auth state is resolving (always false for mock). */
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
-  /**
-   * Returns a bearer token for API calls, or null when signed out.
-   * Real impl returns the Firebase ID token (auto-refreshed by the SDK).
-   */
   getToken: () => Promise<string | null>;
+  /** LOCAL dev only: the seeded user to act as (sent as `X-Dev-Uid`). Null under real auth. */
+  devUid: string | null;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+// --- permissions context (populated from GET /me) ---
+
+export interface PermissionsApi {
+  loading: boolean;
+  error: boolean;
+  isAdministrator: boolean;
+  roleName: string | null;
+  moduleLevel: (moduleKey: string) => LevelName | null;
+  canAccessModule: (moduleKey: string) => boolean;
+  atLeast: (moduleKey: string, level: LevelName) => boolean;
+  hasPlatform: (perm: string) => boolean;
+  refetch: () => void;
+}
+
+const PermissionsContext = createContext<PermissionsApi | null>(null);
+
+export function usePermissions(): PermissionsApi {
+  const ctx = useContext(PermissionsContext);
+  if (!ctx) throw new Error('usePermissions must be used within an <AuthProvider>');
+  return ctx;
+}
+
+/** Build the query-helper API over a resolved (or absent) permission set. */
+function buildPermissionsApi(
+  perms: Permissions | null,
+  loading: boolean,
+  error: boolean,
+  refetch: () => void,
+): PermissionsApi {
+  const moduleLevel = (key: string): LevelName | null => perms?.moduleLevels[key] ?? null;
+  return {
+    loading,
+    error,
+    isAdministrator: perms?.isAdministrator ?? false,
+    roleName: perms?.roleName ?? null,
+    moduleLevel,
+    canAccessModule: (key) => moduleLevel(key) !== null,
+    atLeast: (key, level) => {
+      const current = moduleLevel(key);
+      return current !== null && LEVEL_RANK[current] >= LEVEL_RANK[level];
+    },
+    hasPlatform: (perm) => perms?.platform.includes(perm) ?? false,
+    refetch,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Mock implementation — lets the shell build & run with no Firebase creds.
+// The dev switcher picks which SEEDED user to act as, so different ROLES (and
+// thus different permission sets from /me) are exercisable locally + in E2E.
 // ---------------------------------------------------------------------------
 
-/**
- * Mock-only dev controls, kept DELIBERATELY OUT of `AuthContextValue`.
- *
- * The real `FirebaseAuthProvider` must implement `AuthContextValue` exactly,
- * and Firebase derives `role` from a signed custom claim — there is no
- * client-side role setter in the real world. So the ability to switch roles
- * lives in a SEPARATE context that only `MockAuthProvider` supplies. Any UI
- * that wants it calls `useMockDevControls()`, which returns `null` under a
- * real provider (and the UI then renders nothing).
- */
+export interface DevUser {
+  uid: string;
+  label: string;
+}
+
+/** The seeded dev users (see backend app/seed.py), one per access shape. */
+export const DEV_USERS: readonly DevUser[] = [
+  { uid: 'dev-admin', label: 'Administrator' },
+  { uid: 'dev-manager', label: 'Challan Manager' },
+  { uid: 'dev-operator', label: 'Challan Operator' },
+  { uid: 'dev-viewer', label: 'Viewer' },
+];
+
 export interface MockDevControls {
-  role: Role;
-  setRole: (role: Role) => void;
-  roles: readonly Role[];
+  actingUid: string;
+  setActingUid: (uid: string) => void;
+  users: readonly DevUser[];
 }
 
 const MockDevContext = createContext<MockDevControls | null>(null);
 
-/**
- * Returns the mock role-switching controls, or `null` when the active provider
- * is not the mock (e.g. the real Firebase provider). Callers must handle null.
- */
 export function useMockDevControls(): MockDevControls | null {
   return useContext(MockDevContext);
 }
 
-const MOCK_USER: AuthUser = {
-  uid: 'mock-admin-uid',
-  email: 'ops.admin@gifsy.in',
-  name: 'Ops Admin',
-  role: 'ADMIN',
-};
-
 const MOCK_TOKEN = 'mock-id-token.not-a-real-jwt';
 
-/**
- * MockAuthProvider — starts signed-in as an ADMIN so the shell is immediately
- * usable, and exposes working signIn/signOut for the /login placeholder page.
- *
- * Identity and role are held in SEPARATE state so a dev tool can swap the role
- * at runtime (via {@link useMockDevControls}) without disturbing the rest of
- * the mock identity, and so the role survives a mock sign-in. The public
- * `AuthContextValue` is unchanged — role switching is a mock-only side channel.
- *
- * `initialRole` is a mock-only convenience (handy in tests); it is NOT part of
- * the auth contract the real provider implements.
- */
 export function MockAuthProvider({
   children,
-  initialRole = MOCK_USER.role,
+  initialUid = 'dev-admin',
 }: {
   children: ReactNode;
-  initialRole?: Role;
+  initialUid?: string;
 }) {
-  const [account, setAccount] = useState<AuthUser | null>(MOCK_USER);
-  const [role, setRole] = useState<Role>(initialRole);
+  const [signedIn, setSignedIn] = useState(true);
+  const [actingUid, setActingUid] = useState(initialUid);
 
-  // The exposed user always reflects the currently-selected mock role.
-  const user = useMemo<AuthUser | null>(
-    () => (account ? { ...account, role } : null),
-    [account, role],
-  );
-
-  const signIn = useCallback(async (email: string, _password: string) => {
-    // No real credential check — mock accepts anything and keeps the current role.
-    void _password;
-    setAccount({ ...MOCK_USER, email: email || MOCK_USER.email });
+  const getToken = useCallback(async () => (signedIn ? MOCK_TOKEN : null), [signedIn]);
+  const signIn = useCallback(async (_email: string, _password: string) => {
+    setSignedIn(true);
   }, []);
-
-  const signOut = useCallback(async () => {
-    setAccount(null);
-  }, []);
-
-  const getToken = useCallback(async () => {
-    return account ? MOCK_TOKEN : null;
-  }, [account]);
+  const signOut = useCallback(async () => setSignedIn(false), []);
 
   const value = useMemo<AuthContextValue>(
-    () => ({ user, loading: false, signIn, signOut, getToken }),
-    [user, signIn, signOut, getToken],
+    () => ({
+      // Identity is filled in from /me below; keep a lightweight placeholder here.
+      user: signedIn ? { uid: actingUid, email: '', name: '' } : null,
+      loading: false,
+      signIn,
+      signOut,
+      getToken,
+      devUid: signedIn ? actingUid : null,
+    }),
+    [signedIn, actingUid, signIn, signOut, getToken],
   );
 
   const devControls = useMemo<MockDevControls>(
-    () => ({ role, setRole, roles: ROLES }),
-    [role],
+    () => ({ actingUid, setActingUid, users: DEV_USERS }),
+    [actingUid],
   );
 
   return (
-    <AuthContext.Provider value={value}>
-      <MockDevContext.Provider value={devControls}>
-        {children}
-      </MockDevContext.Provider>
+    <MockDevContext.Provider value={devControls}>
+      <AuthAndPermissions value={value}>{children}</AuthAndPermissions>
+    </MockDevContext.Provider>
+  );
+}
+
+/**
+ * Wraps the app in the auth context AND fetches `GET /me` to populate permissions.
+ * Both the mock and the future Firebase provider render through this, so the
+ * permission wiring is identical regardless of how identity is obtained.
+ */
+function AuthAndPermissions({
+  value,
+  children,
+}: {
+  value: AuthContextValue;
+  children: ReactNode;
+}) {
+  const [perms, setPerms] = useState<Permissions | null>(null);
+  const [meUser, setMeUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [nonce, setNonce] = useState(0);
+
+  const signedIn = value.user !== null;
+  const devUid = value.devUid;
+  const { getToken } = value;
+
+  const refetch = useCallback(() => setNonce((n) => n + 1), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!signedIn) {
+      setPerms(null);
+      setMeUser(null);
+      setLoading(false);
+      setError(false);
+      return;
+    }
+    setLoading(true);
+    setError(false);
+    void (async () => {
+      try {
+        const token = await getToken();
+        const me = await apiFetch<MeResponse>('/me', { token, devUid });
+        if (cancelled) return;
+        setPerms({
+          roleName: me.role_name,
+          isAdministrator: me.is_administrator,
+          moduleLevels: me.module_levels,
+          platform: me.platform,
+        });
+        setMeUser({ uid: devUid ?? String(me.id), email: me.email, name: me.name });
+      } catch {
+        if (cancelled) return;
+        setPerms(null);
+        setMeUser(null);
+        setError(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [signedIn, devUid, getToken, nonce]);
+
+  // The exposed user merges the provider identity with the /me identity (email/name).
+  const mergedValue = useMemo<AuthContextValue>(
+    () => ({ ...value, user: value.user && meUser ? { ...value.user, ...meUser } : value.user }),
+    [value, meUser],
+  );
+
+  const permsApi = useMemo(
+    () => buildPermissionsApi(perms, loading, error, refetch),
+    [perms, loading, error, refetch],
+  );
+
+  return (
+    <AuthContext.Provider value={mergedValue}>
+      <PermissionsContext.Provider value={permsApi}>{children}</PermissionsContext.Provider>
     </AuthContext.Provider>
   );
 }
@@ -152,9 +266,9 @@ function AuthNotConfigured() {
       <div className="max-w-md">
         <h1 className="text-lg font-semibold text-slate-900">Authentication not configured</h1>
         <p className="mt-2 text-sm text-slate-600">
-          This build has no authentication provider wired up. Mock auth (which
-          signs everyone in as an admin) is disabled outside development. Wire up
-          FirebaseAuthProvider before deploying — see the TODO in AuthProvider.tsx.
+          This build has no authentication provider wired up. Mock auth (which signs everyone
+          in) is disabled outside development. Wire up FirebaseAuthProvider before deploying —
+          see the TODO in AuthProvider.tsx.
         </p>
       </div>
     </div>
@@ -162,18 +276,11 @@ function AuthNotConfigured() {
 }
 
 /**
- * Default provider for the app. In development it uses the mock (auto-admin)
- * provider; in a PRODUCTION build it FAILS CLOSED — open mock auth must never
- * ship. Until the real provider is wired, a prod build renders a hard block
- * instead of silently authenticating every visitor as an admin.
+ * Default provider. Development uses the mock; a PRODUCTION build FAILS CLOSED.
  *
- * TODO(auth): implement FirebaseAuthProvider with the SAME AuthContextValue:
- *   - subscribe to firebase/auth `onIdTokenChanged` -> setUser(mapped claims)
- *   - signIn  -> signInWithEmailAndPassword(auth, email, password)
- *   - signOut -> firebaseSignOut(auth)
- *   - getToken -> auth.currentUser?.getIdToken() ?? null
- *   - map the OpsHub `role` from a custom claim (set via Firebase Admin SDK).
- * Then return `<FirebaseAuthProvider>` for the production branch below.
+ * TODO(auth): implement FirebaseAuthProvider that renders through <AuthAndPermissions>
+ * with the SAME AuthContextValue (devUid: null), obtaining identity + token from
+ * firebase/auth; /me then supplies permissions exactly as it does for the mock.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   if (import.meta.env.PROD) {

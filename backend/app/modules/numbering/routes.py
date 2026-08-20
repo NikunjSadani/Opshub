@@ -31,9 +31,10 @@ from app.modules.numbering.models import (
     NumberingAllocation,
     NumberingCounter,
 )
+from app.platform import rbac
 from app.platform.auth import current_user
 from app.platform.models import User
-from app.platform.rbac import can, can_access_module
+from app.platform.rbac import can
 
 router = APIRouter()
 
@@ -41,8 +42,7 @@ MODULE_KEY = "document_automation"  # numbering serves the Delivery Challan modu
 
 
 def _require_module(user: User) -> None:
-    if not can_access_module(user, MODULE_KEY):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "no access to document automation")
+    rbac.require_module(user, MODULE_KEY)
 
 
 # ------------------------------------------------------------------- schemas

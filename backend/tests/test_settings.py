@@ -17,7 +17,8 @@ from sqlalchemy.pool import StaticPool
 from app.db import Base, get_db
 from app.modules.settings.routes import router
 from app.platform.auth import current_user
-from app.platform.models import AuditLog, Role, Setting, User
+from app.platform.models import AuditLog, Setting, User
+from tests.rbac_util import make_role, make_user
 
 # A real, declared, PUBLIC setting (see settings/registry.py). Non-secret operational
 # config the UI may read; the only key the challan engine actually consumes today.
@@ -31,10 +32,10 @@ _engine = create_engine(
 )
 _TestSession = sessionmaker(bind=_engine, autoflush=False, autocommit=False, future=True)
 
-ADMIN = User(id=1, firebase_uid="admin-uid", email="admin@x.com", role=Role.ADMIN, active=True)
-OPS = User(id=2, firebase_uid="ops-uid", email="ops@x.com", role=Role.OPERATIONS, active=True)
-INACTIVE_ADMIN = User(
-    id=3, firebase_uid="ex-admin", email="ex@x.com", role=Role.ADMIN, active=False)
+ADMIN = make_user("admin-uid", role=make_role("Administrator", is_system=True))
+OPS = make_user("ops-uid", role=make_role())
+INACTIVE_ADMIN = make_user(
+    "ex-admin", role=make_role("Administrator", is_system=True), active=False)
 
 
 def _override_get_db() -> Iterator[Session]:

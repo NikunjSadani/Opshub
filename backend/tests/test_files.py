@@ -19,8 +19,9 @@ from app.db import Base, get_db
 from app.modules.files.models import StoredFile  # noqa: F401 - registers the table
 from app.modules.files.routes import router
 from app.platform.auth import current_user
-from app.platform.models import Role, User, UserModuleAccess
+from app.platform.models import Level, User
 from app.platform.storage import LocalStorage
+from tests.rbac_util import make_role, make_user
 
 
 @pytest.fixture
@@ -44,13 +45,12 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClie
             db.close()
 
     def _override_user() -> User:
-        # Holds a module grant so it clears the upload authz gate (upload requires
-        # at least one grant); the round-trip tests exercise mechanics, not authz.
-        return User(
-            firebase_uid="fb-tester",
+        # Holds an OPERATE grant so it clears the upload authz gate (upload requires
+        # OPERATE on some module); the round-trip tests exercise mechanics, not authz.
+        return make_user(
+            "fb-tester",
+            role=make_role(module_levels={"document_automation": Level.OPERATE}),
             email="tester@x.com",
-            active=True,
-            module_access=[UserModuleAccess(module_key="document_automation")],
         )
 
     app = FastAPI()
@@ -92,11 +92,11 @@ def test_download_denied_for_other_user(client: TestClient) -> None:
     up = client.post("/api/v1/files/upload", files={"file": ("secret.txt", b"top", "text/plain")})
     file_id = up.json()["id"]
 
-    intruder = User(firebase_uid="intruder", email="x@x.com", role=Role.OPERATIONS, active=True)
+    intruder = make_user("intruder", role=make_role())
     client.app.dependency_overrides[current_user] = lambda: intruder
     assert client.get(f"/api/v1/files/{file_id}/download").status_code == 404
 
-    admin = User(firebase_uid="adm", email="a@x.com", role=Role.ADMIN, active=True)
+    admin = make_user("adm", role=make_role("Administrator", is_system=True))
     client.app.dependency_overrides[current_user] = lambda: admin
     assert client.get(f"/api/v1/files/{file_id}/download").status_code == 200
 
