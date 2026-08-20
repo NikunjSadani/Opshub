@@ -19,7 +19,7 @@ Standing rules honoured every wave: full gate (never a piped exit code), runtime
 
 | Wave | Build agents | Verify agents | Audit rigor | Active orchestration | Status |
 |---|---|---|---|---|---|
-| **1 — Foundation** (Product · Client master · PO+line items · numbering prefix · quote search · `sales_orders` RBAC) | 8 (4 BE + 4 FE) | 3 | Single + UI/UX | ~3–5 hrs | ⏳ IN PROGRESS |
+| **1 — Foundation** (Product · Client master · PO+line items · numbering prefix · quote search · `sales_orders` RBAC) | 8 (4 BE + 4 FE) | 3 | Single + UI/UX | ~3–5 hrs | ✅ DONE (`471b007`) |
 | **2 — Revenue+AR ∥ Finance ∥ Vendor CN** (`billing` · `finance` · expense `doc_type`) | 7 (4 BE + 3 FE) | 4 | **DUAL (money)** | ~4–6 hrs | ☐ pending |
 | **3 — Fulfilment** (challan↔invoice linkage · logistics · POD) | 4 (2 BE + 2 FE) | 3 | Single + UI/UX | ~2.5–4 hrs | ☐ pending |
 | **4 — Action Center** (computed reminders: procurement T-15 · invoicing-due · AR aging) | 2 (1 BE + 1 FE) | 3 | Single + UI/UX | ~1.5–2.5 hrs | ☐ pending |
@@ -43,10 +43,12 @@ Critical path: Stage 0 (me) → PO+line-items BE (#3, heaviest) → integrate/ga
 | 7 | PO entry FE | Agent | PO header + line-item grid + Excel upload (+ soft-copy on detail) | ✅ 7 tests |
 | 8 | Quote search FE | Agent | search screen (filters, price history, trend) | ✅ 4 tests |
 | A1 | Correctness audit | Agent | found H1 (cross-client project) + M1/M2/L2/L3 — **all fixed** + 4 regression tests | ✅ |
-| A2 | UI/UX audit | Agent | states/empty/async/copy/a11y | ⏳ running |
-| A3 | E2E | Agent | Playwright: product→client→PO→short-close/void→search + RBAC | ⏳ running |
+| A2 | UI/UX audit | Agent | found M1–M4 + L2/L3 (incl. false-empty projects error, VIEW dead-end, missing soft-copy upload) — **all fixed** | ✅ |
+| A3 | E2E | Agent | Playwright product→client→PO→short-close/void→quote→GSTIN + RBAC matrix; found E1/E2 (add-first-child, stale-detail) — **fixed** | ✅ 11/11 |
 
-**Integration gate (BE+FE):** ✅ BE ruff·mypy·**pytest 463**·no-drift · FE typecheck·build·**vitest 94** · runtime-verified in-browser (all screens render live data, 0 console errors). Commits `44482d9` (BE), `b631c83` (FE + audit fixes).
+**Wave 1 COMPLETE (2026-08-20).** Gate: BE ruff·mypy·**pytest 463**·no-drift · FE typecheck·build·**vitest 100** · **E2E 11/11** · runtime-verified in-browser (live data, 0 console errors). Commits `44482d9` (BE), `b631c83` (FE + BE audit fixes), `471b007` (UI/UX + E2E fixes). Audits found + fixed **1 HIGH backend** (cross-client project linkage) + **2 HIGH frontend** (add-first-child, stale detail) + 8 MED/LOW.
+
+**Owner-decision residual (surfaced, NOT auto-deferred):** L1 — concurrent "add default GSTIN/address/contact" can leave two defaults (no partial-unique DB constraint; `_unset_sibling_defaults` demotes after insert). Cosmetic, internal-tool low-concurrency. Recommended follow-up: a partial unique index `WHERE is_default` (a small migration). Owner to decide fix-now vs accept.
 
 ## Known long poles / risks
 
