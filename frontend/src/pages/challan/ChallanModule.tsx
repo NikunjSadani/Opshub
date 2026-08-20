@@ -43,7 +43,18 @@ export function ChallanModule() {
         <Route path="numbering" element={<Numbering />} />
         <Route
           path="master-data/*"
-          element={canManage ? <MasterData /> : <Navigate to={BASE} replace />}
+          element={
+            // Defer the guard until /me resolves — a fresh deep-link to this
+            // route must not be bounced before permissions load (mirrors
+            // RequirePlatform's loading behaviour).
+            perms.loading ? (
+              <div className="grid place-items-center py-10 text-sm text-slate-400">Loading…</div>
+            ) : canManage ? (
+              <MasterData />
+            ) : (
+              <Navigate to={BASE} replace />
+            )
+          }
         />
         <Route path="*" element={<Navigate to={BASE} replace />} />
       </Routes>

@@ -50,19 +50,25 @@ function LevelSegmented({
         return (
           <label
             key={opt.label}
-            className={`cursor-pointer px-2.5 py-1 text-xs font-medium transition ${
-              selected ? 'bg-brand-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'
-            } ${disabled ? 'cursor-not-allowed opacity-60' : ''}`}
+            className={`cursor-pointer ${disabled ? 'cursor-not-allowed' : ''}`}
           >
+            {/* sr-only radio drives selection; `peer` lets the visible segment
+                below show a keyboard focus ring (mouse clicks stay ring-free). */}
             <input
               type="radio"
               name={name}
-              className="sr-only"
+              className="peer sr-only"
               checked={selected}
               disabled={disabled}
               onChange={() => onChange(opt.value)}
             />
-            {opt.label}
+            <span
+              className={`block px-2.5 py-1 text-xs font-medium transition peer-focus-visible:relative peer-focus-visible:z-10 peer-focus-visible:ring-2 peer-focus-visible:ring-inset peer-focus-visible:ring-brand-500/60 ${
+                selected ? 'bg-brand-600 text-white' : 'bg-white text-slate-600 hover:bg-slate-50'
+              } ${disabled ? 'opacity-60' : ''}`}
+            >
+              {opt.label}
+            </span>
           </label>
         );
       })}
@@ -103,6 +109,14 @@ export function RoleEditorModal({
   const [levels, setLevels] = useState<Record<string, LevelValue>>({});
   const [platform, setPlatform] = useState<string[]>([]);
 
+  // The built-in Administrator (is_system) role serializes with EMPTY grants
+  // (module_levels: {}, platform: []) — its access is IMPLICIT. So a naive clone
+  // of it would seed an empty, powerless role. When cloning a system role we
+  // instead pre-fill the FULL grants the table advertises ("Full access — every
+  // module (Manage) + all platform permissions") so the clone actually matches.
+  const isSystemClone = mode === 'clone' && role?.is_system === true;
+  const allPlatformKeys = useMemo(() => PLATFORM_PERMISSIONS.map((p) => p.key), []);
+
   // Seed the form each time the modal opens. Clone pre-fills from the source
   // role but with a fresh "(copy)" name; edit pre-fills as-is; create is blank.
   useEffect(() => {
@@ -110,13 +124,38 @@ export function RoleEditorModal({
     const seed = mode === 'create' ? null : role ?? null;
     setName(mode === 'clone' && seed ? `${seed.name} (copy)` : isEdit && seed ? seed.name : '');
     setDescription(seed ? seed.description : '');
-    setLevels(seed ? { ...seed.module_levels } : {});
-    setPlatform(seed ? [...seed.platform] : []);
+    if (isSystemClone) {
+      // Full-Manage on every assignable module + all platform permissions. If the
+      // modules list hasn't loaded yet, the fill-in effect below completes it.
+      const fullLevels: Record<string, LevelValue> = {};
+      for (const m of modulesQuery.data ?? []) fullLevels[m.key] = 'MANAGE';
+      setLevels(fullLevels);
+      setPlatform([...allPlatformKeys]);
+    } else {
+      setLevels(seed ? { ...seed.module_levels } : {});
+      setPlatform(seed ? [...seed.platform] : []);
+    }
     createRole.reset();
     updateRole.reset();
     // Re-seed only on open / target / mode changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, role, mode]);
+
+  // If a system-role clone opened BEFORE the assignable-modules list finished
+  // loading, back-fill every not-yet-set module at MANAGE once it arrives, so the
+  // clone is never left partially/emptily granted. `=== undefined` guards against
+  // clobbering a level the operator has since changed.
+  useEffect(() => {
+    if (!open || !isSystemClone) return;
+    const modules = modulesQuery.data;
+    if (!modules || modules.length === 0) return;
+    setLevels((prev) => {
+      const next = { ...prev };
+      for (const m of modules) if (next[m.key] === undefined) next[m.key] = 'MANAGE';
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, isSystemClone, modulesQuery.data]);
 
   const titleByKey = useMemo(
     () => buildTitleByKey(modulesQuery.data ?? []),

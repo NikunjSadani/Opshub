@@ -79,6 +79,11 @@ export function ReviewPanel({
   // without MANAGE can't pick an option that only earns them a 403 after clearing
   // the danger confirm. Mirrors how the Register gates Void.
   const isAdmin = perms.atLeast('document_automation', 'MANAGE');
+  // Submitting decisions is a WRITE — the backend requires OPERATE. Gate the save
+  // in the UI too so a View user isn't shown an action that only 403s. (Entry to
+  // this panel from the Batches tab is already OPERATE-gated; this defends the
+  // other mount points — e.g. the New Challan flow.)
+  const canOperate = perms.atLeast('document_automation', 'OPERATE');
   const qc = useQueryClient();
   const submit = useSubmitDecisions();
   const decisionsQuery = useBatchDecisions(batch.id);
@@ -311,15 +316,24 @@ export function ReviewPanel({
           })}
 
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <Button onClick={onSave} disabled={!allChosen} loading={submit.isPending}>
-              Save decisions &amp; continue
-            </Button>
-            <span className="text-xs tabular-nums text-slate-500">
-              {decidedCount} of {rows.length} decided
-            </span>
-            {!allChosen && (
+            {canOperate ? (
+              <>
+                <Button onClick={onSave} disabled={!allChosen} loading={submit.isPending}>
+                  Save decisions &amp; continue
+                </Button>
+                <span className="text-xs tabular-nums text-slate-500">
+                  {decidedCount} of {rows.length} decided
+                </span>
+                {!allChosen && (
+                  <span className="text-xs text-slate-500">
+                    Pick an option for every field to continue.
+                  </span>
+                )}
+              </>
+            ) : (
               <span className="text-xs text-slate-500">
-                Pick an option for every field to continue.
+                Resolving contradictions needs Operate access — ask an operator to save these
+                decisions.
               </span>
             )}
           </div>

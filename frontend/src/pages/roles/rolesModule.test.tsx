@@ -26,10 +26,13 @@ const ROLES = [
   {
     id: 1,
     name: 'Administrator',
+    // The built-in Administrator serializes with EMPTY grants — its access is
+    // IMPLICIT (see backend). A naive clone would therefore be powerless; the
+    // editor special-cases a system clone to seed FULL grants instead.
     description: 'Full access',
     is_system: true,
-    module_levels: { document_automation: 'MANAGE', projects: 'MANAGE' },
-    platform: ['iam', 'settings'],
+    module_levels: {},
+    platform: [],
     user_count: 3,
   },
   {
@@ -126,6 +129,36 @@ describe('RolesModule', () => {
       description: '',
       module_levels: { document_automation: 'OPERATE' },
       platform: [],
+    });
+  });
+
+  it('clones the built-in Administrator into a FULL-access role, not an empty one', async () => {
+    renderModule(<RolesModule />);
+
+    const adminRow = screen.getByText('Administrator').closest('tr') as HTMLElement;
+    fireEvent.click(within(adminRow).getByRole('button', { name: 'Clone' }));
+
+    // The editor opens seeded with a "(copy)" name.
+    const nameInput = (await screen.findByLabelText(/name/i)) as HTMLInputElement;
+    expect(nameInput.value).toBe('Administrator (copy)');
+
+    // The live "what this role grants" preview shows FULL access — every
+    // assignable module at Manage + both platform permissions — matching what the
+    // table advertises for the system role (NOT the empty grants it serializes).
+    const summary = screen.getByText('What this role grants').parentElement as HTMLElement;
+    expect(within(summary).getByText('Delivery Challan: Manage')).toBeInTheDocument();
+    expect(within(summary).getByText('Projects: Manage')).toBeInTheDocument();
+    expect(within(summary).getByText('Manage users & roles')).toBeInTheDocument();
+    expect(within(summary).getByText('Edit settings')).toBeInTheDocument();
+
+    // Creating it POSTs the full grant set (not {}).
+    fireEvent.click(screen.getByRole('button', { name: 'Create role' }));
+    await waitFor(() => expect(h.createMutate).toHaveBeenCalledTimes(1));
+    expect(h.createMutate.mock.calls[0][0]).toEqual({
+      name: 'Administrator (copy)',
+      description: 'Full access',
+      module_levels: { document_automation: 'MANAGE', projects: 'MANAGE' },
+      platform: ['iam', 'settings'],
     });
   });
 

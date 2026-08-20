@@ -8,9 +8,9 @@ test.describe('User Management', () => {
     await page.goto('/admin/users');
     await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
 
-    // Seeded users are listed.
+    // Seeded users are listed (seed now provisions admin/manager/operator/viewer).
     await expect(page.getByText('admin@opshub.local')).toBeVisible();
-    await expect(page.getByText('mis@opshub.local')).toBeVisible();
+    await expect(page.getByText('manager@opshub.local')).toBeVisible();
 
     // --- Invite a new user ---
     await page.getByRole('button', { name: 'Invite user' }).click();

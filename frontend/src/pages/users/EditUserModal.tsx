@@ -139,12 +139,14 @@ export function EditUserModal({
               {active ? 'Active — can sign in.' : 'Disabled — sign-in blocked.'}
             </p>
           </div>
+          {/* A plain action button: its label IS the action ("Disable"/"Enable"),
+              so `aria-pressed` (which would announce "Disable, pressed") is wrong
+              here — the status text above already conveys the current state. */}
           <Button
             variant={active ? 'danger' : 'primary'}
             size="sm"
             onClick={toggleActive}
             disabled={busy}
-            aria-pressed={active}
           >
             {active ? 'Disable' : 'Enable'}
           </Button>

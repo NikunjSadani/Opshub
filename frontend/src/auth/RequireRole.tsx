@@ -26,6 +26,32 @@ function NotAuthorized({ perm }: { perm: string }) {
   );
 }
 
+/**
+ * Shown when `GET /me` FAILED — distinct from a genuine permission miss. Says so
+ * honestly ("couldn't load", not "not authorized") and offers a retry, so a
+ * transient load failure never masquerades as a denial.
+ */
+function CouldNotLoadAccess({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="mx-auto mt-10 max-w-md rounded-lg border border-rose-200 bg-rose-50 p-4 text-center"
+    >
+      <p className="text-sm font-semibold text-rose-800">Couldn't load your access</p>
+      <p className="mt-1 text-xs text-rose-700">
+        This is a loading problem, not a permissions one. Please try again.
+      </p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mt-2 text-sm font-medium text-brand-600 hover:text-brand-700"
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
 export interface RequirePlatformProps {
   /** Platform permission required to see `children` (e.g. "iam", "settings"). */
   perm: string;
@@ -56,6 +82,9 @@ export function RequirePlatform({ perm, children, fallback }: RequirePlatformPro
       <div className="grid place-items-center py-10 text-sm text-slate-400">Loading…</div>
     );
   }
+  // A failed /me is NOT a denial — show "couldn't load / retry", never the
+  // misleading "you don't have the {perm} permission" panel.
+  if (perms.error) return <CouldNotLoadAccess onRetry={perms.refetch} />;
   if (perms.hasPlatform(perm)) return <>{children}</>;
   if (fallback !== undefined) return <>{fallback}</>;
   return <NotAuthorized perm={perm} />;

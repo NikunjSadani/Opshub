@@ -46,7 +46,19 @@ export function TopBar() {
         </span>
       </Link>
 
-      {user && (
+      {perms.loading ? (
+        // While /me is loading, show a lightweight identity skeleton instead of a
+        // "?" avatar + blank name/role (which reads as a broken account). On a
+        // load ERROR the AppShell renders its own global state, so TopBar never
+        // shows a genuinely-empty identity.
+        <div className="flex items-center gap-2 py-1 pl-1 pr-2" aria-hidden="true">
+          <span className="h-8 w-8 animate-pulse rounded-full bg-slate-200" />
+          <span className="hidden flex-col gap-1 sm:flex">
+            <span className="block h-3 w-20 animate-pulse rounded bg-slate-200" />
+            <span className="block h-2.5 w-14 animate-pulse rounded bg-slate-100" />
+          </span>
+        </div>
+      ) : user ? (
         <div className="relative" ref={menuRef}>
           <button
             type="button"
@@ -88,7 +100,7 @@ export function TopBar() {
             </div>
           )}
         </div>
-      )}
+      ) : null}
     </header>
   );
 }

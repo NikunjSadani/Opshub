@@ -36,6 +36,9 @@ export function Batches() {
   const { download } = useApi();
   // Recovering a stuck batch mutates generation state — gated on MANAGE.
   const isAdmin = perms.atLeast('document_automation', 'MANAGE');
+  // Retrying generation and resolving a review are WRITEs — gated on OPERATE, so
+  // a View user never sees an action that only earns them a 403.
+  const canOperate = perms.atLeast('document_automation', 'OPERATE');
   const query = useBatchesQuery(50);
   // Which NEEDS_REVIEW batch (if any) has its inline review panel expanded, so a
   // batch stuck in review is resolvable here — not only inside the upload session.
@@ -169,21 +172,31 @@ export function Batches() {
                     <Td className="max-w-xs text-slate-500">{b.message ?? '—'}</Td>
                     <Td>
                       <div className="flex flex-wrap items-center gap-1.5">
-                        {needsReview && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            aria-expanded={expanded}
-                            onClick={() => setReviewingId(expanded ? null : b.id)}
-                          >
-                            {expanded ? 'Close review' : 'Review'}
-                          </Button>
-                        )}
-                        {isFailed && (
-                          <Button variant="secondary" size="sm" onClick={() => openRetry(b)}>
-                            Retry generation
-                          </Button>
-                        )}
+                        {needsReview &&
+                          (canOperate ? (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              aria-expanded={expanded}
+                              onClick={() => setReviewingId(expanded ? null : b.id)}
+                            >
+                              {expanded ? 'Close review' : 'Review'}
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-slate-500">
+                              Needs review — an operator can resolve it.
+                            </span>
+                          ))}
+                        {isFailed &&
+                          (canOperate ? (
+                            <Button variant="secondary" size="sm" onClick={() => openRetry(b)}>
+                              Retry generation
+                            </Button>
+                          ) : (
+                            <span className="text-xs text-slate-500">
+                              Generation failed — an operator can retry it.
+                            </span>
+                          ))}
                         {isGenerating &&
                           (isAdmin ? (
                             <Button

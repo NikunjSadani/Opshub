@@ -10,8 +10,9 @@ test.describe('Admin-surface gating', () => {
     await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Users' })).toBeVisible();
 
-    // Switch the dev role to a non-admin in place -> RequireRole re-evaluates.
-    await page.getByLabel('Dev role switcher').selectOption('OPERATIONS');
+    // Switch to a non-admin seeded user in place (no reload) -> /me re-resolves without
+    // the `iam` permission, so RequirePlatform re-evaluates.
+    await page.getByLabel('Dev user switcher').selectOption('dev-viewer');
 
     await expect(page.getByText('Not authorized')).toBeVisible();
     await expect(page.getByRole('link', { name: 'Users' })).toHaveCount(0);

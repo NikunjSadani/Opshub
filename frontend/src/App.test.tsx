@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import App from './App';
 import type { ModuleDescriptor } from './types/modules';
 
@@ -83,5 +83,51 @@ describe('OpsHub app shell', () => {
     const init = call?.[1] as RequestInit;
     const headers = init.headers as Record<string, string>;
     expect(headers.Authorization).toMatch(/^Bearer /);
+  });
+});
+
+describe('OpsHub app shell — access load failure', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('shows a global "couldn\'t load your access" state with Retry when /me fails, and recovers', async () => {
+    // /me fails the first time, then succeeds — the Retry button re-runs it.
+    let meCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        if (url.endsWith('/api/v1/modules')) return jsonResponse(MODULES);
+        if (url.endsWith('/api/v1/me')) {
+          meCalls += 1;
+          if (meCalls === 1) {
+            return {
+              ok: false,
+              status: 500,
+              statusText: 'Server Error',
+              headers: new Headers({ 'content-type': 'application/json' }),
+              json: async () => ({ detail: 'boom' }),
+            } as unknown as Response;
+          }
+          return jsonResponse(ME);
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    // The shell renders a clear global load-failure state — not empty nav +
+    // a misleading "no permission" page.
+    expect(await screen.findByText(/couldn't load your access/i)).toBeInTheDocument();
+    const retry = screen.getByRole('button', { name: /retry/i });
+
+    // Retrying recovers: /me succeeds, the real shell + role identity appear.
+    fireEvent.click(retry);
+    const header = await screen.findByRole('banner');
+    expect(await within(header).findByText('Administrator')).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't load your access/i)).not.toBeInTheDocument();
   });
 });

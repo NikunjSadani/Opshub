@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MockAuthProvider } from './AuthProvider';
 import { RequirePlatform } from './RequireRole';
 
@@ -79,5 +79,57 @@ describe('RequirePlatform', () => {
     );
     expect(screen.queryByText('Secret admin panel')).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('distinguishes a FAILED /me from a denial (couldn\'t-load + retry, not "Not authorized")', async () => {
+    // /me fails the first time, then succeeds — so Retry can recover.
+    let calls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/me')) {
+          calls += 1;
+          if (calls === 1) {
+            return new Response(JSON.stringify({ detail: 'boom' }), {
+              status: 500,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              id: 1,
+              email: 'admin@example.com',
+              name: 'Ada Admin',
+              role_id: 1,
+              role_name: 'Administrator',
+              is_administrator: true,
+              module_levels: {},
+              platform: ['iam'],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          );
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    render(
+      <MockAuthProvider initialUid="dev-admin">
+        <RequirePlatform perm="iam">
+          <p>Secret admin panel</p>
+        </RequirePlatform>
+      </MockAuthProvider>,
+    );
+
+    // The load failure shows a "couldn't load" state, NOT the misleading
+    // "Not authorized / you don't have the iam permission" denial.
+    expect(await screen.findByText(/couldn't load your access/i)).toBeInTheDocument();
+    expect(screen.queryByText(/not authorized/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('Secret admin panel')).not.toBeInTheDocument();
+
+    // Retry re-runs /me; this time it succeeds and the children render.
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(await screen.findByText('Secret admin panel')).toBeInTheDocument();
   });
 });
