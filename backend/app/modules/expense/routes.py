@@ -24,6 +24,7 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     HTTPException,
     Query,
     Response,
@@ -35,9 +36,10 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.modules.expense import service
+from app.modules.expense import payment_methods, service
 from app.modules.expense.models import Invoice, InvoiceStatus
 from app.modules.files.models import StoredFile
+from app.modules.projects import service as projects_service
 from app.platform import rbac
 from app.platform.auth import current_user
 from app.platform.models import Level, User
@@ -112,6 +114,10 @@ class InvoiceOut(BaseModel):
     supplier_gstin: str | None
     invoice_number: str | None
     invoice_date: Any
+    project_id: int | None
+    project_code: str | None
+    payment_method_id: int | None
+    payment_method_name: str | None
     total_taxable_paise: int | None
     grand_total_paise: int | None
     created_at: Any
@@ -198,6 +204,121 @@ class DeleteOut(BaseModel):
     deleted: bool
 
 
+class PaymentMethodOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    name: str
+    active: bool
+
+
+class PaymentMethodCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class PaymentMethodPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    active: bool | None = None
+
+
+class ProjectSummaryOut(BaseModel):
+    project_id: int | None
+    project_code: str | None
+    total_paise: int
+    count: int
+
+
+class PaymentMethodSummaryOut(BaseModel):
+    payment_method_id: int | None
+    name: str | None
+    total_paise: int
+    count: int
+
+
+class SummaryOut(BaseModel):
+    total_confirmed_paise: int
+    invoice_count: int
+    by_project: list[ProjectSummaryOut]
+    by_payment_method: list[PaymentMethodSummaryOut]
+
+
+def _to_invoice_out(
+    inv: Invoice,
+    project_codes: dict[int, str],
+    payment_method_names: dict[int, str],
+) -> InvoiceOut:
+    """Build a register row, resolving the allocation labels from the lookup maps."""
+    return InvoiceOut(
+        id=inv.id,
+        status=inv.status,
+        needs_ocr=inv.needs_ocr,
+        supplier_name=inv.supplier_name,
+        supplier_gstin=inv.supplier_gstin,
+        invoice_number=inv.invoice_number,
+        invoice_date=inv.invoice_date,
+        project_id=inv.project_id,
+        project_code=(
+            project_codes.get(inv.project_id) if inv.project_id is not None else None
+        ),
+        payment_method_id=inv.payment_method_id,
+        payment_method_name=(
+            payment_method_names.get(inv.payment_method_id)
+            if inv.payment_method_id is not None else None
+        ),
+        total_taxable_paise=inv.total_taxable_paise,
+        grand_total_paise=inv.grand_total_paise,
+        created_at=inv.created_at,
+    )
+
+
+# ----------------------------------------------------------- payment methods
+
+@router.get("/expense/payment-methods", response_model=list[PaymentMethodOut])
+def list_payment_methods(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    active_only: Annotated[bool, Query()] = True,
+) -> list[Any]:
+    """The payment-method list for the upload form (VIEW — operators need to pick one)."""
+    _require_module(user)
+    return payment_methods.list_payment_methods(db, active_only=active_only)
+
+
+@router.post("/expense/payment-methods", response_model=PaymentMethodOut, status_code=201)
+def create_payment_method(
+    body: PaymentMethodCreate,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Any:
+    """Create a payment method (Manage). 400 empty name; 409 on a case-insensitive dup."""
+    rbac.require_level(user, rbac.EXPENSE, Level.MANAGE)
+    try:
+        return payment_methods.create_payment_method(
+            db, name=body.name, actor_uid=user.firebase_uid)
+    except service.ExpenseError as err:
+        raise _map_service_error(err) from err
+
+
+@router.patch("/expense/payment-methods/{method_id}", response_model=PaymentMethodOut)
+def update_payment_method(
+    method_id: int,
+    body: PaymentMethodPatch,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Any:
+    """Rename and/or (de)activate a payment method (Manage). ``active=false`` is the
+    soft-delete — historical invoices keep their method. 404 missing; 409 dup name."""
+    rbac.require_level(user, rbac.EXPENSE, Level.MANAGE)
+    if body.name is None and body.active is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "supply a name and/or active flag to update")
+    try:
+        return payment_methods.update_payment_method(
+            db, method_id, name=body.name, active=body.active,
+            actor_uid=user.firebase_uid)
+    except service.ExpenseError as err:
+        raise _map_service_error(err) from err
+
+
 # ------------------------------------------------------------------- upload
 
 @router.post("/expense/invoices", response_model=UploadOut, status_code=201)
@@ -206,8 +327,14 @@ def upload_invoices(
     db: Annotated[Session, Depends(get_db)],
     response: Response,
     files: Annotated[list[UploadFile], File()],
+    project_id: Annotated[int, Form()],
+    payment_method_id: Annotated[int, Form()],
 ) -> UploadOut:
     """Bulk-upload N PDFs: store each blob, then extract + persist into one batch.
+
+    ``project_id`` + ``payment_method_id`` are REQUIRED — the cost allocation stamped
+    on every invoice in the batch. Both are validated (exist + Active) BEFORE any blob
+    is stored, so a bad allocation is a clean 400 that persists nothing.
 
     Returns a per-file outcome list. A file whose identity key matches a stored
     invoice comes back as a DUPLICATE outcome carrying the existing invoice's id +
@@ -217,6 +344,15 @@ def upload_invoices(
     rbac.require_level(user, rbac.EXPENSE, Level.OPERATE)
     if not files:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "no files uploaded")
+    # Validate the allocation BEFORE storing any bytes (nothing persists on a bad one).
+    if projects_service.get_active_project(db, project_id) is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "project not found or not Active")
+    if payment_methods.get_active_payment_method(db, payment_method_id) is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "payment method not found or not active")
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -250,7 +386,9 @@ def upload_invoices(
         file_ids.append(sf.id)
         filename_by_file[sf.id] = filename
 
-    result = service.create_batch(db, file_ids, actor_uid=user.firebase_uid)
+    result = service.create_batch(
+        db, file_ids, project_id=project_id, payment_method_id=payment_method_id,
+        actor_uid=user.firebase_uid)
     persisted = [o for o in result.outcomes if o.invoice_id is not None
                  and o.status != "DUPLICATE"]
     dups = [o for o in result.outcomes if o.status == "DUPLICATE"]
@@ -278,15 +416,21 @@ def list_invoices(
     status_filter: Annotated[InvoiceStatus | None, Query(alias="status")] = None,
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
+    project_id: Annotated[int | None, Query()] = None,
+    payment_method_id: Annotated[int | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
-) -> list[Invoice]:
+) -> list[InvoiceOut]:
     _require_module(user)
-    return service.list_invoices(
+    rows = service.list_invoices(
         db, q=q, supplier=supplier, gstin=gstin,
         status=status_filter.value if status_filter is not None else None,
-        date_from=date_from, date_to=date_to, limit=limit, offset=offset,
+        date_from=date_from, date_to=date_to,
+        project_id=project_id, payment_method_id=payment_method_id,
+        limit=limit, offset=offset,
     )
+    project_codes, method_names = service.allocation_maps(db, rows)
+    return [_to_invoice_out(inv, project_codes, method_names) for inv in rows]
 
 
 @router.get("/expense/invoices.csv")
@@ -299,18 +443,49 @@ def export_invoices_csv(
     status_filter: Annotated[InvoiceStatus | None, Query(alias="status")] = None,
     date_from: Annotated[date | None, Query()] = None,
     date_to: Annotated[date | None, Query()] = None,
+    project_id: Annotated[int | None, Query()] = None,
+    payment_method_id: Annotated[int | None, Query()] = None,
 ) -> Response:
     """Export the filtered register (newest-first) as CSV, capped at MAX_CSV_ROWS."""
     _require_module(user)
     rows = service.list_invoices(
         db, q=q, supplier=supplier, gstin=gstin,
         status=status_filter.value if status_filter is not None else None,
-        date_from=date_from, date_to=date_to, limit=service.MAX_CSV_ROWS,
+        date_from=date_from, date_to=date_to,
+        project_id=project_id, payment_method_id=payment_method_id,
+        limit=service.MAX_CSV_ROWS,
     )
+    project_codes, method_names = service.allocation_maps(db, rows)
     return Response(
-        content=service.register_csv(rows),
+        content=service.register_csv(rows, project_codes, method_names),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="expense-register.csv"'},
+    )
+
+
+@router.get("/expense/summary", response_model=SummaryOut)
+def expense_summary(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SummaryOut:
+    """Cost-allocation rollup over CONFIRMED invoices (VIEW-gated). Money in paise."""
+    _require_module(user)
+    data = service.summary(db)
+    return SummaryOut(
+        total_confirmed_paise=data.total_confirmed_paise,
+        invoice_count=data.invoice_count,
+        by_project=[
+            ProjectSummaryOut(
+                project_id=g.key_id, project_code=g.label,
+                total_paise=g.total_paise, count=g.count)
+            for g in data.by_project
+        ],
+        by_payment_method=[
+            PaymentMethodSummaryOut(
+                payment_method_id=g.key_id, name=g.label,
+                total_paise=g.total_paise, count=g.count)
+            for g in data.by_payment_method
+        ],
     )
 
 

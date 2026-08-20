@@ -8,6 +8,8 @@ import { ToastProvider } from '../../ui';
 import { Upload } from './Upload';
 import { Register } from './Register';
 import { ReviewPanel } from './ReviewPanel';
+import { PaymentMethods } from './PaymentMethods';
+import { Overview } from './Overview';
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -21,16 +23,16 @@ function json(data: unknown, status = 200) {
  * expense module so the upload (OPERATE) and delete-confirmed (MANAGE) gates
  * resolve to enabled — matching the default dev-admin the AuthProvider uses.
  */
-function meResponse(): Response {
+function meResponse(level: 'VIEW' | 'OPERATE' | 'MANAGE' = 'MANAGE'): Response {
   return json({
     id: 1,
     email: 'admin@example.com',
     name: 'Ada Admin',
     role_id: 1,
-    role_name: 'Administrator',
-    is_administrator: true,
-    module_levels: { expense_invoice: 'MANAGE' },
-    platform: ['iam', 'settings'],
+    role_name: level === 'MANAGE' ? 'Administrator' : 'Expense Viewer',
+    is_administrator: level === 'MANAGE',
+    module_levels: { expense_invoice: level },
+    platform: level === 'MANAGE' ? ['iam', 'settings'] : [],
   });
 }
 
@@ -48,11 +50,37 @@ function renderWithProviders(node: ReactNode, initialEntries: string[] = ['/']) 
   );
 }
 
+/** Active projects for the upload/register pickers (backend Project[] projection). */
+const PROJECTS = [
+  {
+    id: '10',
+    code: 'BRI-001',
+    client_id: '1',
+    client_code: 'BRI',
+    client_name: 'Britannia',
+    name: 'Q3 Trade Rewards',
+    start_date: null,
+    status: 'ACTIVE',
+    description: null,
+    created_at: '2026-08-01T00:00:00Z',
+  },
+];
+
+/** Payment methods for the pickers + admin tab (backend PaymentMethodOut[]). */
+const PAYMENT_METHODS = [
+  { id: 3, name: 'Bank transfer', active: true },
+  { id: 4, name: 'Corporate card', active: false },
+];
+
 const INVOICE_ROW = {
   id: 1,
   status: 'CONFIRMED',
   needs_ocr: false,
   review_reasons: [],
+  project_id: 10,
+  project_code: 'BRI-001',
+  payment_method_id: 3,
+  payment_method_name: 'Bank transfer',
   supplier_name: 'Acme Supplies Pvt Ltd',
   supplier_gstin: '27ABCDE1234F1Z5',
   buyer_name: 'Gifsy',
@@ -80,7 +108,9 @@ describe('Register', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.includes('/expense/payment-methods')) return json(PAYMENT_METHODS);
         if (url.includes('/expense/invoices')) return json([INVOICE_ROW]);
+        if (url.includes('/projects')) return json(PROJECTS);
         if (url.endsWith('/me')) return meResponse();
         throw new Error(`Unexpected fetch: ${url}`);
       }),
@@ -93,20 +123,26 @@ describe('Register', () => {
     expect(screen.getByText('27ABCDE1234F1Z5')).toBeInTheDocument();
     // Grand total is rendered from integer paise.
     expect(screen.getByText('₹11,800.00')).toBeInTheDocument();
-    // The row's status badge (not the filter <option>) reads Confirmed.
+    // The cost-allocation columns render the tagged project + payment method.
     const row = screen.getByText('INV-2026-001').closest('tr') as HTMLElement;
+    expect(within(row).getByText('BRI-001')).toBeInTheDocument();
+    expect(within(row).getByText('Bank transfer')).toBeInTheDocument();
+    // The row's status badge (not the filter <option>) reads Confirmed.
     expect(within(row).getByText('Confirmed')).toBeInTheDocument();
   });
 });
 
 describe('Upload', () => {
-  it('shows a per-file result list after upload', async () => {
+  it('requires a project + payment method, keeps Upload disabled until both are chosen, and posts them', async () => {
+    let postedForm: FormData | null = null;
     vi.stubGlobal(
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.includes('/expense/payment-methods')) return json(PAYMENT_METHODS);
         if (url.includes('/expense/invoices') && method === 'POST') {
+          postedForm = init?.body as FormData;
           return json({
             batch_id: 7,
             invoice_count: 2,
@@ -122,12 +158,16 @@ describe('Upload', () => {
             ],
           });
         }
+        if (url.includes('/projects')) return json(PROJECTS);
         if (url.endsWith('/me')) return meResponse();
         throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
 
     renderWithProviders(<Upload />);
+
+    // The active-projects option arrives from the mocked /projects fetch.
+    await screen.findByRole('option', { name: /BRI-001 — Q3 Trade Rewards/i });
 
     const input = document.getElementById('expense-files') as HTMLInputElement;
     fireEvent.change(input, {
@@ -138,13 +178,31 @@ describe('Upload', () => {
         ],
       },
     });
-    fireEvent.click(screen.getByRole('button', { name: /upload 2 files/i }));
+
+    // Files chosen but neither picker set → Upload stays disabled.
+    const uploadBtn = screen.getByRole('button', { name: /upload 2 files/i });
+    expect(uploadBtn).toBeDisabled();
+
+    // Choosing only the project is not enough.
+    fireEvent.change(screen.getByLabelText(/project/i), { target: { value: '10' } });
+    expect(uploadBtn).toBeDisabled();
+
+    // Choosing the payment method too enables it.
+    fireEvent.change(screen.getByLabelText(/payment method/i), { target: { value: '3' } });
+    expect(uploadBtn).toBeEnabled();
+
+    fireEvent.click(uploadBtn);
 
     expect(await screen.findByText('a.pdf')).toBeInTheDocument();
     expect(screen.getByText('b.pdf')).toBeInTheDocument();
     expect(screen.getByText('Extracted')).toBeInTheDocument();
     expect(screen.getByText('Needs review')).toBeInTheDocument();
     expect(screen.getByText(/grand total is low confidence/i)).toBeInTheDocument();
+
+    // The multipart body carried the batch-level cost-allocation tags.
+    expect(postedForm).not.toBeNull();
+    expect((postedForm as unknown as FormData).get('project_id')).toBe('10');
+    expect((postedForm as unknown as FormData).get('payment_method_id')).toBe('3');
   });
 
   it('surfaces the delete-and-re-upload dialog on a DUPLICATE and DELETEs then re-uploads on confirm', async () => {
@@ -156,6 +214,7 @@ describe('Upload', () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.includes('/expense/payment-methods')) return json(PAYMENT_METHODS);
         if (url.includes('/expense/invoices') && method === 'POST') {
           postCount += 1;
           if (postCount === 1) {
@@ -191,6 +250,7 @@ describe('Upload', () => {
           deleted = url;
           return new Response(null, { status: 204 });
         }
+        if (url.includes('/projects')) return json(PROJECTS);
         if (url.endsWith('/me')) return meResponse();
         throw new Error(`Unexpected fetch: ${method} ${url}`);
       }),
@@ -198,10 +258,15 @@ describe('Upload', () => {
 
     renderWithProviders(<Upload />);
 
+    await screen.findByRole('option', { name: /BRI-001 — Q3 Trade Rewards/i });
+
     const input = document.getElementById('expense-files') as HTMLInputElement;
     fireEvent.change(input, {
       target: { files: [new File(['z'], 'dup.pdf', { type: 'application/pdf' })] },
     });
+    // Both cost-allocation tags are required before Upload is enabled.
+    fireEvent.change(screen.getByLabelText(/project/i), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText(/payment method/i), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: /upload 1 file/i }));
 
     // The DUPLICATE row + its existing-invoice summary appear.
@@ -370,5 +435,114 @@ describe('ReviewPanel', () => {
       corrections: [{ field_path: 'totals.grand_total_paise', value: '123456' }],
       confirm: true,
     });
+  });
+});
+
+describe('ExpenseModule tabs (Manage gating)', () => {
+  function stubGeneric(level: 'VIEW' | 'OPERATE' | 'MANAGE') {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/me')) return meResponse(level);
+        // Everything the mounted child screens fetch resolves to an empty list.
+        return json([]);
+      }),
+    );
+  }
+
+  it('shows the Payment Methods tab for a MANAGE user', async () => {
+    stubGeneric('MANAGE');
+    const { ExpenseModule } = await import('./ExpenseModule');
+    renderWithProviders(<ExpenseModule />, ['/m/expense_invoice/register']);
+    expect(await screen.findByRole('link', { name: 'Payment Methods' })).toBeInTheDocument();
+  });
+
+  it('hides the Payment Methods tab for a VIEW-only user', async () => {
+    stubGeneric('VIEW');
+    const { ExpenseModule } = await import('./ExpenseModule');
+    renderWithProviders(<ExpenseModule />, ['/m/expense_invoice/register']);
+    // The Register/Overview tabs still render; the Manage-only tab does not.
+    expect(await screen.findByRole('link', { name: 'Overview' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Payment Methods' })).not.toBeInTheDocument();
+  });
+});
+
+describe('PaymentMethods admin', () => {
+  it('lists methods and creates a new one (Manage)', async () => {
+    let postedBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.includes('/expense/payment-methods') && method === 'POST') {
+          postedBody = JSON.parse(String(init?.body));
+          return json({ id: 9, name: 'UPI', active: true }, 201);
+        }
+        if (url.includes('/expense/payment-methods')) return json(PAYMENT_METHODS);
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<PaymentMethods />);
+
+    // Both the active and inactive methods are listed, with the right toggle action.
+    expect(await screen.findByText('Bank transfer')).toBeInTheDocument();
+    const inactiveRow = screen.getByText('Corporate card').closest('tr') as HTMLElement;
+    expect(within(inactiveRow).getByText('Inactive')).toBeInTheDocument();
+    expect(within(inactiveRow).getByRole('button', { name: /activate/i })).toBeInTheDocument();
+
+    // Add → modal → type a name → Create posts {name}.
+    fireEvent.click(screen.getByRole('button', { name: /add payment method/i }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/name/i), { target: { value: 'UPI' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /create/i }));
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    expect(postedBody).toEqual({ name: 'UPI' });
+    // The modal closes on success.
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+});
+
+describe('Overview (expense summary)', () => {
+  it('renders total confirmed spend and per-project / per-method breakdowns', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/expense/summary')) {
+          return json({
+            total_confirmed_paise: 1500000,
+            invoice_count: 3,
+            by_project: [
+              { project_id: 10, project_code: 'BRI-001', total_paise: 1000000, count: 2 },
+              { project_id: 11, project_code: 'BRI-002', total_paise: 500000, count: 1 },
+            ],
+            by_payment_method: [
+              { payment_method_id: 3, name: 'Bank transfer', total_paise: 1200000, count: 2 },
+              { payment_method_id: 4, name: 'Corporate card', total_paise: 300000, count: 1 },
+            ],
+          });
+        }
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(<Overview />);
+
+    // Total confirmed spend from integer paise (₹15,000.00).
+    expect(await screen.findByText('₹15,000.00')).toBeInTheDocument();
+    // Both breakdowns render their rows.
+    expect(screen.getByText('BRI-001')).toBeInTheDocument();
+    expect(screen.getByText('BRI-002')).toBeInTheDocument();
+    expect(screen.getByText('Bank transfer')).toBeInTheDocument();
+    expect(screen.getByText('Corporate card')).toBeInTheDocument();
+    // A project row's spend is formatted from paise (₹10,000.00).
+    const projRow = screen.getByText('BRI-001').closest('tr') as HTMLElement;
+    expect(within(projRow).getByText('₹10,000.00')).toBeInTheDocument();
   });
 });

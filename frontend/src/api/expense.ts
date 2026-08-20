@@ -8,7 +8,7 @@ import {
   type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
-import { useApi } from './client';
+import { useApi, ApiError } from './client';
 
 /**
  * Typed contracts + React Query hooks for the Expense / Invoice module.
@@ -63,8 +63,63 @@ export interface InvoiceOut {
   /** PAISE. */
   total_taxable_paise: number | null;
   grand_total_paise: number | null;
+  /** Cost-allocation: the project this invoice is tagged to (chosen at upload). */
+  project_id: number | null;
+  /** The tagged project's `<CLIENT_CODE>-<n>` code, e.g. "BRI-001". */
+  project_code: string | null;
+  /** Cost-allocation: the payment method this invoice is tagged to. */
+  payment_method_id: number | null;
+  payment_method_name: string | null;
   /** ISO datetime string (backend `created_at`). */
   created_at: string;
+}
+
+/** An admin-managed payment method (backend `PaymentMethodOut`). */
+export interface PaymentMethod {
+  id: number;
+  name: string;
+  active: boolean;
+}
+
+/** Create body for a payment method (Manage). */
+export interface PaymentMethodInput {
+  name: string;
+}
+
+/** Patch body for a payment method — rename and/or activate/deactivate (Manage). */
+export interface PaymentMethodUpdate {
+  name?: string;
+  active?: boolean;
+}
+
+/** One project's confirmed-spend rollup (backend summary `by_project` row). */
+export interface ProjectSpend {
+  project_id: number;
+  project_code: string;
+  /** PAISE. */
+  total_paise: number;
+  count: number;
+}
+
+/** One payment method's confirmed-spend rollup (backend summary `by_payment_method` row). */
+export interface PaymentMethodSpend {
+  payment_method_id: number;
+  name: string;
+  /** PAISE. */
+  total_paise: number;
+  count: number;
+}
+
+/**
+ * Confirmed-spend dashboard rollup (backend GET /expense/summary). Totals are over
+ * CONFIRMED invoices only; money is integer PAISE on the wire.
+ */
+export interface ExpenseSummary {
+  /** PAISE. */
+  total_confirmed_paise: number;
+  invoice_count: number;
+  by_project: ProjectSpend[];
+  by_payment_method: PaymentMethodSpend[];
 }
 
 /** One extracted field envelope (backend FieldOut). */
@@ -189,6 +244,10 @@ export interface InvoiceFilters {
   date_from?: string;
   /** Inclusive upper bound on invoice_date (YYYY-MM-DD). */
   date_to?: string;
+  /** Cost-allocation filter: restrict to one project (id as a string for the query). */
+  project_id?: string;
+  /** Cost-allocation filter: restrict to one payment method (id as a string). */
+  payment_method_id?: string;
 }
 
 // --- query-string builders (pure, unit-testable) ------------------------------
@@ -203,6 +262,9 @@ function appendInvoiceFilters(params: URLSearchParams, filters: InvoiceFilters):
   if (filters.status) params.set('status', filters.status);
   if (filters.date_from?.trim()) params.set('date_from', filters.date_from.trim());
   if (filters.date_to?.trim()) params.set('date_to', filters.date_to.trim());
+  if (filters.project_id?.trim()) params.set('project_id', filters.project_id.trim());
+  if (filters.payment_method_id?.trim())
+    params.set('payment_method_id', filters.payment_method_id.trim());
 }
 
 /**
@@ -232,6 +294,8 @@ export function buildInvoiceCsvQuery(filters: InvoiceFilters): string {
 export const expenseKeys = {
   invoices: (filters: InvoiceFilters) => ['expense', 'invoices', filters] as const,
   invoice: (id: number) => ['expense', 'invoice', id] as const,
+  paymentMethods: (activeOnly: boolean) => ['expense', 'payment-methods', activeOnly] as const,
+  summary: ['expense', 'summary'] as const,
 };
 
 // --- queries ------------------------------------------------------------------
@@ -265,6 +329,31 @@ export function useInvoicesInfiniteQuery(
   });
 }
 
+/**
+ * The admin-managed payment methods list. `activeOnly` (→ `?active_only=true`) is
+ * used by the upload picker (only choosable methods); the admin tab lists all.
+ */
+export function usePaymentMethods(activeOnly = false): UseQueryResult<PaymentMethod[], Error> {
+  const { get } = useApi();
+  return useQuery<PaymentMethod[], Error>({
+    queryKey: expenseKeys.paymentMethods(activeOnly),
+    queryFn: ({ signal }) =>
+      get<PaymentMethod[]>(
+        `/expense/payment-methods${activeOnly ? '?active_only=true' : ''}`,
+        signal,
+      ),
+  });
+}
+
+/** Confirmed-spend rollup for the Overview dashboard (by project + payment method). */
+export function useExpenseSummary(): UseQueryResult<ExpenseSummary, Error> {
+  const { get } = useApi();
+  return useQuery<ExpenseSummary, Error>({
+    queryKey: expenseKeys.summary,
+    queryFn: ({ signal }) => get<ExpenseSummary>('/expense/summary', signal),
+  });
+}
+
 /** A single invoice with its per-field envelopes + line items. */
 export function useInvoice(
   invoiceId: number | null,
@@ -281,22 +370,74 @@ export function useInvoice(
 // --- mutations ----------------------------------------------------------------
 
 /**
- * Bulk-upload N PDFs (one invoice each) as a single multipart batch under the
- * `files` field. Returns the per-file outcomes (incl. any DUPLICATE carrying the
- * existing invoice's summary). The delete-and-re-upload flow reuses this hook
- * with a single-element array. Invalidates the register on success.
+ * Arguments for a bulk upload. Every invoice in a batch is tagged with the SAME
+ * `projectId` + `paymentMethodId` (chosen once, at upload, for the whole batch);
+ * both are REQUIRED. Ids are strings because they originate from `<select>` values
+ * and ride the multipart form as text (FastAPI coerces `project_id` / `payment_method_id`
+ * to ints server-side).
  */
-export function useUploadInvoices(): UseMutationResult<UploadBatchOut, Error, File[]> {
+export interface UploadArgs {
+  files: File[];
+  projectId: string;
+  paymentMethodId: string;
+}
+
+/**
+ * Bulk-upload N PDFs (one invoice each) as a single multipart batch under the
+ * `files` field, tagged with a project + payment method. Returns the per-file
+ * outcomes (incl. any DUPLICATE carrying the existing invoice's summary). The
+ * delete-and-re-upload flow reuses this hook with a single-element array and the
+ * same tags. Invalidates the register + summary on success.
+ */
+export function useUploadInvoices(): UseMutationResult<UploadBatchOut, Error, UploadArgs> {
   const { postForm } = useApi();
   const qc = useQueryClient();
-  return useMutation<UploadBatchOut, Error, File[]>({
-    mutationFn: (files) => {
+  return useMutation<UploadBatchOut, Error, UploadArgs>({
+    mutationFn: ({ files, projectId, paymentMethodId }) => {
       const form = new FormData();
       for (const f of files) form.append('files', f);
+      form.append('project_id', projectId);
+      form.append('payment_method_id', paymentMethodId);
       return postForm<UploadBatchOut>('/expense/invoices', form);
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['expense', 'invoices'] });
+      void qc.invalidateQueries({ queryKey: ['expense', 'summary'] });
+    },
+  });
+}
+
+/** Create a payment method (Manage). Invalidates the payment-methods list on success. */
+export function useCreatePaymentMethod(): UseMutationResult<
+  PaymentMethod,
+  ApiError,
+  PaymentMethodInput
+> {
+  const { post } = useApi();
+  const qc = useQueryClient();
+  return useMutation<PaymentMethod, ApiError, PaymentMethodInput>({
+    mutationFn: (body) => post<PaymentMethod>('/expense/payment-methods', body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['expense', 'payment-methods'] });
+    },
+  });
+}
+
+/**
+ * Rename and/or activate-deactivate a payment method (Manage). No hard delete —
+ * deactivation just hides it from the upload picker. Invalidates the list on success.
+ */
+export function useUpdatePaymentMethod(): UseMutationResult<
+  PaymentMethod,
+  ApiError,
+  { id: number; body: PaymentMethodUpdate }
+> {
+  const { patch } = useApi();
+  const qc = useQueryClient();
+  return useMutation<PaymentMethod, ApiError, { id: number; body: PaymentMethodUpdate }>({
+    mutationFn: ({ id, body }) => patch<PaymentMethod>(`/expense/payment-methods/${id}`, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['expense', 'payment-methods'] });
     },
   });
 }

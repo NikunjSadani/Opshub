@@ -21,10 +21,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
-# Register the projects table so the new expense_invoice.project_id FK resolves at create_all.
-import app.modules.projects.models  # noqa: F401
 from app.db import Base, get_db
-from app.modules.expense import service
+from app.modules.expense import payment_methods, service
 from app.modules.expense.canonical import (
     CANONICAL_SCHEMA_VERSION,
     ArithmeticChecks,
@@ -38,6 +36,8 @@ from app.modules.expense.canonical import (
 from app.modules.expense.models import Invoice, InvoiceCorrection
 from app.modules.expense.routes import router
 from app.modules.files.models import StoredFile
+from app.modules.projects import service as projects_service
+from app.modules.projects.models import Project
 from app.platform.auth import current_user
 from app.platform.models import AuditLog, Level, User
 from tests.rbac_util import make_role, make_user
@@ -46,6 +46,7 @@ SUPPLIER_GSTIN = "27AAPFU0939F1ZV"
 
 ADMIN = make_user("adm", role=make_role("Administrator", is_system=True))
 MIS = make_user("mis", role=make_role(module_levels={"expense_invoice": Level.OPERATE}))
+MANAGER = make_user("mgr", role=make_role(module_levels={"expense_invoice": Level.MANAGE}))
 OUTSIDER = make_user("out", role=make_role())
 
 
@@ -183,6 +184,22 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     Base.metadata.create_all(engine)
     TestSession = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
+    # Seed the cost-allocation dependencies the upload now requires: an ACTIVE project
+    # (via the real projects service) + an active payment method. Ids are stashed on
+    # app.state so `_upload` can attach them by default.
+    seed_db = TestSession()
+    seed_client = projects_service.create_client(
+        seed_db, name="Test Client", code="TST", actor_uid="adm")
+    seed_db.flush()
+    seed_project = projects_service.create_project(
+        seed_db, client_id=seed_client.id, name="Default Project", actor_uid="adm")
+    seed_db.commit()
+    project_id = seed_project.id
+    method = payment_methods.create_payment_method(
+        seed_db, name="Bank Transfer", actor_uid="adm")
+    method_id = method.id
+    seed_db.close()
+
     def _db() -> Iterator[Session]:
         db = TestSession()
         try:
@@ -195,6 +212,8 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     app.dependency_overrides[get_db] = _db
     app.dependency_overrides[current_user] = lambda: MIS
     app.state.TestSession = TestSession
+    app.state.project_id = project_id
+    app.state.payment_method_id = method_id
     yield TestClient(app)
     engine.dispose()
 
@@ -203,10 +222,19 @@ def _as(client: TestClient, user: User) -> None:
     client.app.dependency_overrides[current_user] = lambda: user
 
 
-def _upload(client: TestClient, *specs: dict[str, Any]) -> Any:
+def _upload(
+    client: TestClient, *specs: dict[str, Any],
+    project_id: int | None = None, payment_method_id: int | None = None,
+) -> Any:
     files = [("files", (f"inv{i}.pdf", _pdf(s), "application/pdf"))
              for i, s in enumerate(specs)]
-    return client.post("/api/v1/expense/invoices", files=files)
+    data = {
+        "project_id": str(project_id if project_id is not None
+                          else client.app.state.project_id),
+        "payment_method_id": str(payment_method_id if payment_method_id is not None
+                                 else client.app.state.payment_method_id),
+    }
+    return client.post("/api/v1/expense/invoices", files=files, data=data)
 
 
 # --------------------------------------------------------------------- tests
@@ -539,3 +567,204 @@ def test_register_q_free_text_search(client: TestClient) -> None:
     csv = client.get("/api/v1/expense/invoices.csv", params={"q": "Alpha"})
     assert csv.status_code == 200
     assert "INV-A" in csv.text and "INV-B" not in csv.text
+
+
+# ================================================= inc 27: cost allocation
+
+def _new_project(client: TestClient, code: str, name: str) -> int:
+    """Create a fresh client + ACTIVE project directly via the service; return its id."""
+    db = client.app.state.TestSession()
+    c = projects_service.create_client(db, name=f"{code} Co", code=code, actor_uid="adm")
+    db.flush()
+    p = projects_service.create_project(db, client_id=c.id, name=name, actor_uid="adm")
+    db.commit()
+    pid = p.id
+    db.close()
+    return pid
+
+
+# ------------------------------------------------- payment-method CRUD + gate
+
+def test_payment_method_crud_manage_gated(client: TestClient) -> None:
+    # OPERATE (MIS) can LIST (VIEW) but NOT create (needs MANAGE)
+    assert client.get("/api/v1/expense/payment-methods").status_code == 200
+    assert client.post("/api/v1/expense/payment-methods",
+                       json={"name": "UPI"}).status_code == 403
+
+    _as(client, MANAGER)
+    r = client.post("/api/v1/expense/payment-methods", json={"name": "  UPI  "})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["name"] == "UPI" and body["active"] is True  # trimmed
+    pm_id = body["id"]
+
+    # case-insensitive duplicate -> 409
+    assert client.post("/api/v1/expense/payment-methods",
+                       json={"name": "upi"}).status_code == 409
+    # truly empty -> 422 (pydantic min_length); whitespace-only -> 400 (service trim)
+    assert client.post("/api/v1/expense/payment-methods",
+                       json={"name": ""}).status_code == 422
+    assert client.post("/api/v1/expense/payment-methods",
+                       json={"name": "   "}).status_code == 400
+
+    # rename
+    rn = client.patch(f"/api/v1/expense/payment-methods/{pm_id}",
+                      json={"name": "UPI / IMPS"})
+    assert rn.status_code == 200 and rn.json()["name"] == "UPI / IMPS"
+
+    # soft-delete (active=false) — no hard delete
+    sd = client.patch(f"/api/v1/expense/payment-methods/{pm_id}", json={"active": False})
+    assert sd.status_code == 200 and sd.json()["active"] is False
+    # active_only default hides it; the seeded "Bank Transfer" remains
+    active = client.get("/api/v1/expense/payment-methods").json()
+    assert "UPI / IMPS" not in [m["name"] for m in active]
+    # active_only=false reveals the retired row (history is preserved)
+    allm = client.get("/api/v1/expense/payment-methods",
+                      params={"active_only": "false"}).json()
+    assert "UPI / IMPS" in [m["name"] for m in allm]
+
+    # missing method -> 404
+    assert client.patch("/api/v1/expense/payment-methods/99999",
+                        json={"name": "X"}).status_code == 404
+
+
+# ------------------------------------------------- upload requires + validates
+
+def test_upload_requires_allocation_form_fields(client: TestClient) -> None:
+    # omitting the required form fields entirely -> 422
+    files = [("files", ("inv.pdf", _pdf(_spec()), "application/pdf"))]
+    assert client.post("/api/v1/expense/invoices", files=files).status_code == 422
+
+
+def test_upload_rejects_unknown_or_inactive_project(client: TestClient) -> None:
+    # unknown project id -> 400, nothing persisted
+    r = _upload(client, _spec(), project_id=99999)
+    assert r.status_code == 400, r.text
+    assert "project" in r.json()["detail"].lower()
+    assert client.get("/api/v1/expense/invoices").json() == []
+
+    # an ON_HOLD project is not Active -> 400
+    pid = _new_project(client, "HLD", "Held Project")
+    db = client.app.state.TestSession()
+    proj = db.get(Project, pid)
+    projects_service.set_status(db, project=proj, status="ON_HOLD", actor_uid="adm")
+    db.commit()
+    db.close()
+    assert _upload(client, _spec(), project_id=pid).status_code == 400
+
+
+def test_upload_rejects_unknown_or_inactive_payment_method(client: TestClient) -> None:
+    # unknown method id -> 400
+    r = _upload(client, _spec(), payment_method_id=99999)
+    assert r.status_code == 400, r.text
+    assert "payment method" in r.json()["detail"].lower()
+
+    # a soft-deleted (inactive) method -> 400
+    _as(client, MANAGER)
+    pm_id = client.post("/api/v1/expense/payment-methods",
+                        json={"name": "Cheque"}).json()["id"]
+    client.patch(f"/api/v1/expense/payment-methods/{pm_id}", json={"active": False})
+    _as(client, MIS)
+    assert _upload(client, _spec(), payment_method_id=pm_id).status_code == 400
+
+
+# ------------------------------------------------- confirm guard
+
+def test_confirm_blocked_without_allocation(client: TestClient) -> None:
+    """A row missing project/method (a pre-inc-27 edge) cannot be confirmed even when
+    every required field is OK — the allocation guard fires first."""
+    inv_id = _upload(client, _spec(invoice_number="INV-ALLOC")
+                     ).json()["outcomes"][0]["invoice_id"]
+    # simulate a pre-inc-27 row: null out the allocation
+    db = client.app.state.TestSession()
+    inv = db.get(Invoice, inv_id)
+    inv.project_id = None
+    inv.payment_method_id = None
+    db.commit()
+    db.close()
+    r = client.patch(f"/api/v1/expense/invoices/{inv_id}/reviews", json={"confirm": True})
+    assert r.status_code == 409, r.text
+    assert "allocate" in r.json()["detail"].lower()
+
+
+# ------------------------------------------------- register shows + filters
+
+def test_register_shows_allocation_and_filters(client: TestClient) -> None:
+    default_pid = client.app.state.project_id
+    default_mid = client.app.state.payment_method_id
+    # a second project + payment method
+    other_pid = _new_project(client, "OTH", "Other Project")
+    _as(client, MANAGER)
+    other_mid = client.post("/api/v1/expense/payment-methods",
+                            json={"name": "Card"}).json()["id"]
+    _as(client, MIS)
+
+    _upload(client, _spec(invoice_number="INV-DEF"))
+    _upload(client, _spec(invoice_number="INV-OTH"),
+            project_id=other_pid, payment_method_id=other_mid)
+
+    rows = client.get("/api/v1/expense/invoices").json()
+    by_num = {r["invoice_number"]: r for r in rows}
+    assert by_num["INV-DEF"]["project_code"] == "TST-001"
+    assert by_num["INV-DEF"]["payment_method_name"] == "Bank Transfer"
+    assert by_num["INV-DEF"]["project_id"] == default_pid
+    assert by_num["INV-DEF"]["payment_method_id"] == default_mid
+    assert by_num["INV-OTH"]["project_code"] == "OTH-001"
+    assert by_num["INV-OTH"]["payment_method_name"] == "Card"
+
+    # filter by project_id
+    hits = client.get("/api/v1/expense/invoices",
+                      params={"project_id": other_pid}).json()
+    assert [h["invoice_number"] for h in hits] == ["INV-OTH"]
+    # filter by payment_method_id
+    hits = client.get("/api/v1/expense/invoices",
+                      params={"payment_method_id": default_mid}).json()
+    assert [h["invoice_number"] for h in hits] == ["INV-DEF"]
+
+    # CSV carries the two new columns
+    csv = client.get("/api/v1/expense/invoices.csv").text
+    assert "Project,Payment Method" in csv
+    assert "TST-001" in csv and "Bank Transfer" in csv
+    assert "OTH-001" in csv and "Card" in csv
+
+
+# ------------------------------------------------- summary aggregation
+
+def test_summary_aggregates_confirmed_only(client: TestClient) -> None:
+    other_pid = _new_project(client, "OTH", "Other Project")
+    _as(client, MANAGER)
+    other_mid = client.post("/api/v1/expense/payment-methods",
+                            json={"name": "Card"}).json()["id"]
+    _as(client, MIS)
+
+    def _confirm(num: str, grand: int, **over: Any) -> None:
+        inv_id = _upload(client, _spec(invoice_number=num, grand_total_paise=grand),
+                         **over).json()["outcomes"][0]["invoice_id"]
+        assert client.patch(f"/api/v1/expense/invoices/{inv_id}/reviews",
+                            json={"confirm": True}).status_code == 200
+
+    # two confirmed on the default project/method, one on the other
+    _confirm("SUM-1", 118000)
+    _confirm("SUM-2", 200000)
+    _confirm("SUM-3", 50000, project_id=other_pid, payment_method_id=other_mid)
+    # an UNCONFIRMED upload must NOT count
+    _upload(client, _spec(invoice_number="SUM-UNC", grand_total_paise=999999))
+
+    s = client.get("/api/v1/expense/summary").json()
+    assert s["total_confirmed_paise"] == 118000 + 200000 + 50000
+    assert s["invoice_count"] == 3
+
+    by_project = {row["project_code"]: row for row in s["by_project"]}
+    assert by_project["TST-001"]["total_paise"] == 318000
+    assert by_project["TST-001"]["count"] == 2
+    assert by_project["OTH-001"]["total_paise"] == 50000
+    assert by_project["OTH-001"]["count"] == 1
+
+    by_method = {row["name"]: row for row in s["by_payment_method"]}
+    assert by_method["Bank Transfer"]["total_paise"] == 318000
+    assert by_method["Bank Transfer"]["count"] == 2
+    assert by_method["Card"]["total_paise"] == 50000
+
+    # VIEW-gated: an outsider is refused
+    _as(client, OUTSIDER)
+    assert client.get("/api/v1/expense/summary").status_code == 403

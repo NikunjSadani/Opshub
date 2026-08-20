@@ -94,8 +94,11 @@ def test_view_forbidden_on_create_project(client: TestClient) -> None:
 
 def test_view_forbidden_on_expense_upload(client: TestClient) -> None:
     _as(client, VIEW)
+    # Supply the now-required allocation form fields so the request is well-formed and
+    # the LEVEL gate (403) — not body validation (422) — is what rejects a Viewer.
     r = client.post("/api/v1/expense/invoices",
-                    files={"files": ("a.pdf", b"%PDF-1.4", "application/pdf")})
+                    files={"files": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+                    data={"project_id": "1", "payment_method_id": "1"})
     assert r.status_code == 403, r.text
 
 

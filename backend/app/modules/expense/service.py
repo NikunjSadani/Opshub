@@ -40,6 +40,7 @@ from app.modules.expense.canonical import (
 )
 from app.modules.expense.extractor import Extractor, get_extractor
 from app.modules.expense.models import (
+    ExpensePaymentMethod,
     FieldStatus,
     Invoice,
     InvoiceBatch,
@@ -50,6 +51,7 @@ from app.modules.expense.models import (
     InvoiceStatus,
 )
 from app.modules.files.models import StoredFile
+from app.modules.projects.models import Project
 from app.platform import audit
 from app.platform.storage import Storage, get_storage
 
@@ -215,6 +217,8 @@ def create_batch(
     db: Session,
     file_ids: list[int],
     *,
+    project_id: int,
+    payment_method_id: int,
     actor_uid: str | None,
     extractor: Extractor | None = None,
 ) -> BatchResult:
@@ -224,18 +228,26 @@ def create_batch(
     fake. Each file is processed independently: an unreadable file becomes a
     REJECTED invoice (never aborts the batch); a document whose identity key
     collides a stored invoice yields a DUPLICATE outcome and is NOT persisted.
+
+    ``project_id`` + ``payment_method_id`` are the cost allocation (inc 27), stamped
+    on EVERY invoice the batch creates (rejected rows included) — the route validates
+    they exist + are active before we get here.
     """
     extractor = extractor or get_extractor()
     storage = get_storage()
     batch = InvoiceBatch(status=InvoiceBatchStatus.EXTRACTING.value, created_by=actor_uid)
     db.add(batch)
     db.flush()
-    _audit(db, "expense.batch_created", actor_uid, batch.id, {"files": len(file_ids)})
+    _audit(db, "expense.batch_created", actor_uid, batch.id,
+           {"files": len(file_ids), "project_id": project_id,
+            "payment_method_id": payment_method_id})
 
     outcomes: list[FileOutcome] = []
     persisted = 0
     for file_id in file_ids:
-        outcome = _process_file(db, batch, file_id, storage, extractor, actor_uid)
+        outcome = _process_file(
+            db, batch, file_id, storage, extractor, actor_uid,
+            project_id=project_id, payment_method_id=payment_method_id)
         outcomes.append(outcome)
         if outcome.invoice_id is not None and outcome.status != "DUPLICATE":
             persisted += 1
@@ -256,6 +268,9 @@ def _process_file(
     storage: Storage,
     extractor: Extractor,
     actor_uid: str | None,
+    *,
+    project_id: int,
+    payment_method_id: int,
 ) -> FileOutcome:
     """Extract + persist a single file, returning its outcome. Never raises for a
     bad document: an extraction failure becomes a REJECTED invoice."""
@@ -265,14 +280,18 @@ def _process_file(
         # The row was created microseconds ago in the same request; a missing blob
         # is an internal fault, not a bad document. Log server-side, reject the file.
         logger.error("expense source bytes missing for file %s", file_id)
-        return _persist_rejected(db, batch, file_id, actor_uid)
+        return _persist_rejected(
+            db, batch, file_id, actor_uid,
+            project_id=project_id, payment_method_id=payment_method_id)
 
     try:
         extracted = extractor.extract(pdf_bytes, doc_type="gst_invoice")
     except Exception as err:  # noqa: BLE001 - any engine failure -> a clean REJECTED
         # Detail (which may embed file internals) is logged, NEVER surfaced.
         logger.warning("expense extraction failed for file %s", file_id, exc_info=err)
-        return _persist_rejected(db, batch, file_id, actor_uid)
+        return _persist_rejected(
+            db, batch, file_id, actor_uid,
+            project_id=project_id, payment_method_id=payment_method_id)
 
     scalars = _scalars_from(extracted)
     key = (dedup.dedup_key(
@@ -295,7 +314,8 @@ def _process_file(
     try:
         with db.begin_nested():
             invoice = _persist_invoice(
-                db, batch, file_id, extracted, scalars, key, chash, actor_uid)
+                db, batch, file_id, extracted, scalars, key, chash, actor_uid,
+                project_id=project_id, payment_method_id=payment_method_id)
     except IntegrityError:
         logger.info("expense dedup race for file %s; converting to DUPLICATE", file_id)
         existing = _find_duplicate(db, key, chash)
@@ -346,6 +366,9 @@ def _persist_invoice(
     key: str | None,
     content_hash: str,
     actor_uid: str | None,
+    *,
+    project_id: int,
+    payment_method_id: int,
 ) -> Invoice:
     """Persist the Invoice snapshot + line items + field envelope rows."""
     invoice = Invoice(
@@ -358,6 +381,8 @@ def _persist_invoice(
         review_reasons=list(extracted.review_reasons),
         dedup_key=key,
         content_hash=content_hash,
+        project_id=project_id,
+        payment_method_id=payment_method_id,
         created_by=actor_uid,
         **scalars,
     )
@@ -396,15 +421,19 @@ def _persist_invoice(
 
 
 def _persist_rejected(
-    db: Session, batch: InvoiceBatch, file_id: int, actor_uid: str | None
+    db: Session, batch: InvoiceBatch, file_id: int, actor_uid: str | None,
+    *, project_id: int, payment_method_id: int,
 ) -> FileOutcome:
     """A quality-gate failure: a terminal REJECTED invoice with a generic message
-    (no identity key, no fields — there was nothing readable to snapshot)."""
+    (no identity key, no fields — there was nothing readable to snapshot). The batch's
+    cost allocation is still stamped so the whole upload carries it (rejected included)."""
     invoice = Invoice(
         batch_id=batch.id,
         source_file_id=file_id,
         status=InvoiceStatus.REJECTED.value,
         review_reasons=[_REJECTED_MESSAGE],
+        project_id=project_id,
+        payment_method_id=payment_method_id,
         created_by=actor_uid,
     )
     db.add(invoice)
@@ -471,6 +500,8 @@ def _register_query(
     status: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    project_id: int | None = None,
+    payment_method_id: int | None = None,
 ) -> Select[tuple[Invoice]]:
     """The filtered, newest-first register select shared by list + CSV."""
     stmt = select(Invoice)
@@ -493,6 +524,10 @@ def _register_query(
         stmt = stmt.where(Invoice.invoice_date >= date_from)
     if date_to is not None:  # inclusive
         stmt = stmt.where(Invoice.invoice_date <= date_to)
+    if project_id is not None:
+        stmt = stmt.where(Invoice.project_id == project_id)
+    if payment_method_id is not None:
+        stmt = stmt.where(Invoice.payment_method_id == payment_method_id)
     return stmt.order_by(Invoice.id.desc())
 
 
@@ -505,27 +540,76 @@ def list_invoices(
     status: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    project_id: int | None = None,
+    payment_method_id: int | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[Invoice]:
-    """The searchable expense register (free-text q / supplier / GSTIN / date-range / status)."""
+    """The searchable expense register (free-text q / supplier / GSTIN / date-range /
+    status / project / payment method)."""
     stmt = _register_query(
         q=q, supplier=supplier, gstin=gstin, status=status,
         date_from=date_from, date_to=date_to,
+        project_id=project_id, payment_method_id=payment_method_id,
     ).limit(limit).offset(offset)
     return list(db.execute(stmt).scalars())
 
 
-def register_csv(rows: list[Invoice]) -> bytes:
-    """Render the register to CSV; text-derived fields are CSV-injection-guarded."""
-    header = "Invoice No,Date,Supplier,Supplier GSTIN,Taxable (INR),Grand Total (INR),Status"
+def allocation_maps(
+    db: Session, invoices: list[Invoice]
+) -> tuple[dict[int, str], dict[int, str]]:
+    """(project_id -> code, payment_method_id -> name) for a page of invoices.
+
+    The project code is resolved by an EXPLICIT lookup — the expense module keeps NO
+    ORM relationship to Project (module decoupling) — and both maps are one query each
+    (no per-row N+1). Ids with no row (e.g. a deleted method) simply drop out."""
+    project_ids = {inv.project_id for inv in invoices if inv.project_id is not None}
+    pm_ids = {
+        inv.payment_method_id for inv in invoices if inv.payment_method_id is not None
+    }
+    projects: dict[int, str] = (
+        {row.id: row.code for row in db.execute(
+            select(Project.id, Project.code).where(Project.id.in_(project_ids))
+        )} if project_ids else {}
+    )
+    methods: dict[int, str] = (
+        {row.id: row.name for row in db.execute(
+            select(ExpensePaymentMethod.id, ExpensePaymentMethod.name)
+            .where(ExpensePaymentMethod.id.in_(pm_ids))
+        )} if pm_ids else {}
+    )
+    return projects, methods
+
+
+def register_csv(
+    rows: list[Invoice],
+    project_codes: dict[int, str] | None = None,
+    payment_method_names: dict[int, str] | None = None,
+) -> bytes:
+    """Render the register to CSV; text-derived fields are CSV-injection-guarded.
+
+    ``project_codes`` / ``payment_method_names`` resolve the allocation columns (from
+    ``allocation_maps``); an unmapped id renders blank."""
+    project_codes = project_codes or {}
+    payment_method_names = payment_method_names or {}
+    header = (
+        "Invoice No,Date,Supplier,Supplier GSTIN,Project,Payment Method,"
+        "Taxable (INR),Grand Total (INR),Status"
+    )
     lines = [header]
     for inv in rows:
+        project = project_codes.get(inv.project_id) if inv.project_id is not None else ""
+        method = (
+            payment_method_names.get(inv.payment_method_id)
+            if inv.payment_method_id is not None else ""
+        )
         lines.append(",".join((
             _csv_field(inv.invoice_number or ""),
             f'"{inv.invoice_date.isoformat() if inv.invoice_date else ""}"',
             _csv_field(inv.supplier_name or ""),
             _csv_field(inv.supplier_gstin or ""),
+            _csv_field(project or ""),
+            _csv_field(method or ""),
             f'"{_rupees(inv.total_taxable_paise)}"',
             f'"{_rupees(inv.grand_total_paise)}"',
             f'"{inv.status}"',
@@ -540,6 +624,84 @@ def get_invoice(db: Session, invoice_id: int) -> Invoice:
     if invoice is None:
         raise ExpenseNotFound("invoice not found")
     return invoice
+
+
+# --------------------------------------------------------------- summary
+
+@dataclass
+class GroupTotal:
+    """One aggregation bucket: the grouping key (project or payment method), its
+    human label, the summed grand total in paise, and the invoice count."""
+
+    key_id: int | None
+    label: str | None
+    total_paise: int
+    count: int
+
+
+@dataclass
+class ExpenseSummary:
+    total_confirmed_paise: int
+    invoice_count: int
+    by_project: list[GroupTotal]
+    by_payment_method: list[GroupTotal]
+
+
+def summary(db: Session) -> ExpenseSummary:
+    """Cost-allocation rollup over CONFIRMED invoices only.
+
+    Only CONFIRMED (the immutable financial record) invoices count; every other state
+    (UPLOADED/EXTRACTED/NEEDS_REVIEW/NEEDS_OCR/REJECTED) is excluded — an unconfirmed
+    row is not yet a committed expense. Money is summed in BigInt paise. A confirmed
+    row missing a project/method (a pre-inc-27 edge that predates the confirm guard)
+    falls into a NULL bucket so the group totals still reconcile to the grand total."""
+    confirmed = Invoice.status == InvoiceStatus.CONFIRMED.value
+    total_paise, count = db.execute(
+        select(
+            func.coalesce(func.sum(Invoice.grand_total_paise), 0),
+            func.count(),
+        ).where(confirmed)
+    ).one()
+
+    by_project = [
+        GroupTotal(key_id=pid, label=code, total_paise=int(paise), count=cnt)
+        for pid, code, paise, cnt in db.execute(
+            select(
+                Invoice.project_id,
+                Project.code,
+                func.coalesce(func.sum(Invoice.grand_total_paise), 0),
+                func.count(),
+            )
+            .outerjoin(Project, Project.id == Invoice.project_id)
+            .where(confirmed)
+            .group_by(Invoice.project_id, Project.code)
+            .order_by(func.coalesce(func.sum(Invoice.grand_total_paise), 0).desc())
+        )
+    ]
+    by_payment_method = [
+        GroupTotal(key_id=mid, label=name, total_paise=int(paise), count=cnt)
+        for mid, name, paise, cnt in db.execute(
+            select(
+                Invoice.payment_method_id,
+                ExpensePaymentMethod.name,
+                func.coalesce(func.sum(Invoice.grand_total_paise), 0),
+                func.count(),
+            )
+            .outerjoin(
+                ExpensePaymentMethod,
+                ExpensePaymentMethod.id == Invoice.payment_method_id,
+            )
+            .where(confirmed)
+            .group_by(Invoice.payment_method_id, ExpensePaymentMethod.name)
+            .order_by(func.coalesce(func.sum(Invoice.grand_total_paise), 0).desc())
+        )
+    ]
+    return ExpenseSummary(
+        total_confirmed_paise=int(total_paise),
+        invoice_count=int(count),
+        by_project=by_project,
+        by_payment_method=by_payment_method,
+    )
 
 
 # --------------------------------------------------------------- corrections
@@ -642,6 +804,12 @@ def confirm_invoice(db: Session, invoice: Invoice, *, actor_uid: str | None) -> 
         raise ExpenseConflict(
             f"invoice is {invoice.status}; only EXTRACTED or NEEDS_REVIEW invoices "
             "can be confirmed")
+    # Cost-allocation guard (inc 27): a CONFIRMED invoice is the immutable financial
+    # record, so it must carry a project + payment method. New uploads always have them;
+    # this blocks confirming a pre-inc-27 / edge row that predates the allocation.
+    if invoice.project_id is None or invoice.payment_method_id is None:
+        raise ExpenseConflict(
+            "allocate a project and payment method before confirming")
     blocking = sorted(
         f.field_path for f in invoice.fields
         if f.field_path in REQUIRED_FIELD_PATHS

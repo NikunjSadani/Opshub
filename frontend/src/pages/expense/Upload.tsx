@@ -5,12 +5,15 @@ import {
   Button,
   ConfirmDialog,
   PageHeader,
+  SelectField,
   StatePanel,
   useToast,
 } from '../../ui';
 import { usePermissions } from '../../auth/AuthProvider';
+import { useProjectsQuery } from '../../api/projects';
 import {
   useDeleteInvoice,
+  usePaymentMethods,
   useUploadInvoices,
   type UploadResult,
 } from '../../api/expense';
@@ -40,8 +43,15 @@ export function Upload() {
   const canUpload = perms.loading || perms.atLeast('expense_invoice', 'OPERATE');
   const upload = useUploadInvoices();
   const del = useDeleteInvoice();
+  // Cost-allocation: every invoice in a batch is tagged with the SAME project +
+  // payment method, chosen once here. Only ACTIVE projects and active payment
+  // methods are choosable (the backend still enforces both are required + valid).
+  const projectsQuery = useProjectsQuery({ status: 'ACTIVE' });
+  const methodsQuery = usePaymentMethods(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const [projectId, setProjectId] = useState('');
+  const [paymentMethodId, setPaymentMethodId] = useState('');
   const [files, setFiles] = useState<File[]>([]);
   // Outcomes are index-aligned with `files` (the backend returns one outcome per
   // uploaded file, in order), so a row's identity is its position — never its
@@ -66,8 +76,8 @@ export function Upload() {
   }
 
   function onUpload() {
-    if (files.length === 0) return;
-    upload.mutate(files, {
+    if (files.length === 0 || !projectId || !paymentMethodId) return;
+    upload.mutate({ files, projectId, paymentMethodId }, {
       onSuccess: (batch) => {
         setResults(batch.outcomes);
         const dupes = batch.outcomes.filter((r) => r.status === 'DUPLICATE').length;
@@ -114,7 +124,8 @@ export function Upload() {
     setResolvingId(target.result.file_id);
     try {
       await del.mutateAsync(target.result.duplicate_of);
-      const batch = await upload.mutateAsync([file]);
+      // Re-upload with the SAME batch tags so the replacement keeps its allocation.
+      const batch = await upload.mutateAsync({ files: [file], projectId, paymentMethodId });
       const fresh = batch.outcomes[0];
       // Splice by index so only the resolved row is replaced (same-named rows stay put).
       setResults((prev) => (prev ?? []).map((r, i) => (i === target.index ? fresh : r)));
@@ -136,6 +147,13 @@ export function Upload() {
 
   const busy = upload.isPending || del.isPending || resolvingId != null;
 
+  const projects = projectsQuery.data ?? [];
+  const methods = methodsQuery.data ?? [];
+  const noProjects = projectsQuery.isSuccess && projects.length === 0;
+  const noMethods = methodsQuery.isSuccess && methods.length === 0;
+  // Both cost-allocation tags are REQUIRED before an upload can proceed.
+  const canSubmit = files.length > 0 && !!projectId && !!paymentMethodId;
+
   return (
     <div>
       <PageHeader
@@ -144,6 +162,65 @@ export function Upload() {
       />
 
       <div className="max-w-2xl">
+        <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <SelectField
+            label="Project"
+            required
+            value={projectId}
+            onChange={(e) => setProjectId(e.target.value)}
+            disabled={projectsQuery.isPending || noProjects}
+            hint="Which project this batch of invoices is charged to."
+          >
+            <option value="">
+              {projectsQuery.isPending ? 'Loading projects…' : 'Select a project…'}
+            </option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.code} — {p.name}
+              </option>
+            ))}
+          </SelectField>
+          <SelectField
+            label="Payment method"
+            required
+            value={paymentMethodId}
+            onChange={(e) => setPaymentMethodId(e.target.value)}
+            disabled={methodsQuery.isPending || noMethods}
+            hint="How this batch was (or will be) paid."
+          >
+            <option value="">
+              {methodsQuery.isPending ? 'Loading payment methods…' : 'Select a payment method…'}
+            </option>
+            {methods.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </SelectField>
+        </div>
+
+        {noProjects && (
+          <p className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            No active projects exist yet. Create one in the Projects module before uploading
+            invoices.
+          </p>
+        )}
+        {noMethods && (
+          <p className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            No payment methods have been set up yet.{' '}
+            {canManage ? (
+              <Link
+                to={`${EXPENSE_BASE}/payment-methods`}
+                className="font-medium text-brand-700 underline hover:text-brand-800"
+              >
+                Add one on the Payment Methods tab
+              </Link>
+            ) : (
+              'Ask an administrator to add one before uploading invoices.'
+            )}
+          </p>
+        )}
+
         <label htmlFor="expense-files" className="mb-1 block text-xs font-medium text-slate-600">
           Invoice PDFs (one invoice per file)
         </label>
@@ -161,8 +238,12 @@ export function Upload() {
           invoice.
         </p>
 
-        <div className="mt-4 flex flex-wrap gap-2">
-          <Button onClick={onUpload} disabled={files.length === 0 || busy || !canUpload} loading={upload.isPending && resolvingId == null}>
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Button
+            onClick={onUpload}
+            disabled={!canSubmit || busy || !canUpload}
+            loading={upload.isPending && resolvingId == null}
+          >
             {files.length > 0
               ? `Upload ${files.length} file${files.length === 1 ? '' : 's'}`
               : 'Upload'}
@@ -171,6 +252,11 @@ export function Upload() {
             <Button variant="ghost" onClick={reset} disabled={busy}>
               Clear
             </Button>
+          )}
+          {files.length > 0 && (!projectId || !paymentMethodId) && (
+            <span className="text-xs text-slate-400">
+              Select a project and payment method to enable upload.
+            </span>
           )}
         </div>
       </div>

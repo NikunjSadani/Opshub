@@ -220,6 +220,22 @@ def resolve_active_project(db: Session, code: str) -> Project | None:
     ).scalar_one_or_none()
 
 
+def get_active_project(db: Session, project_id: int) -> Project | None:
+    """Return the ACTIVE project with numeric id `project_id`, else None.
+
+    Mirrors ``resolve_active_project`` (which keys on the human ``code``) but keys on
+    the primary key — used by the expense upload to enforce "the cost-allocation
+    project must pre-exist AND be Active". An unknown project, or one that is
+    ON_HOLD/CLOSED, resolves to None so the caller can raise a blocking 400.
+    """
+    return db.execute(
+        select(Project).where(
+            Project.id == project_id,
+            Project.status == ProjectStatus.ACTIVE.value,
+        )
+    ).scalar_one_or_none()
+
+
 def set_status(
     db: Session, *, project: Project, status: str, actor_uid: str | None = None
 ) -> Project:

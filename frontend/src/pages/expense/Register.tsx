@@ -18,8 +18,10 @@ import {
 } from '../../ui';
 import { useApi } from '../../api/client';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import { useProjectsQuery } from '../../api/projects';
 import {
   buildInvoiceCsvQuery,
+  usePaymentMethods,
   useInvoicesInfiniteQuery,
   type InvoiceFilters,
   type InvoiceStatus,
@@ -41,13 +43,27 @@ export function Register() {
   const [status, setStatus] = useState<InvoiceStatus | ''>('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
+  const [projectId, setProjectId] = useState('');
+  const [paymentMethodId, setPaymentMethodId] = useState('');
   const [downloading, setDownloading] = useState(false);
   const [exportTruncated, setExportTruncated] = useState(false);
+
+  // Filter pickers list ALL projects / payment methods (not active-only) so an
+  // invoice tagged to a now-inactive one is still filterable in the register.
+  const projectsQuery = useProjectsQuery({});
+  const methodsQuery = usePaymentMethods(false);
 
   // Debounce the filters that feed the query key so each keystroke does not fire
   // its own request; the list refetches ~300ms after typing settles. The
   // immediate filters still feed the CSV export (a deliberate button click).
-  const filters: InvoiceFilters = { q, status, date_from: dateFrom, date_to: dateTo };
+  const filters: InvoiceFilters = {
+    q,
+    status,
+    date_from: dateFrom,
+    date_to: dateTo,
+    project_id: projectId,
+    payment_method_id: paymentMethodId,
+  };
   const debouncedFilters = useDebouncedValue(filters);
 
   // Changing any filter changes the query key, so paging naturally resets to page 0.
@@ -138,6 +154,30 @@ export function Register() {
           onChange={(e) => setDateTo(e.target.value)}
           min={dateFrom || undefined}
         />
+        <SelectField
+          label="Project"
+          value={projectId}
+          onChange={(e) => setProjectId(e.target.value)}
+        >
+          <option value="">All projects</option>
+          {(projectsQuery.data ?? []).map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.code} — {p.name}
+            </option>
+          ))}
+        </SelectField>
+        <SelectField
+          label="Payment method"
+          value={paymentMethodId}
+          onChange={(e) => setPaymentMethodId(e.target.value)}
+        >
+          <option value="">All payment methods</option>
+          {(methodsQuery.data ?? []).map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </SelectField>
       </div>
 
       {query.isPending ? (
@@ -156,6 +196,8 @@ export function Register() {
                 <Th>Invoice no.</Th>
                 <Th>Date</Th>
                 <Th className="text-right">Grand total</Th>
+                <Th>Project</Th>
+                <Th>Payment method</Th>
                 <Th>Status</Th>
                 <Th className="text-right">Actions</Th>
               </Tr>
@@ -168,6 +210,8 @@ export function Register() {
                   <Td>{inv.invoice_number ?? '—'}</Td>
                   <Td className="whitespace-nowrap">{formatDate(inv.invoice_date)}</Td>
                   <Td className="text-right tabular-nums">{formatPaise(inv.grand_total_paise)}</Td>
+                  <Td className="whitespace-nowrap">{inv.project_code ?? '—'}</Td>
+                  <Td>{inv.payment_method_name ?? '—'}</Td>
                   <Td>
                     <Badge tone={INVOICE_STATUS_TONE[inv.status]}>
                       {INVOICE_STATUS_LABEL[inv.status]}
