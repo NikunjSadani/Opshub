@@ -21,6 +21,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
+# Register the projects table so the new expense_invoice.project_id FK resolves at create_all.
+import app.modules.projects.models  # noqa: F401
 from app.db import Base, get_db
 from app.modules.expense import service
 from app.modules.expense.canonical import (

@@ -87,6 +87,21 @@ class InvoiceBatch(Base):
     )
 
 
+class ExpensePaymentMethod(Base):
+    """An admin-managed payment method (e.g. Bank Transfer, UPI, Cheque) that an
+    invoice batch is tagged with at upload. Soft-deleted via `active` so historical
+    invoices keep their method. Curated on the Expense module's Payment Methods tab
+    (Manage level)."""
+
+    __tablename__ = "expense_payment_method"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class Invoice(Base):
     __tablename__ = "expense_invoice"
 
@@ -118,6 +133,16 @@ class Invoice(Base):
     invoice_date: Mapped[date | None] = mapped_column(Date, index=True)
     place_of_supply: Mapped[str | None] = mapped_column(String(64))
     po_ref: Mapped[str | None] = mapped_column(String(64))
+
+    # Cost allocation (inc 27) — set at upload, one value per batch. Nullable so pre-inc-27
+    # rows survive; required by the upload endpoint + a guard blocks confirming without them.
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("project.id"), index=True, default=None)
+    payment_method_id: Mapped[int | None] = mapped_column(
+        ForeignKey("expense_payment_method.id"), index=True, default=None)
+    # Same-module relationship is safe; the Project is resolved via explicit joins to keep
+    # the expense/projects modules decoupled (no cross-module mapper dependency).
+    payment_method: Mapped["ExpensePaymentMethod | None"] = relationship()
 
     total_taxable_paise: Mapped[int | None] = mapped_column(BigInteger)
     total_cgst_paise: Mapped[int | None] = mapped_column(BigInteger)
