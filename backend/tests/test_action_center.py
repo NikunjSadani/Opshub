@@ -12,10 +12,11 @@ The seed builds a REAL cross-module graph, one row per membership/exclusion case
     * PO-CLOSED expected today+3  CLOSED     -> EXCLUDED (terminal status)
     (the invoicing POs carry a null expected date, so the two axes never cross-pollute)
 
-  invoicing_due:
-    * PO-BIG   line ordered 10, short_closed 1, unbilled -> open 9,  value 9×9000 = 81000
-    * PO-SMALL line ordered 10,                unbilled -> open 10, value 10×5000 = 50000
-    * PO-BILLED line ordered 4, fully invoiced (CONFIRMED inv qty 4) -> open 0, EXCLUDED
+  invoicing_due (only CONFIRMED / IN_PROGRESS POs qualify):
+    * PO-BIG   CONFIRMED line ordered 10, short_closed 1, unbilled -> open 9,  value 81000
+    * PO-SMALL CONFIRMED line ordered 10,                unbilled -> open 10, value 50000
+    * PO-BILLED CONFIRMED line ordered 4, fully invoiced (inv qty 4) -> open 0, EXCLUDED
+    * PO-DRAFT DRAFT line ordered 5, unbilled -> open 5 but EXCLUDED (not yet confirmed)
 
   ar_overdue:
     * INV-OD1 CONFIRMED due today−40, outstanding 100000 -> overdue 40d, bucket 31-60
@@ -168,6 +169,10 @@ def _seed(TestSession: sessionmaker[Session]) -> dict[str, int]:
     po_billed = _po(db, number="PO-BILLED", client_id=acm.id, project_id=proj.id, expected=None)
     billed_line = _line(db, po_id=po_billed.id, product_id=widget.id, ordered="4",
                         sell_paise=7000)
+    # A DRAFT PO with an open line is NO LONGER invoicing-due (needs confirm first).
+    po_draft = _po(db, number="PO-DRAFT", client_id=acm.id, project_id=proj.id,
+                   expected=None, status="DRAFT")
+    _line(db, po_id=po_draft.id, product_id=widget.id, ordered="5", sell_paise=3000)
     # A CONFIRMED invoice that fully bills the line (qty 4) -> open_qty 0 -> excluded.
     # due_date None so this confirmed invoice is never itself an overdue receivable.
     billed_inv = _confirmed_invoice(db, client_id=acm.id, po_id=po_billed.id,
@@ -189,6 +194,7 @@ def _seed(TestSession: sessionmaker[Session]) -> dict[str, int]:
         "acm": acm.id, "proj": proj.id,
         "po_past": po_past.id, "po_soon": po_soon.id,
         "po_big": po_big.id, "po_small": po_small.id, "po_billed": po_billed.id,
+        "po_draft": po_draft.id,
         "od1": od1.id, "od2": od2.id,
     }
     db.close()
@@ -235,8 +241,10 @@ def test_invoicing_due_membership_and_math(
     rows = service.invoicing_due(db)
     db.close()
     by_po = {r.po_id: r for r in rows}
-    # PO-BILLED is fully invoiced -> excluded; the two open POs remain.
+    # PO-BILLED is fully invoiced -> excluded; PO-DRAFT is not confirmed -> excluded;
+    # the two open CONFIRMED POs remain.
     assert set(by_po) == {ids["po_big"], ids["po_small"]}
+    assert ids["po_draft"] not in by_po
     # PO-BIG: open = 10 − 0 invoiced − 1 short_closed = 9; value 9 × 9000.
     assert by_po[ids["po_big"]].uninvoiced_qty == Decimal("9")
     assert by_po[ids["po_big"]].uninvoiced_value_paise == 81000

@@ -31,6 +31,7 @@ from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+import app.modules.sales_orders.po_service as po_service
 from app.modules.billing import dedup, matcher
 from app.modules.billing.models import (
     AdvanceApplication,
@@ -948,6 +949,10 @@ def confirm_invoice(db: Session, invoice: SalesInvoice, *, actor_uid: str | None
     invoice.confirmed_at = datetime.now(UTC)
     _audit(db, "billing.invoice_confirmed", actor_uid, invoice.id,
            {"over_invoiced_lines": over_invoiced_lines})
+    # Best-effort status nudge: confirming a client invoice against a CONFIRMED PO moves
+    # that PO to IN_PROGRESS (a no-op for any other PO state / a null po_id). Same
+    # transaction, before the commit — it must never block the invoice confirm.
+    po_service.mark_in_progress(db, invoice.po_id, actor_uid=actor_uid)
     db.commit()
     db.refresh(invoice)
     # Surface the structured soft-flag on the result for a direct service caller (the HTTP

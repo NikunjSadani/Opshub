@@ -5,6 +5,7 @@
   GET    /purchase-orders                 -> filtered register (VIEW)
   GET    /purchase-orders/{id}            -> one PO + lines + amendment count (VIEW)
   PATCH  /purchase-orders/{id}            -> amend (snapshots a version) (po.amend)
+  POST   /purchase-orders/{id}/confirm    -> DRAFT -> CONFIRMED (po.create)
   POST   /purchase-orders/{id}/short-close-> retire open-to-invoice qty (po.short_close)
   POST   /purchase-orders/{id}/void       -> soft-cancel the PO (po.void)
 
@@ -395,6 +396,30 @@ def amend_purchase_order(
             actor_uid=user.firebase_uid)
     except po_service.POValidationError as err:
         # A blocked amend (CANCELLED/CLOSED, empty line replacement) is 422.
+        raise _map_error(err, validation_status=422) from err
+    except po_service.POError as err:
+        raise _map_error(err) from err
+    db.commit()
+    return _load_detail(db, po_id)
+
+
+# ------------------------------------------------------------------- confirm
+
+@router.post("/purchase-orders/{po_id}/confirm", response_model=PODetailOut)
+def confirm_purchase_order(
+    po_id: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> PODetailOut:
+    rbac.require_level(user, rbac.SALES_ORDERS, Level.OPERATE)
+    try:
+        po = po_service.get_po_detail(db, po_id)
+    except po_service.PONotFound as err:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(err)) from err
+    try:
+        po_service.confirm_po(db, po, actor_uid=user.firebase_uid)
+    except po_service.POValidationError as err:
+        # Confirming a non-DRAFT PO is a blocked transition -> 422 (mirrors amend).
         raise _map_error(err, validation_status=422) from err
     except po_service.POError as err:
         raise _map_error(err) from err

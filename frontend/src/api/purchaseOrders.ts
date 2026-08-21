@@ -346,6 +346,23 @@ export function useAmendPurchaseOrder(): UseMutationResult<
   });
 }
 
+/** Confirm a DRAFT PO — moves it to CONFIRMED (OPERATE). 422 if the PO isn't DRAFT. */
+export function useConfirmPurchaseOrder(): UseMutationResult<
+  PODetail,
+  ApiError,
+  { id: string }
+> {
+  const { post } = useApi();
+  const qc = useQueryClient();
+  return useMutation<PODetail, ApiError, { id: string }>({
+    mutationFn: ({ id }) => post<PODetail>(`/purchase-orders/${id}/confirm`, {}),
+    onSuccess: (po) => {
+      qc.setQueryData(poKeys.detail(String(po.id)), po);
+      void qc.invalidateQueries({ queryKey: ['purchase-orders', 'list'] });
+    },
+  });
+}
+
 /** Short-close a single line (with `line_id`) or the whole PO (MANAGE). */
 export function useShortClosePO(): UseMutationResult<
   PODetail,

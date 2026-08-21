@@ -148,7 +148,7 @@ def procurement_followups(db: Session, horizon_days: int) -> list[ProcurementIte
 
 
 def invoicing_due(db: Session) -> list[InvoicingDueItem]:
-    """Live POs (status not CLOSED/CANCELLED) that still have units to invoice.
+    """Live POs (status CONFIRMED or IN_PROGRESS) that still have units to invoice.
 
     Per line ``open_qty = ordered_qty − invoiced_qty_for_po_line(line.id) − short_closed_qty``,
     clamped at 0 (the §6 rollup already nets confirmed credit notes and floors at 0); a PO is
@@ -156,14 +156,12 @@ def invoicing_due(db: Session) -> list[InvoicingDueItem]:
     ``open_qty × sell_price_paise`` (Decimal) then rounds HALF_UP to paise — no float. Ordered
     most-urgent first (largest uninvoiced value; ``po_id`` breaks ties).
 
-    NOTE: DRAFT POs ARE included — there is no PO confirm lifecycle yet (a PO is created DRAFT
-    and only short-close→CLOSED / void→CANCELLED transition it), so DRAFT is the live working
-    state. When a confirm step is added, narrow this to CONFIRMED/IN_PROGRESS. CLOSED is
-    excluded defensively (a whole-PO short-close already zeroes every line's open_qty, so
-    CLOSED never leaks today — this hardens against any future CLOSED path that skips that)."""
+    Only a CONFIRMED / IN_PROGRESS PO is "invoicing due": a DRAFT PO has not been confirmed
+    into the live pipeline yet (now that the confirm lifecycle exists, it is no longer the
+    working state), and CLOSED / CANCELLED are terminal."""
     pos = db.execute(
         select(PurchaseOrder).where(
-            PurchaseOrder.status.not_in([POStatus.CLOSED.value, POStatus.CANCELLED.value])
+            PurchaseOrder.status.in_([POStatus.CONFIRMED.value, POStatus.IN_PROGRESS.value])
         )
     ).scalars().all()
 

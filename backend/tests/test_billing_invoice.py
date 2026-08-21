@@ -524,6 +524,25 @@ def test_over_invoiced_soft_flag_on_second_confirm(client: TestClient) -> None:
     db.close()
 
 
+# --------------------------------- PO confirm lifecycle: invoice confirm nudges the PO
+
+def test_confirm_invoice_moves_po_to_in_progress(client: TestClient) -> None:
+    # The harness seeds the PO as CONFIRMED; confirming a matched client invoice against it
+    # nudges the PO CONFIRMED -> IN_PROGRESS (best-effort status hook in confirm_invoice).
+    po_id = client.app.state.po_id
+    db = client.app.state.TestSession()
+    assert db.get(PurchaseOrder, po_id).status == "CONFIRMED"
+    db.close()
+
+    inv_id = _upload(client, _spec(invoice_number="CINV-IP")
+                     ).json()["outcomes"][0]["invoice_id"]
+    assert _confirm(client, inv_id).status_code == 200
+
+    db = client.app.state.TestSession()
+    assert db.get(PurchaseOrder, po_id).status == "IN_PROGRESS"
+    db.close()
+
+
 # ------------------------------------------------- M2: delete blocked by AR children
 
 def test_delete_blocked_when_receivable_records_exist(client: TestClient) -> None:

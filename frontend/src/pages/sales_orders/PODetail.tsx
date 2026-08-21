@@ -26,6 +26,7 @@ import {
   PO_STATUS_LABEL,
   PO_STATUS_TONE,
   useAmendPurchaseOrder,
+  useConfirmPurchaseOrder,
   usePurchaseOrderQuery,
   useShortClosePO,
   useVoidPO,
@@ -90,6 +91,7 @@ function PODetailBody({
   toast: ReturnType<typeof useToast>;
 }) {
   const amend = useAmendPurchaseOrder();
+  const confirmPo = useConfirmPurchaseOrder();
   const shortClose = useShortClosePO();
   const voidPo = useVoidPO();
 
@@ -118,6 +120,16 @@ function PODetailBody({
           setScTarget(null);
           setScReason('');
         },
+        onError: (err) => toast.error(errorMessage(err)),
+      },
+    );
+  }
+
+  function submitConfirm() {
+    confirmPo.mutate(
+      { id: po.id },
+      {
+        onSuccess: () => toast.success('Purchase order confirmed.'),
         onError: (err) => toast.error(errorMessage(err)),
       },
     );
@@ -154,6 +166,18 @@ function PODetailBody({
             >
               Back to register
             </Link>
+            {/* Confirm — OPERATE, only while the PO is still a DRAFT. Non-destructive:
+                a single click (no ConfirmDialog). Server 422s if it isn't DRAFT. */}
+            {canOperate && po.status === 'DRAFT' && (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={submitConfirm}
+                loading={confirmPo.isPending}
+              >
+                Confirm PO
+              </Button>
+            )}
             {/* Amend is OPERATE and only while the PO is still amendable. */}
             {canOperate && !terminal && (
               <Button variant="secondary" size="sm" onClick={() => setAmendOpen(true)}>

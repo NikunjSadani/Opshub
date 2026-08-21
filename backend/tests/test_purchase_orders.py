@@ -318,6 +318,27 @@ def test_void_sets_cancelled(client: TestClient, seeded: dict[str, int]) -> None
     assert r.json()["status"] == "CANCELLED"
 
 
+# ------------------------------------------------------------------- confirm
+
+def test_confirm_draft_moves_to_confirmed(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    _as(client, "operator")
+    pid = client.post("/api/v1/purchase-orders", json=_create_body(seeded)).json()["id"]
+    r = client.post(f"/api/v1/purchase-orders/{pid}/confirm")
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "CONFIRMED"
+
+
+def test_confirm_non_draft_is_422(client: TestClient, seeded: dict[str, int]) -> None:
+    _as(client, "operator")
+    pid = client.post("/api/v1/purchase-orders", json=_create_body(seeded)).json()["id"]
+    assert client.post(f"/api/v1/purchase-orders/{pid}/confirm").status_code == 200
+    # A second confirm on an already-CONFIRMED PO is a blocked transition -> 422.
+    r = client.post(f"/api/v1/purchase-orders/{pid}/confirm")
+    assert r.status_code == 422, r.text
+
+
 # --------------------------------------------------------------------- RBAC
 
 def test_rbac_matrix(client: TestClient, seeded: dict[str, int]) -> None:
@@ -327,6 +348,8 @@ def test_rbac_matrix(client: TestClient, seeded: dict[str, int]) -> None:
     _as(client, "viewer")
     assert client.post("/api/v1/purchase-orders",
                        json=_create_body(seeded, po_number="X")).status_code == 403
+    # Viewer cannot confirm (needs OPERATE).
+    assert client.post(f"/api/v1/purchase-orders/{pid}/confirm").status_code == 403
     # Operator cannot short-close or void (both need MANAGE).
     _as(client, "operator")
     assert client.post(f"/api/v1/purchase-orders/{pid}/short-close",

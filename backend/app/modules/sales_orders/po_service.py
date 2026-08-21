@@ -642,6 +642,57 @@ def void_po(
     return po
 
 
+# --------------------------------------------------------------- confirm
+def confirm_po(
+    db: Session, po: PurchaseOrder, *, actor_uid: str | None = None,
+) -> PurchaseOrder:
+    """Confirm a DRAFT PO: transition DRAFT -> CONFIRMED (the client PO is now live).
+
+    Blocked (route -> 422/400) unless the PO is DRAFT — a CONFIRMED / IN_PROGRESS /
+    CLOSED / CANCELLED PO cannot be (re-)confirmed. Audited ``po.confirmed``. Caller
+    commits (the row is already loaded by the route)."""
+    if po.status != POStatus.DRAFT.value:
+        raise POValidationError(
+            f"only a DRAFT purchase order can be confirmed (this one is {po.status})")
+    po.status = POStatus.CONFIRMED.value
+    db.flush()
+    audit.log(
+        db,
+        action="po.confirmed",
+        actor_uid=actor_uid,
+        entity="purchase_order",
+        entity_id=str(po.id),
+        detail={"po_number": po.po_number},
+    )
+    return po
+
+
+def mark_in_progress(
+    db: Session, po_id: int | None, *, actor_uid: str | None = None,
+) -> PurchaseOrder | None:
+    """Best-effort nudge CONFIRMED -> IN_PROGRESS (a client invoice was confirmed against
+    this PO). ONLY a CONFIRMED PO transitions; a DRAFT / IN_PROGRESS / CLOSED / CANCELLED
+    PO (or a missing / None ``po_id``) is a no-op — never move DRAFT straight to IN_PROGRESS
+    and never disturb a terminal state. Audited ``po.in_progress`` only on a real transition.
+    Caller commits."""
+    if po_id is None:
+        return None
+    po = db.get(PurchaseOrder, po_id)
+    if po is None or po.status != POStatus.CONFIRMED.value:
+        return po
+    po.status = POStatus.IN_PROGRESS.value
+    db.flush()
+    audit.log(
+        db,
+        action="po.in_progress",
+        actor_uid=actor_uid,
+        entity="purchase_order",
+        entity_id=str(po.id),
+        detail={"po_number": po.po_number},
+    )
+    return po
+
+
 # ------------------------------------------------------------- bulk (Excel)
 
 # Canonical bulk columns -> the friendly headers accepted for each (case-insensitive,

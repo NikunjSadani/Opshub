@@ -290,6 +290,88 @@ describe('PO RBAC gating', () => {
   });
 });
 
+describe('PO confirm flow', () => {
+  it('a DRAFT PO shows Confirm and clicking it POSTs to /confirm; the badge flips to Confirmed', async () => {
+    let confirmUrl: string | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        if (/\/purchase-orders\/\d+\/confirm$/.test(url) && method === 'POST') {
+          confirmUrl = url;
+          return json({ ...PO_DETAIL, id: 1, status: 'CONFIRMED' });
+        }
+        if (/\/purchase-orders\/\d+$/.test(url)) return json({ ...PO_DETAIL, id: 1 });
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/sales_orders/:id" element={<PODetail />} />
+      </Routes>,
+      ['/m/sales_orders/1'],
+    );
+
+    // Opens as Draft with the Confirm button available to an OPERATE user.
+    expect(await screen.findByText('Draft')).toBeInTheDocument();
+    const confirmBtn = await screen.findByRole('button', { name: /confirm po/i });
+    fireEvent.click(confirmBtn);
+
+    // POSTs to the /confirm endpoint and the badge live-updates to Confirmed.
+    await waitFor(() => expect(confirmUrl).not.toBeNull());
+    expect(confirmUrl).toMatch(/\/purchase-orders\/1\/confirm$/);
+    expect(await screen.findByText('Confirmed')).toBeInTheDocument();
+  });
+
+  it('a CONFIRMED PO does NOT show the Confirm button', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        if (/\/purchase-orders\/\d+$/.test(url))
+          return json({ ...PO_DETAIL, id: 1, status: 'CONFIRMED' });
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/sales_orders/:id" element={<PODetail />} />
+      </Routes>,
+      ['/m/sales_orders/1'],
+    );
+
+    expect(await screen.findByText('Confirmed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /confirm po/i })).not.toBeInTheDocument();
+  });
+
+  it('a VIEW-only user does not see Confirm on a DRAFT PO', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/me')) return meResponse('VIEW');
+        if (/\/purchase-orders\/\d+$/.test(url)) return json({ ...PO_DETAIL, id: 1 });
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/sales_orders/:id" element={<PODetail />} />
+      </Routes>,
+      ['/m/sales_orders/1'],
+    );
+
+    expect(await screen.findByText('Draft')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /confirm po/i })).not.toBeInTheDocument();
+  });
+});
+
 describe('PO void flow', () => {
   it('a MANAGE user voids with a required reason', async () => {
     let voidBody: Record<string, unknown> | null = null;

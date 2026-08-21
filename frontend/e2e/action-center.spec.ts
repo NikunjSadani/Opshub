@@ -113,6 +113,10 @@ test.describe('Action Center — Wave 4 (admin end-to-end)', () => {
     poId = po.id;
     expect(po.po_number).toBe(PO_NUMBER);
 
+    // Confirm the PO (DRAFT -> CONFIRMED): invoicing-due is CONFIRMED/IN_PROGRESS-only now.
+    const confirmed = await apiPost(request, `/purchase-orders/${poId}/confirm`, {});
+    expect(confirmed.status).toBe('CONFIRMED');
+
     // ================= load the Action Center =================
     await page.goto('/m/action_center');
     await expect(page.getByRole('heading', { name: 'Action Center' })).toBeVisible();
