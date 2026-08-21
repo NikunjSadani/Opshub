@@ -26,7 +26,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -79,6 +79,13 @@ _REJECTED_MESSAGE = (
     "the document could not be read (unreadable or corrupt file) — re-scan or "
     "upload a clearer copy"
 )
+
+# inc 28 (vendor credit notes): a captured document is either an INVOICE (a cost) or a
+# CREDIT_NOTE (a REDUCTION of cost). Every money aggregate must be SIGN-AWARE — a credit
+# note subtracts. INVOICE is the default so all pre-inc-28 rows behave byte-identically.
+DOC_TYPE_INVOICE = "INVOICE"
+DOC_TYPE_CREDIT_NOTE = "CREDIT_NOTE"
+DOC_TYPES = frozenset({DOC_TYPE_INVOICE, DOC_TYPE_CREDIT_NOTE})
 
 
 # --------------------------------------------------------------------- errors
@@ -220,6 +227,8 @@ def create_batch(
     project_id: int,
     payment_method_id: int,
     actor_uid: str | None,
+    doc_type: str = DOC_TYPE_INVOICE,
+    against_invoice_id: int | None = None,
     extractor: Extractor | None = None,
 ) -> BatchResult:
     """Extract + persist every uploaded PDF into one batch; return per-file outcomes.
@@ -232,6 +241,11 @@ def create_batch(
     ``project_id`` + ``payment_method_id`` are the cost allocation (inc 27), stamped
     on EVERY invoice the batch creates (rejected rows included) — the route validates
     they exist + are active before we get here.
+
+    ``doc_type`` (INVOICE | CREDIT_NOTE) + the optional ``against_invoice_id`` are the
+    inc-28 credit-note fields, likewise stamped on EVERY invoice in the batch (rejected
+    included). The route validates ``doc_type`` and that any ``against_invoice_id`` exists
+    + shares the batch's project before we get here.
     """
     extractor = extractor or get_extractor()
     storage = get_storage()
@@ -240,14 +254,16 @@ def create_batch(
     db.flush()
     _audit(db, "expense.batch_created", actor_uid, batch.id,
            {"files": len(file_ids), "project_id": project_id,
-            "payment_method_id": payment_method_id})
+            "payment_method_id": payment_method_id,
+            "doc_type": doc_type, "against_invoice_id": against_invoice_id})
 
     outcomes: list[FileOutcome] = []
     persisted = 0
     for file_id in file_ids:
         outcome = _process_file(
             db, batch, file_id, storage, extractor, actor_uid,
-            project_id=project_id, payment_method_id=payment_method_id)
+            project_id=project_id, payment_method_id=payment_method_id,
+            doc_type=doc_type, against_invoice_id=against_invoice_id)
         outcomes.append(outcome)
         if outcome.invoice_id is not None and outcome.status != "DUPLICATE":
             persisted += 1
@@ -271,6 +287,8 @@ def _process_file(
     *,
     project_id: int,
     payment_method_id: int,
+    doc_type: str = DOC_TYPE_INVOICE,
+    against_invoice_id: int | None = None,
 ) -> FileOutcome:
     """Extract + persist a single file, returning its outcome. Never raises for a
     bad document: an extraction failure becomes a REJECTED invoice."""
@@ -282,7 +300,8 @@ def _process_file(
         logger.error("expense source bytes missing for file %s", file_id)
         return _persist_rejected(
             db, batch, file_id, actor_uid,
-            project_id=project_id, payment_method_id=payment_method_id)
+            project_id=project_id, payment_method_id=payment_method_id,
+            doc_type=doc_type, against_invoice_id=against_invoice_id)
 
     try:
         extracted = extractor.extract(pdf_bytes, doc_type="gst_invoice")
@@ -291,7 +310,8 @@ def _process_file(
         logger.warning("expense extraction failed for file %s", file_id, exc_info=err)
         return _persist_rejected(
             db, batch, file_id, actor_uid,
-            project_id=project_id, payment_method_id=payment_method_id)
+            project_id=project_id, payment_method_id=payment_method_id,
+            doc_type=doc_type, against_invoice_id=against_invoice_id)
 
     scalars = _scalars_from(extracted)
     key = (dedup.dedup_key(
@@ -315,7 +335,8 @@ def _process_file(
         with db.begin_nested():
             invoice = _persist_invoice(
                 db, batch, file_id, extracted, scalars, key, chash, actor_uid,
-                project_id=project_id, payment_method_id=payment_method_id)
+                project_id=project_id, payment_method_id=payment_method_id,
+                doc_type=doc_type, against_invoice_id=against_invoice_id)
     except IntegrityError:
         logger.info("expense dedup race for file %s; converting to DUPLICATE", file_id)
         existing = _find_duplicate(db, key, chash)
@@ -369,6 +390,8 @@ def _persist_invoice(
     *,
     project_id: int,
     payment_method_id: int,
+    doc_type: str = DOC_TYPE_INVOICE,
+    against_invoice_id: int | None = None,
 ) -> Invoice:
     """Persist the Invoice snapshot + line items + field envelope rows."""
     invoice = Invoice(
@@ -383,6 +406,8 @@ def _persist_invoice(
         content_hash=content_hash,
         project_id=project_id,
         payment_method_id=payment_method_id,
+        doc_type=doc_type,
+        against_invoice_id=against_invoice_id,
         created_by=actor_uid,
         **scalars,
     )
@@ -423,10 +448,12 @@ def _persist_invoice(
 def _persist_rejected(
     db: Session, batch: InvoiceBatch, file_id: int, actor_uid: str | None,
     *, project_id: int, payment_method_id: int,
+    doc_type: str = DOC_TYPE_INVOICE, against_invoice_id: int | None = None,
 ) -> FileOutcome:
     """A quality-gate failure: a terminal REJECTED invoice with a generic message
     (no identity key, no fields — there was nothing readable to snapshot). The batch's
-    cost allocation is still stamped so the whole upload carries it (rejected included)."""
+    cost allocation + credit-note stamping are still applied so the whole upload carries
+    them (rejected included), mirroring the inc-27 project/payment stamping."""
     invoice = Invoice(
         batch_id=batch.id,
         source_file_id=file_id,
@@ -434,6 +461,8 @@ def _persist_rejected(
         review_reasons=[_REJECTED_MESSAGE],
         project_id=project_id,
         payment_method_id=payment_method_id,
+        doc_type=doc_type,
+        against_invoice_id=against_invoice_id,
         created_by=actor_uid,
     )
     db.add(invoice)
@@ -502,6 +531,7 @@ def _register_query(
     date_to: date | None = None,
     project_id: int | None = None,
     payment_method_id: int | None = None,
+    doc_type: str | None = None,
 ) -> Select[tuple[Invoice]]:
     """The filtered, newest-first register select shared by list + CSV."""
     stmt = select(Invoice)
@@ -528,6 +558,8 @@ def _register_query(
         stmt = stmt.where(Invoice.project_id == project_id)
     if payment_method_id is not None:
         stmt = stmt.where(Invoice.payment_method_id == payment_method_id)
+    if doc_type is not None:
+        stmt = stmt.where(Invoice.doc_type == doc_type)
     return stmt.order_by(Invoice.id.desc())
 
 
@@ -542,15 +574,17 @@ def list_invoices(
     date_to: date | None = None,
     project_id: int | None = None,
     payment_method_id: int | None = None,
+    doc_type: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[Invoice]:
     """The searchable expense register (free-text q / supplier / GSTIN / date-range /
-    status / project / payment method)."""
+    status / project / payment method / doc_type)."""
     stmt = _register_query(
         q=q, supplier=supplier, gstin=gstin, status=status,
         date_from=date_from, date_to=date_to,
         project_id=project_id, payment_method_id=payment_method_id,
+        doc_type=doc_type,
     ).limit(limit).offset(offset)
     return list(db.execute(stmt).scalars())
 
@@ -596,7 +630,7 @@ def register_csv(
     project_codes = project_codes or {}
     payment_method_names = payment_method_names or {}
     header = (
-        "Invoice No,Date,Supplier,Supplier GSTIN,Project,Payment Method,"
+        "Invoice No,Date,Supplier,Supplier GSTIN,Doc Type,Project,Payment Method,"
         "Taxable (INR),Grand Total (INR),Status"
     )
     lines = [header]
@@ -606,15 +640,20 @@ def register_csv(
             payment_method_names.get(inv.payment_method_id)
             if inv.payment_method_id is not None else ""
         )
+        # Sign-aware money: a CREDIT_NOTE is a REDUCTION, so its amounts render NEGATIVE —
+        # a spreadsheet that sums the Taxable / Grand Total columns then yields the NET
+        # (invoices minus credit notes), matching the /expense/summary dashboard.
+        sign = -1 if inv.doc_type == DOC_TYPE_CREDIT_NOTE else 1
         lines.append(",".join((
             _csv_field(inv.invoice_number or ""),
             f'"{inv.invoice_date.isoformat() if inv.invoice_date else ""}"',
             _csv_field(inv.supplier_name or ""),
             _csv_field(inv.supplier_gstin or ""),
+            f'"{inv.doc_type}"',
             _csv_field(project or ""),
             _csv_field(method or ""),
-            f'"{_rupees(inv.total_taxable_paise)}"',
-            f'"{_rupees(inv.grand_total_paise)}"',
+            f'"{_rupees_signed(inv.total_taxable_paise, sign)}"',
+            f'"{_rupees_signed(inv.grand_total_paise, sign)}"',
             f'"{inv.status}"',
         )))
     return ("\n".join(lines) + "\n").encode("utf-8")
@@ -653,6 +692,15 @@ class ExpenseSummary:
     by_payment_method: list[GroupTotal]
 
 
+def _signed_paise(column: Any) -> Any:
+    """A SIGN-AWARE money expression: a CREDIT_NOTE (a reduction) contributes the
+    NEGATED amount, an INVOICE its plain amount. Summing this yields the NET spend.
+
+    When no credit notes exist every row is an INVOICE, so the CASE returns the plain
+    column and every sum is byte-identical to the pre-inc-28 behaviour."""
+    return case((Invoice.doc_type == DOC_TYPE_CREDIT_NOTE, -column), else_=column)
+
+
 def summary(db: Session) -> ExpenseSummary:
     """Cost-allocation rollup over CONFIRMED invoices only.
 
@@ -660,13 +708,17 @@ def summary(db: Session) -> ExpenseSummary:
     (UPLOADED/EXTRACTED/NEEDS_REVIEW/NEEDS_OCR/REJECTED) is excluded — an unconfirmed
     row is not yet a committed expense. Money is summed in BigInt paise. A confirmed
     row missing a project/method (a pre-inc-27 edge that predates the confirm guard)
-    falls into a NULL bucket so the group totals still reconcile to the grand total."""
+    falls into a NULL bucket so the group totals still reconcile to the grand total.
+
+    inc 28: the money sum is SIGN-AWARE — a CREDIT_NOTE SUBTRACTS (net =
+    Σ INVOICE − Σ CREDIT_NOTE). ``count`` is the raw number of confirmed documents
+    (invoices + credit notes) in the bucket, so a credit note reduces the spend but is
+    still a visible document. The by-project + by-payment groups each net independently,
+    so they still reconcile to the net grand total."""
     confirmed = Invoice.status == InvoiceStatus.CONFIRMED.value
+    net_grand = func.coalesce(func.sum(_signed_paise(Invoice.grand_total_paise)), 0)
     total_paise, count = db.execute(
-        select(
-            func.coalesce(func.sum(Invoice.grand_total_paise), 0),
-            func.count(),
-        ).where(confirmed)
+        select(net_grand, func.count()).where(confirmed)
     ).one()
 
     by_project = [
@@ -676,13 +728,13 @@ def summary(db: Session) -> ExpenseSummary:
                 Invoice.project_id,
                 Project.code,
                 Project.name,
-                func.coalesce(func.sum(Invoice.grand_total_paise), 0),
+                net_grand,
                 func.count(),
             )
             .outerjoin(Project, Project.id == Invoice.project_id)
             .where(confirmed)
             .group_by(Invoice.project_id, Project.code, Project.name)
-            .order_by(func.coalesce(func.sum(Invoice.grand_total_paise), 0).desc())
+            .order_by(net_grand.desc())
         )
     ]
     by_payment_method = [
@@ -691,7 +743,7 @@ def summary(db: Session) -> ExpenseSummary:
             select(
                 Invoice.payment_method_id,
                 ExpensePaymentMethod.name,
-                func.coalesce(func.sum(Invoice.grand_total_paise), 0),
+                net_grand,
                 func.count(),
             )
             .outerjoin(
@@ -700,7 +752,7 @@ def summary(db: Session) -> ExpenseSummary:
             )
             .where(confirmed)
             .group_by(Invoice.payment_method_id, ExpensePaymentMethod.name)
-            .order_by(func.coalesce(func.sum(Invoice.grand_total_paise), 0).desc())
+            .order_by(net_grand.desc())
         )
     ]
     return ExpenseSummary(
@@ -924,6 +976,14 @@ def _rupees(paise: int | None) -> str:
     if paise is None:
         return ""
     return f"{Decimal(paise) / 100:.2f}"
+
+
+def _rupees_signed(paise: int | None, sign: int) -> str:
+    """Paise -> a signed 2dp rupee decimal ("" when absent). ``sign`` is -1 for a
+    CREDIT_NOTE (a reduction) so the CSV money column sums to the NET."""
+    if paise is None:
+        return ""
+    return f"{Decimal(sign * paise) / 100:.2f}"
 
 
 def _csv_field(value: str) -> str:

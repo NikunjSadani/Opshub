@@ -62,6 +62,19 @@ def _require_module(user: User) -> None:
     rbac.require_module(user, MODULE_KEY)
 
 
+def _validated_doc_type(raw: str | None) -> str | None:
+    """Normalise + validate an optional doc_type FILTER (a 400 on a bad value beats a
+    silently-empty register). None passes through as 'no filter'."""
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip().upper()
+    if value not in service.DOC_TYPES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"doc_type must be one of {sorted(service.DOC_TYPES)}")
+    return value
+
+
 def _get_invoice(db: Session, invoice_id: int) -> Invoice:
     try:
         return service.get_invoice(db, invoice_id)
@@ -110,6 +123,8 @@ class InvoiceOut(BaseModel):
     id: int
     status: str
     needs_ocr: bool
+    doc_type: str
+    against_invoice_id: int | None
     supplier_name: str | None
     supplier_gstin: str | None
     invoice_number: str | None
@@ -157,6 +172,8 @@ class InvoiceDetailOut(BaseModel):
     batch_id: int
     status: str
     needs_ocr: bool
+    doc_type: str
+    against_invoice_id: int | None
     review_reasons: list[str]
     source_file_id: int | None
     supplier_name: str | None
@@ -254,6 +271,8 @@ def _to_invoice_out(
         id=inv.id,
         status=inv.status,
         needs_ocr=inv.needs_ocr,
+        doc_type=inv.doc_type,
+        against_invoice_id=inv.against_invoice_id,
         supplier_name=inv.supplier_name,
         supplier_gstin=inv.supplier_gstin,
         invoice_number=inv.invoice_number,
@@ -335,12 +354,19 @@ def upload_invoices(
     files: Annotated[list[UploadFile], File()],
     project_id: Annotated[int, Form()],
     payment_method_id: Annotated[int, Form()],
+    doc_type: Annotated[str, Form()] = service.DOC_TYPE_INVOICE,
+    against_invoice_id: Annotated[int | None, Form()] = None,
 ) -> UploadOut:
     """Bulk-upload N PDFs: store each blob, then extract + persist into one batch.
 
     ``project_id`` + ``payment_method_id`` are REQUIRED — the cost allocation stamped
     on every invoice in the batch. Both are validated (exist + Active) BEFORE any blob
     is stored, so a bad allocation is a clean 400 that persists nothing.
+
+    ``doc_type`` (INVOICE | CREDIT_NOTE, default INVOICE) marks the whole batch; a
+    CREDIT_NOTE is a REDUCTION of cost (every money aggregate is sign-aware). The
+    optional ``against_invoice_id`` links the credited invoice — validated to exist +
+    share the batch's project. Both are stamped on every invoice in the batch.
 
     Returns a per-file outcome list. A file whose identity key matches a stored
     invoice comes back as a DUPLICATE outcome carrying the existing invoice's id +
@@ -359,6 +385,25 @@ def upload_invoices(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "payment method not found or not active")
+    # Validate the credit-note stamping BEFORE storing any bytes (money-critical).
+    doc_type = doc_type.strip().upper()
+    if doc_type not in service.DOC_TYPES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"doc_type must be one of {sorted(service.DOC_TYPES)}")
+    if against_invoice_id is not None:
+        against = db.get(Invoice, against_invoice_id)
+        if against is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "against_invoice_id references an invoice that does not exist")
+        # A credit note reduces a specific supplier's invoice: it must sit on the SAME
+        # project (the only supplier-agnostic identity we can bind at upload, before the
+        # new document is extracted). A different project would misallocate the reduction.
+        if against.project_id != project_id:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "against_invoice_id belongs to a different project")
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -394,7 +439,8 @@ def upload_invoices(
 
     result = service.create_batch(
         db, file_ids, project_id=project_id, payment_method_id=payment_method_id,
-        actor_uid=user.firebase_uid)
+        actor_uid=user.firebase_uid,
+        doc_type=doc_type, against_invoice_id=against_invoice_id)
     persisted = [o for o in result.outcomes if o.invoice_id is not None
                  and o.status != "DUPLICATE"]
     dups = [o for o in result.outcomes if o.status == "DUPLICATE"]
@@ -424,6 +470,7 @@ def list_invoices(
     date_to: Annotated[date | None, Query()] = None,
     project_id: Annotated[int | None, Query()] = None,
     payment_method_id: Annotated[int | None, Query()] = None,
+    doc_type: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[InvoiceOut]:
@@ -433,6 +480,7 @@ def list_invoices(
         status=status_filter.value if status_filter is not None else None,
         date_from=date_from, date_to=date_to,
         project_id=project_id, payment_method_id=payment_method_id,
+        doc_type=_validated_doc_type(doc_type),
         limit=limit, offset=offset,
     )
     project_codes, project_names, method_names = service.allocation_maps(db, rows)
@@ -451,6 +499,7 @@ def export_invoices_csv(
     date_to: Annotated[date | None, Query()] = None,
     project_id: Annotated[int | None, Query()] = None,
     payment_method_id: Annotated[int | None, Query()] = None,
+    doc_type: Annotated[str | None, Query()] = None,
 ) -> Response:
     """Export the filtered register (newest-first) as CSV, capped at MAX_CSV_ROWS."""
     _require_module(user)
@@ -459,6 +508,7 @@ def export_invoices_csv(
         status=status_filter.value if status_filter is not None else None,
         date_from=date_from, date_to=date_to,
         project_id=project_id, payment_method_id=payment_method_id,
+        doc_type=_validated_doc_type(doc_type),
         limit=service.MAX_CSV_ROWS,
     )
     project_codes, _project_names, method_names = service.allocation_maps(db, rows)
