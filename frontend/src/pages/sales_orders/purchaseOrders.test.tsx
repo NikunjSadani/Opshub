@@ -370,6 +370,43 @@ describe('PO confirm flow', () => {
     expect(await screen.findByText('Draft')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /confirm po/i })).not.toBeInTheDocument();
   });
+
+  it('a failed confirm (already-confirmed elsewhere) reconciles: badge flips, button clears', async () => {
+    // A concurrent operator already confirmed it; our cache is stale DRAFT. The POST 422s,
+    // and the onError refetch must pull the true CONFIRMED state (not leave a dead button).
+    let confirmAttempted = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        if (/\/purchase-orders\/\d+\/confirm$/.test(url) && method === 'POST') {
+          confirmAttempted = true;
+          return json({ detail: 'only a DRAFT purchase order can be confirmed' }, 422);
+        }
+        if (/\/purchase-orders\/\d+$/.test(url))
+          return json({ ...PO_DETAIL, id: 1, status: confirmAttempted ? 'CONFIRMED' : 'DRAFT' });
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/sales_orders/:id" element={<PODetail />} />
+      </Routes>,
+      ['/m/sales_orders/1'],
+    );
+
+    const confirmBtn = await screen.findByRole('button', { name: /confirm po/i });
+    fireEvent.click(confirmBtn);
+
+    // The onError invalidation refetches -> badge reconciles to Confirmed, stale button clears.
+    expect(await screen.findByText('Confirmed')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /confirm po/i })).not.toBeInTheDocument(),
+    );
+  });
 });
 
 describe('PO void flow', () => {

@@ -360,6 +360,12 @@ export function useConfirmPurchaseOrder(): UseMutationResult<
       qc.setQueryData(poKeys.detail(String(po.id)), po);
       void qc.invalidateQueries({ queryKey: ['purchase-orders', 'list'] });
     },
+    // A 409/422 usually means the PO was already confirmed elsewhere (a concurrent operator);
+    // refetch so the badge reconciles to CONFIRMED and the now-invalid Confirm button clears,
+    // instead of leaving a stale DRAFT view that keeps failing on re-click.
+    onError: (_err, { id }) => {
+      void qc.invalidateQueries({ queryKey: poKeys.detail(id) });
+    },
   });
 }
 
