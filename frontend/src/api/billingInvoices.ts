@@ -243,6 +243,18 @@ export const billingInvoiceKeys = {
   detail: (id: string | number) => ['billing', 'invoice', String(id)] as const,
 };
 
+/**
+ * A CONFIRMED client invoice creates the receivable (AR) and increments the PO line
+ * invoiced-qty; a cancel/delete reverses it. The invoice's own register/detail are handled
+ * by each mutation, but the AR tracker and the PO detail/list are cross-module reads that
+ * would otherwise show stale numbers on an already-mounted view (refetchOnWindowFocus is off
+ * app-wide). Broad-but-cheap prefix invalidations; read-refresh only.
+ */
+function invalidateBillingCrossModule(qc: ReturnType<typeof useQueryClient>): void {
+  void qc.invalidateQueries({ queryKey: ['billing', 'ar'] });    // AR register + details
+  void qc.invalidateQueries({ queryKey: ['purchase-orders'] });  // PO detail invoiced-qty + list
+}
+
 // --- queries ------------------------------------------------------------------
 
 /**
@@ -356,6 +368,8 @@ export function useSubmitReview(): UseMutationResult<
     onSuccess: (invoice) => {
       qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
       void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+      // Only a CONFIRM writes AR + PO invoiced-qty — a corrections-only save does not.
+      if (invoice.status === 'CONFIRMED') invalidateBillingCrossModule(qc);
     },
   });
 }
@@ -416,6 +430,7 @@ export function useCancelInvoice(): UseMutationResult<BillingInvoiceDetail, ApiE
     onSuccess: (invoice) => {
       qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
       void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+      invalidateBillingCrossModule(qc);  // reverses any AR/PO effect if this invoice had one
     },
   });
 }
@@ -436,6 +451,7 @@ export function useDeleteInvoice(): UseMutationResult<
     mutationFn: (invoiceId) => del<{ id: number; deleted: boolean }>(`/billing/invoices/${invoiceId}`),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+      invalidateBillingCrossModule(qc);  // reverses any AR/PO effect if this invoice had one
     },
   });
 }

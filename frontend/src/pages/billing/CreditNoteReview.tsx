@@ -367,8 +367,9 @@ export function CreditNoteReview() {
         )}
         {!refInvoiceConfirmed && ref != null && (
           <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            The credited invoice is not Confirmed yet — a credit note can only be confirmed against a
-            confirmed invoice.
+            {ref.status === 'CANCELLED' || ref.status === 'REJECTED'
+              ? `The credited invoice is ${ref.status === 'CANCELLED' ? 'Cancelled' : 'Rejected'} — this credit note can no longer be confirmed against it.`
+              : 'The credited invoice is not Confirmed yet — a credit note can only be confirmed against a confirmed invoice.'}
           </p>
         )}
       </Card>

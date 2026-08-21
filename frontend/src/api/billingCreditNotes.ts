@@ -220,6 +220,20 @@ export const creditNoteKeys = {
   detail: (id: string | number) => ['billing', 'credit-note', String(id)] as const,
 };
 
+/**
+ * A CONFIRMED client credit note reduces cross-module reads the CN register alone doesn't
+ * cover: the referenced invoice's AR (credited / outstanding), the invoice register + detail,
+ * the PO line invoiced-qty, and project P&L. Refresh those too so an already-mounted AR /
+ * invoice / PO view doesn't show pre-credit numbers (refetchOnWindowFocus is off app-wide).
+ * Broad-but-cheap prefix invalidations; read-refresh only, no mutation.
+ */
+function invalidateBillingCrossModule(qc: ReturnType<typeof useQueryClient>): void {
+  void qc.invalidateQueries({ queryKey: ['billing', 'ar'] });        // AR register + details
+  void qc.invalidateQueries({ queryKey: ['billing', 'invoices'] });  // invoice register (list)
+  void qc.invalidateQueries({ queryKey: ['billing', 'invoice'] });   // open invoice detail
+  void qc.invalidateQueries({ queryKey: ['purchase-orders'] });      // PO detail invoiced-qty + list
+}
+
 // --- queries ------------------------------------------------------------------
 
 /** The credit-note register, filtered by status / client / referenced invoice (VIEW). */
@@ -309,6 +323,9 @@ export function useSubmitCnReview(): UseMutationResult<
     onSuccess: (cn) => {
       qc.setQueryData(creditNoteKeys.detail(cn.id), cn);
       void qc.invalidateQueries({ queryKey: creditNoteKeys.all });
+      // Only a CONFIRM writes back to AR / invoice / PO — a corrections-only save does not,
+      // so don't churn those reads mid-review.
+      if (cn.status === 'CONFIRMED') invalidateBillingCrossModule(qc);
     },
   });
 }
@@ -366,6 +383,7 @@ export function useCancelCn(): UseMutationResult<CreditNoteDetail, ApiError, str
     onSuccess: (cn) => {
       qc.setQueryData(creditNoteKeys.detail(cn.id), cn);
       void qc.invalidateQueries({ queryKey: creditNoteKeys.all });
+      invalidateBillingCrossModule(qc);  // reverses any AR/PO effect if this CN had one
     },
   });
 }
@@ -385,6 +403,7 @@ export function useDeleteCn(): UseMutationResult<
     mutationFn: (id) => del<{ id: number; deleted: boolean }>(`/billing/credit-notes/${id}`),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: creditNoteKeys.all });
+      invalidateBillingCrossModule(qc);  // reverses any AR/PO effect if this CN had one
     },
   });
 }

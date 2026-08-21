@@ -113,11 +113,15 @@ export function CreditNoteUpload() {
             required
             value={invoiceId}
             onChange={(e) => setInvoiceId(e.target.value)}
-            disabled={invoicesQuery.isPending || noInvoices}
+            disabled={invoicesQuery.isPending || invoicesQuery.isError || noInvoices}
             hint="Which CONFIRMED sales invoice this batch of credit notes is issued against."
           >
             <option value="">
-              {invoicesQuery.isPending ? 'Loading invoices…' : 'Select a confirmed invoice…'}
+              {invoicesQuery.isPending
+                ? 'Loading invoices…'
+                : invoicesQuery.isError
+                  ? 'Could not load invoices'
+                  : 'Select a confirmed invoice…'}
             </option>
             {invoices.map((inv) => {
               const client = clientById.get(String(inv.client_id));
@@ -132,6 +136,19 @@ export function CreditNoteUpload() {
             })}
           </SelectField>
         </div>
+
+        {invoicesQuery.isError && (
+          <p className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+            Couldn&apos;t load invoices.{' '}
+            <button
+              type="button"
+              onClick={() => void invoicesQuery.refetch()}
+              className="font-medium underline hover:text-red-900"
+            >
+              Retry
+            </button>
+          </p>
+        )}
 
         {noInvoices && (
           <p className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
@@ -213,8 +230,9 @@ export function CreditNoteUpload() {
 
                   {r.status === 'DUPLICATE' && (
                     <p className="text-xs text-amber-700">
-                      Matches existing credit note {r.cn_number ?? (r.cn_id ? `#${r.cn_id}` : '')}. It
-                      was not stored again.
+                      Matches an existing credit note
+                      {r.cn_number ? ` ${r.cn_number}` : r.cn_id ? ` #${r.cn_id}` : ''}. It was not
+                      stored again.
                     </p>
                   )}
 
