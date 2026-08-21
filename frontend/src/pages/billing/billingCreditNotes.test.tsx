@@ -474,14 +474,47 @@ describe('CreditNoteReview — detail + match', () => {
 
     // The honest over-credit warning renders on the line…
     expect(
-      await screen.findByText(/Credits 6 but the invoice billed only 4 on this line/i),
+      await screen.findByText(/this note credits 2 on this PO line — 6 credited in total vs 4 billed/i),
     ).toBeInTheDocument();
-    // …and the invoice-billed context line is shown too.
-    expect(screen.getByText(/Invoice billed 4 · already credited 4/i)).toBeInTheDocument();
+    // …and the invoice-billed context line names the other notes.
+    expect(
+      screen.getByText(/Invoice billed 4 · 4 already credited by other notes/i),
+    ).toBeInTheDocument();
 
     // …but Confirm stays ENABLED — the backend soft-flags, never blocks.
     const confirm = await screen.findByRole('button', { name: /confirm credit note/i });
     expect(confirm).toBeEnabled();
+  });
+
+  it('warns on fan-in: two lines to the SAME PO line whose combined qty over-credits', async () => {
+    // Each line credits 6 (≤ 10 billed alone → no per-line flag), but both map to PO line 501,
+    // so the PO-line total 12 > 10 IS an over-credit. The warning must fire (the money audit's
+    // finding: a per-line check would silently pass this).
+    const fanIn = detail({
+      status: 'MATCHED',
+      lines: [
+        {
+          id: 81, line_no: 1, description: 'Cartons A', quantity: '6',
+          taxable_paise: 600000, line_total_paise: 600000, po_line_item_id: 501,
+          po_line_label: 'Cartons · qty 100', match_status: 'MANUAL',
+          billed_qty: '10', already_credited_qty: '0',
+        },
+        {
+          id: 82, line_no: 2, description: 'Cartons B', quantity: '6',
+          taxable_paise: 600000, line_total_paise: 600000, po_line_item_id: 501,
+          po_line_label: 'Cartons · qty 100', match_status: 'MANUAL',
+          billed_qty: '10', already_credited_qty: '0',
+        },
+      ],
+    });
+    stub({ level: 'OPERATE', onDetail: () => json(fanIn) });
+    renderReview();
+
+    // Both rows warn with the PO-line total (12 credited vs 10 billed) — not a passing 6-vs-10.
+    const warnings = await screen.findAllByText(
+      /this note credits 12 on this PO line — 12 credited in total vs 10 billed/i,
+    );
+    expect(warnings.length).toBe(2);
   });
 
   it('renders an editable input for a MISSING field and Saves it as corrections keyed by `field`', async () => {

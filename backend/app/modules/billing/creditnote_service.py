@@ -698,7 +698,10 @@ def _mark_field_corrected(
         cn.fields.append(field)
     field.value_norm = _env_norm(kind, typed)
     field.value_raw = raw
-    field.status = FieldStatus.CORRECTED.value
+    # A blanked value (e.g. cn_number set to "") is not resolved — keep it MISSING so it stays
+    # editable + flagged (a CORRECTED-but-empty field would render read-only yet block confirm).
+    empty = field.value_norm is None or field.value_norm == ""
+    field.status = FieldStatus.MISSING.value if empty else FieldStatus.CORRECTED.value
     field.source_engine = "human"
 
 

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Badge,
@@ -221,6 +221,19 @@ function LinesMatchTable({
   const openLines = poLines.filter((l) => l.line_status === 'OPEN');
   const noPo = cn.referenced_invoice?.po_id == null;
 
+  // Sum THIS credit note's own line quantities per matched PO line — the over-credit check must
+  // be per-PO-line (the backend guard sums the same way), or two lines that fan into one billed
+  // PO line each pass ("6 ≤ 10") while their real total (12) silently over-credits.
+  const thisCnQtyByPoLine = new Map<number, number>();
+  for (const l of cn.lines) {
+    if (l.po_line_item_id != null) {
+      thisCnQtyByPoLine.set(
+        l.po_line_item_id,
+        (thisCnQtyByPoLine.get(l.po_line_item_id) ?? 0) + qtyNum(l.quantity),
+      );
+    }
+  }
+
   return (
     <Table>
       <THead>
@@ -242,9 +255,13 @@ function LinesMatchTable({
           const options = matched && matched.line_status !== 'OPEN' ? [matched, ...openLines] : openLines;
           const busy = mappingLineId === l.id;
           // Over-credit tally (matched lines only — billed/already-credited are null when
-          // UNMATCHED). credited-so-far = other confirmed CNs + THIS line's credit qty.
+          // UNMATCHED). Compare the PO line's ceiling against everything credited on it: OTHER
+          // confirmed CNs (already_credited_qty) + ALL of THIS CN's lines on that PO line.
           const hasBilled = l.billed_qty != null;
-          const creditedSoFar = qtyNum(l.already_credited_qty) + qtyNum(l.quantity);
+          const thisCnOnPoLine = l.po_line_item_id != null
+            ? (thisCnQtyByPoLine.get(l.po_line_item_id) ?? qtyNum(l.quantity))
+            : qtyNum(l.quantity);
+          const creditedSoFar = qtyNum(l.already_credited_qty) + thisCnOnPoLine;
           const overCredited = hasBilled && creditedSoFar > qtyNum(l.billed_qty);
           return (
             <Tr key={l.id}>
@@ -266,14 +283,17 @@ function LinesMatchTable({
                   )}
                   {hasBilled && (
                     <span className="text-xs text-slate-500">
-                      Invoice billed {fmtQty(qtyNum(l.billed_qty))} · already credited{' '}
-                      {fmtQty(qtyNum(l.already_credited_qty))}
+                      Invoice billed {fmtQty(qtyNum(l.billed_qty))}
+                      {qtyNum(l.already_credited_qty) > 0
+                        ? ` · ${fmtQty(qtyNum(l.already_credited_qty))} already credited by other notes`
+                        : ''}
                     </span>
                   )}
                   {overCredited && (
-                    <span role="status" className="text-xs font-medium text-amber-700">
-                      Credits {fmtQty(creditedSoFar)} but the invoice billed only{' '}
-                      {fmtQty(qtyNum(l.billed_qty))} on this line.
+                    <span className="text-xs font-medium text-amber-700">
+                      Over-credit: this note credits {fmtQty(thisCnOnPoLine)} on this PO line —{' '}
+                      {fmtQty(creditedSoFar)} credited in total vs {fmtQty(qtyNum(l.billed_qty))}{' '}
+                      billed. Confirm only if intended.
                     </span>
                   )}
                   {noPo ? (
@@ -338,6 +358,9 @@ export function CreditNoteReview() {
   const del = useDeleteCn();
 
   const [edits, setEdits] = useState<Record<string, string>>({});
+  // After Save/Confirm the button that had focus unmounts; move focus to the status region so a
+  // keyboard/screen-reader user isn't dropped to <body>.
+  const statusRef = useRef<HTMLSpanElement>(null);
   const [mappingLineId, setMappingLineId] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -412,16 +435,45 @@ export function CreditNoteReview() {
     });
   }
 
-  // Soft over-credit visibility: the CN's credit total exceeds the credited invoice's
-  // grand total. NEVER blocks Confirm — the backend intentionally soft-flags.
+  // The EFFECTIVE paise for a header money field: a valid pending ₹ edit wins over the stored
+  // server value, so the totals summary + the over-credit banner reflect an in-flight correction
+  // (a mis-read total the operator is fixing) instead of the stale extracted value.
+  function effectivePaise(fieldPath: string, serverPaise: number | null): number | null {
+    const raw = edits[fieldPath];
+    if (raw != null && raw.trim() !== '') {
+      const p = parseRupeesToPaise(raw);
+      if (p != null) return p;
+    }
+    return serverPaise;
+  }
+  const effTaxable = effectivePaise('total_taxable_paise', cn.total_taxable_paise);
+  const effCgst = effectivePaise('total_cgst_paise', cn.total_cgst_paise);
+  const effSgst = effectivePaise('total_sgst_paise', cn.total_sgst_paise);
+  const effIgst = effectivePaise('total_igst_paise', cn.total_igst_paise);
+  const effRoundOff = effectivePaise('round_off_paise', cn.round_off_paise);
+  const effGrandTotal = effectivePaise('grand_total_paise', cn.grand_total_paise);
+
+  // Soft over-credit visibility: the CN's credit total exceeds the credited invoice's grand
+  // total. Uses the EFFECTIVE (edit-aware) total so a corrected value re-evaluates the warning.
+  // NEVER blocks Confirm — the backend intentionally soft-flags.
   const ref = cn.referenced_invoice;
   const creditExceedsInvoice =
     ref?.grand_total_paise != null &&
-    cn.grand_total_paise != null &&
-    cn.grand_total_paise > ref.grand_total_paise;
+    effGrandTotal != null &&
+    effGrandTotal > ref.grand_total_paise;
 
-  // Confirm gating is unchanged (operate + editable + all-matched + ref-invoice CONFIRMED);
-  // a visibly-broken money edit is the only added guard (mirrors the invoice lane). The
+  // A required header field (mirrors the backend _required_missing) is unresolved when it is
+  // MISSING and has no pending non-blank edit — confirm would 409, so gate proactively.
+  const REQUIRED_FIELD_PATHS = ['cn_number', 'cn_date', 'total_taxable_paise', 'grand_total_paise'];
+  const requiredResolved = REQUIRED_FIELD_PATHS.every((path) => {
+    const f = cn.fields.find((x) => x.field_path === path);
+    if (f == null || f.status !== 'MISSING') return true; // present / OK / corrected
+    const pending = edits[path];
+    return pending != null && pending.trim() !== '';
+  });
+
+  // Confirm gating: operate + editable + all-matched + ref-invoice CONFIRMED, plus a
+  // visibly-broken money edit and any unresolved required field (mirrors the invoice lane). The
   // over-credit tally is a SOFT warning and deliberately does NOT gate.
   const canConfirm =
     canOperate &&
@@ -429,7 +481,8 @@ export function CreditNoteReview() {
     hasLines &&
     allLinesMatched &&
     refInvoiceConfirmed &&
-    !hasMoneyError;
+    !hasMoneyError &&
+    requiredResolved;
 
   function onConfirm() {
     if (!canConfirm) return;
@@ -438,6 +491,7 @@ export function CreditNoteReview() {
       {
         onSuccess: (updated) => {
           setEdits({});
+          statusRef.current?.focus();
           if (updated.status === 'CONFIRMED') {
             toast.success('Credit note confirmed.');
           } else {
@@ -460,6 +514,7 @@ export function CreditNoteReview() {
       {
         onSuccess: () => {
           setEdits({});
+          statusRef.current?.focus();
           toast.success('Corrections saved.');
         },
         onError: (err) => toast.error(errorMessage(err)),
@@ -520,15 +575,17 @@ export function CreditNoteReview() {
 
   const confirmReason = hasMoneyError
     ? 'Fix the highlighted amount to confirm.'
-    : !hasLines
-      ? 'At least one line item is required to confirm.'
-      : !allLinesMatched
-        ? 'Match every line to a PO line to confirm.'
-        : !refInvoiceConfirmed
-          ? 'The credited invoice must be Confirmed before this credit note can be confirmed.'
-          : !canOperate
-            ? 'You need Operate access to confirm this credit note.'
-            : '';
+    : !requiredResolved
+      ? 'Fill in the required fields flagged for review to confirm.'
+      : !hasLines
+        ? 'At least one line item is required to confirm.'
+        : !allLinesMatched
+          ? 'Match every line to a PO line to confirm.'
+          : !refInvoiceConfirmed
+            ? 'The credited invoice must be Confirmed before this credit note can be confirmed.'
+            : !canOperate
+              ? 'You need Operate access to confirm this credit note.'
+              : '';
 
   return (
     <div>
@@ -537,14 +594,19 @@ export function CreditNoteReview() {
       <PageHeader
         title={cn.cn_number ? `Credit note ${cn.cn_number}` : `Credit note #${cn.id}`}
         subtitle="A credit note reduces the amount receivable against the invoice it references."
-        actions={<Badge tone={CN_STATUS_TONE[cn.status]}>{CN_STATUS_LABEL[cn.status]}</Badge>}
+        actions={
+          <span
+            ref={statusRef}
+            tabIndex={-1}
+            className="inline-flex rounded outline-none ring-offset-2 focus-visible:ring-2 focus-visible:ring-brand-500"
+          >
+            <Badge tone={CN_STATUS_TONE[cn.status]}>{CN_STATUS_LABEL[cn.status]}</Badge>
+          </span>
+        }
       />
 
       {cn.review_reasons.length > 0 && (
-        <div
-          role="status"
-          className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
-        >
+        <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
           <p className="mb-1 font-semibold">Why this needs a look</p>
           <ul className="list-disc pl-5">
             {cn.review_reasons.map((reason, i) => (
@@ -555,10 +617,8 @@ export function CreditNoteReview() {
       )}
 
       {cn.needs_ocr && (
-        <div
-          role="status"
-          className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600"
-        >
+        <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+
           This PDF has no text layer (scanned/image). OCR is not available yet, so its fields could
           not be extracted automatically.
         </div>
@@ -615,21 +675,24 @@ export function CreditNoteReview() {
         <p className="mb-2 text-xs text-slate-500">
           These amounts reduce the receivable against the credited invoice.
         </p>
-        <TotalRow label="Total taxable" value={cn.total_taxable_paise} />
-        <TotalRow label="Total CGST" value={cn.total_cgst_paise} />
-        <TotalRow label="Total SGST" value={cn.total_sgst_paise} />
-        <TotalRow label="Total IGST" value={cn.total_igst_paise} />
-        <TotalRow label="Round off" value={cn.round_off_paise} signed />
+        <TotalRow label="Total taxable" value={effTaxable} />
+        <TotalRow label="Total CGST" value={effCgst} />
+        <TotalRow label="Total SGST" value={effSgst} />
+        <TotalRow label="Total IGST" value={effIgst} />
+        <TotalRow label="Round off" value={effRoundOff} signed />
         <div className="flex items-center justify-between border-t-2 border-slate-200 py-2 text-sm font-semibold">
           <span className="text-slate-900">Credit total</span>
-          <span className="tabular-nums text-slate-900">{money(cn.grand_total_paise)}</span>
+          <span className="tabular-nums text-slate-900">{money(effGrandTotal)}</span>
         </div>
+        {hasEdits && (
+          <p className="mt-1 text-right text-xs text-slate-400">Reflects unsaved corrections.</p>
+        )}
         {creditExceedsInvoice && ref != null && (
           <p
             role="status"
             className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800"
           >
-            This credit note's total ({money(cn.grand_total_paise)}) exceeds the credited invoice's
+            This credit note's total ({money(effGrandTotal)}) exceeds the credited invoice's
             total ({money(ref.grand_total_paise)}). Confirm only if this is intended.
           </p>
         )}

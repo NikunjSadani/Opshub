@@ -507,6 +507,18 @@ def test_review_correction_flips_envelope_to_corrected(client: TestClient) -> No
     assert gt["source_engine"] == "human"
 
 
+def test_blank_required_correction_stays_missing_not_corrected(client: TestClient) -> None:
+    # Blanking a required field (cn_number → "") must leave its envelope MISSING (re-editable),
+    # not CORRECTED — a CORRECTED-but-empty field would render read-only yet block confirm.
+    cn_id = _upload(client, _spec(cn_number="CCN-BLANK")).json()["outcomes"][0]["cn_id"]
+    client.patch(f"/api/v1/billing/credit-notes/{cn_id}/review",
+                 json={"corrections": [{"field": "cn_number", "value": ""}]})
+    detail = client.get(f"/api/v1/billing/credit-notes/{cn_id}").json()
+    num = next(f for f in detail["fields"] if f["field_path"] == "cn_number")
+    assert num["status"] == "MISSING"
+    assert detail["status"] == "NEEDS_REVIEW"  # required field missing → blocked from confirm
+
+
 def test_line_billed_and_already_credited_qty(client: TestClient) -> None:
     # A matched line surfaces the referenced invoice's billed qty (the over-credit ceiling); an
     # unmatched line has no PO line to compare against.
