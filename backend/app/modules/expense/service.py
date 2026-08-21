@@ -314,6 +314,18 @@ def _process_file(
             doc_type=doc_type, against_invoice_id=against_invoice_id)
 
     scalars = _scalars_from(extracted)
+    # Vendor credit note: the supplier GSTIN can only be checked AFTER extraction (the
+    # upload endpoint validates same-project, but the vendor is unknown pre-extraction).
+    # A CREDIT_NOTE whose supplier GSTIN differs from the invoice it credits is a SOFT
+    # review flag (never a hard reject — the doc is already captured).
+    if doc_type == DOC_TYPE_CREDIT_NOTE and against_invoice_id is not None:
+        against = db.get(Invoice, against_invoice_id)
+        this_supplier = (scalars.get("supplier_gstin") or "").strip().upper()
+        ref_supplier = (against.supplier_gstin or "").strip().upper() if against else ""
+        if against is not None and this_supplier and ref_supplier and this_supplier != ref_supplier:
+            extracted.review_reasons.append(
+                "credit-note supplier GSTIN differs from the referenced invoice")
+            extracted.review_needed = True
     key = (dedup.dedup_key(
         scalars["supplier_gstin"], scalars["invoice_number"],
         scalars["invoice_date"], scalars["grand_total_paise"],

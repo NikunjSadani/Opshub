@@ -181,3 +181,25 @@ def test_register_shows_and_filters_doc_type(client: TestClient) -> None:
     cn_line = next(ln for ln in csv.splitlines() if "R-CN" in ln)
     assert "CREDIT_NOTE" in cn_line
     assert "-300.00" in cn_line
+
+
+def test_credit_note_supplier_mismatch_flags_review(client: TestClient) -> None:
+    # A CREDIT_NOTE whose supplier GSTIN differs from the invoice it credits is a SOFT
+    # review flag (not a reject) — the same-supplier check runs POST-extraction, since the
+    # vendor is unknown at upload time.
+    inv = _upload_doc(client, _spec(invoice_number="INV-SUP")).json()["outcomes"][0]["invoice_id"]
+    mismatch = _upload_doc(
+        client, _spec(invoice_number="CN-SUP", supplier_gstin="29ZZZZZ0000Z1Z5"),
+        doc_type="CREDIT_NOTE", against_invoice_id=inv,
+    )
+    assert mismatch.status_code == 201, mismatch.text
+    out = mismatch.json()["outcomes"][0]
+    assert out["status"] == "NEEDS_REVIEW"
+    assert any("supplier GSTIN differs" in r for r in out["review_reasons"])
+    # A matching-supplier credit note is NOT flagged for this reason.
+    match = _upload_doc(
+        client, _spec(invoice_number="CN-MATCH"),  # default (same) supplier GSTIN
+        doc_type="CREDIT_NOTE", against_invoice_id=inv,
+    )
+    out2 = match.json()["outcomes"][0]
+    assert not any("supplier GSTIN differs" in r for r in out2["review_reasons"])

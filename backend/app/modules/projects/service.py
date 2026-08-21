@@ -373,21 +373,20 @@ def _unset_sibling_defaults(
     model: type[ClientGstin] | type[ClientAddress] | type[ClientContact],
     *,
     client_id: int,
-    keep_id: int,
+    keep_id: int | None = None,
 ) -> None:
-    """Enforce "at most one default per client per child type": clear `is_default`
-    on every OTHER row of the same type under `client_id`. Runs in the caller's
-    transaction so the flip + the new default commit atomically."""
-    db.execute(
-        update(model)
-        .where(
-            model.client_id == client_id,
-            model.id != keep_id,
-            model.is_default.is_(True),
-        )
-        .values(is_default=False)
-        .execution_options(synchronize_session=False)
-    )
+    """Clear `is_default` on the client's existing default row of this type, so a NEW
+    default can be written without tripping the partial unique index `WHERE is_default`.
+
+    Call this BEFORE flushing the new/updated default (demote-first): the index only ever
+    permits one default per client, so insert-then-demote would collide. `keep_id` excludes
+    the row being promoted (an update); omit it on an add (nothing to keep yet). Flushed here
+    so the demote is materialised before the caller writes the new default."""
+    stmt = update(model).where(model.client_id == client_id, model.is_default.is_(True))
+    if keep_id is not None:
+        stmt = stmt.where(model.id != keep_id)
+    db.execute(stmt.values(is_default=False).execution_options(synchronize_session=False))
+    db.flush()
 
 
 # ------------------------------------------------------------------ gstins
@@ -410,6 +409,8 @@ def add_gstin(
     """
     normalized = _normalize_gstin(gstin)
     derived_state = _opt(state_code) or normalized[:2]
+    if is_default:  # demote-first so the partial unique index never sees two defaults
+        _unset_sibling_defaults(db, ClientGstin, client_id=client.id)
     row = ClientGstin(
         client_id=client.id,
         gstin=normalized,
@@ -426,8 +427,6 @@ def add_gstin(
         raise DuplicateClientGstin(
             f"gstin {normalized} already exists for this client"
         ) from exc
-    if is_default:
-        _unset_sibling_defaults(db, ClientGstin, client_id=client.id, keep_id=row.id)
     audit.log(
         db,
         action="client.gstin_added",
@@ -457,6 +456,10 @@ def update_gstin(
 ) -> ClientGstin:
     """Patch a GSTIN row. A changed gstin value is re-normalized + re-checked for
     uniqueness; setting `is_default=True` demotes the client's other GSTINs. Audited."""
+    # Demote-first if promoting to default, BEFORE mutating fields — so the helper's flush
+    # doesn't early-flush a pending gstin change outside the dup-check savepoint.
+    if not isinstance(is_default, _Unset) and is_default:
+        _unset_sibling_defaults(db, ClientGstin, client_id=row.client_id, keep_id=row.id)
     if not isinstance(gstin, _Unset):
         row.gstin = _normalize_gstin(gstin)
     if not isinstance(legal_name, _Unset):
@@ -473,8 +476,6 @@ def update_gstin(
         raise DuplicateClientGstin(
             f"gstin {row.gstin} already exists for this client"
         ) from exc
-    if row.is_default:
-        _unset_sibling_defaults(db, ClientGstin, client_id=row.client_id, keep_id=row.id)
     audit.log(
         db,
         action="client.gstin_updated",
@@ -530,6 +531,8 @@ def add_address(
         linked = get_gstin(db, gstin_id)
         if linked is None or linked.client_id != client.id or not linked.active:
             raise ClientChildNotFound(f"gstin {gstin_id} not found (or inactive) for this client")
+    if is_default:  # demote-first so the partial unique index never sees two defaults
+        _unset_sibling_defaults(db, ClientAddress, client_id=client.id)
     row = ClientAddress(
         client_id=client.id,
         gstin_id=gstin_id,
@@ -544,8 +547,6 @@ def add_address(
     )
     db.add(row)
     db.flush()
-    if is_default:
-        _unset_sibling_defaults(db, ClientAddress, client_id=client.id, keep_id=row.id)
     audit.log(
         db,
         action="client.address_added",
@@ -602,10 +603,10 @@ def update_address(
     if not isinstance(pincode, _Unset):
         row.pincode = _opt(pincode)
     if not isinstance(is_default, _Unset):
+        if is_default:  # demote-first
+            _unset_sibling_defaults(db, ClientAddress, client_id=row.client_id, keep_id=row.id)
         row.is_default = is_default
     db.flush()
-    if row.is_default:
-        _unset_sibling_defaults(db, ClientAddress, client_id=row.client_id, keep_id=row.id)
     audit.log(
         db,
         action="client.address_updated",
@@ -653,6 +654,8 @@ def add_contact(
     cleaned_name = _opt(name)
     if not cleaned_name:
         raise ProjectError("name is required")
+    if is_default:  # demote-first so the partial unique index never sees two defaults
+        _unset_sibling_defaults(db, ClientContact, client_id=client.id)
     row = ClientContact(
         client_id=client.id,
         name=cleaned_name,
@@ -664,8 +667,6 @@ def add_contact(
     )
     db.add(row)
     db.flush()
-    if is_default:
-        _unset_sibling_defaults(db, ClientContact, client_id=client.id, keep_id=row.id)
     audit.log(
         db,
         action="client.contact_added",
@@ -708,10 +709,10 @@ def update_contact(
     if not isinstance(designation, _Unset):
         row.designation = _opt(designation)
     if not isinstance(is_default, _Unset):
+        if is_default:  # demote-first
+            _unset_sibling_defaults(db, ClientContact, client_id=row.client_id, keep_id=row.id)
         row.is_default = is_default
     db.flush()
-    if row.is_default:
-        _unset_sibling_defaults(db, ClientContact, client_id=row.client_id, keep_id=row.id)
     audit.log(
         db,
         action="client.contact_updated",

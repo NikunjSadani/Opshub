@@ -22,9 +22,11 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -88,6 +90,13 @@ class ClientGstin(Base):
     __table_args__ = (
         # A GSTIN appears at most once per client (normalized upper-case in the service).
         UniqueConstraint("client_id", "gstin", name="uq_client_gstin"),
+        # At most ONE default GSTIN per client, DB-enforced (a partial unique index) so a
+        # concurrent "set default" can never leave two. The service demotes the old default
+        # BEFORE writing the new one so the index never momentarily sees two.
+        Index(
+            "uq_client_gstin_one_default", "client_id", unique=True,
+            sqlite_where=text("is_default = 1"), postgresql_where=text("is_default"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -109,6 +118,12 @@ class ClientAddress(Base):
     """A billing/shipping address for a client, optionally tied to one GST registration."""
 
     __tablename__ = "client_address"
+    __table_args__ = (
+        Index(
+            "uq_client_address_one_default", "client_id", unique=True,
+            sqlite_where=text("is_default = 1"), postgresql_where=text("is_default"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     client_id: Mapped[int] = mapped_column(
@@ -137,6 +152,12 @@ class ClientContact(Base):
     """A point-of-contact person at a client."""
 
     __tablename__ = "client_contact"
+    __table_args__ = (
+        Index(
+            "uq_client_contact_one_default", "client_id", unique=True,
+            sqlite_where=text("is_default = 1"), postgresql_where=text("is_default"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     client_id: Mapped[int] = mapped_column(
