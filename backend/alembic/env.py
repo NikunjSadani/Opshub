@@ -18,6 +18,7 @@ import app.modules.expense.models  # noqa: E402,F401
 import app.modules.files.models  # noqa: E402,F401
 import app.modules.masterdata.models  # noqa: E402,F401
 import app.modules.billing.models  # noqa: E402,F401
+import app.modules.logistics.models  # noqa: E402,F401
 import app.modules.numbering.models  # noqa: E402,F401
 import app.modules.projects.models  # noqa: E402,F401
 import app.modules.sales_orders.models  # noqa: E402,F401

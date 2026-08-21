@@ -18,6 +18,7 @@ from app.modules.files.routes import router as files_router
 from app.modules.finance.routes import router as finance_router
 from app.modules.health.routes import SPEC as HEALTH
 from app.modules.jobs.routes import router as jobs_router
+from app.modules.logistics.routes import router as logistics_router
 from app.modules.masterdata.routes import router as masterdata_router
 from app.modules.me.routes import router as me_router
 from app.modules.numbering.routes import router as numbering_router
@@ -79,6 +80,13 @@ register_module(ModuleSpec(
     router=APIRouter(),
     nav_group="Operations",
 ))
+# Logistics (delivery tracking, POD) — nav entry only; API mounts separately below.
+register_module(ModuleSpec(
+    key="logistics",
+    title="Logistics",
+    router=APIRouter(),
+    nav_group="Operations",
+))
 
 
 def create_app() -> FastAPI:
@@ -99,6 +107,7 @@ def create_app() -> FastAPI:
     app.include_router(sales_orders_router, prefix="/api/v1", tags=["sales_orders"])
     app.include_router(billing_router, prefix="/api/v1", tags=["billing"])
     app.include_router(finance_router, prefix="/api/v1", tags=["finance"])
+    app.include_router(logistics_router, prefix="/api/v1", tags=["logistics"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
     # User Management + Roles — platform primitives (admin-managed accounts and the
     # roles that grant access); NOT nav ModuleSpecs, mounted like files/settings above.

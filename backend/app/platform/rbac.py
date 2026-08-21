@@ -32,6 +32,7 @@ EXPENSE = "expense_invoice"
 SALES_ORDERS = "sales_orders"
 BILLING = "billing"
 FINANCE = "finance"
+LOGISTICS = "logistics"
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,9 @@ ACTION_CATALOG: dict[str, _ModuleReq | _PlatformReq] = {
     "invoice.delete": _ModuleReq(BILLING, Level.MANAGE),
     # --- Finance (P&L, read-only) ---
     "pnl.view": _ModuleReq(FINANCE, Level.VIEW),
+    # --- Logistics (delivery tracking) ---
+    "shipment.upload": _ModuleReq(LOGISTICS, Level.OPERATE),
+    "shipment.manage": _ModuleReq(LOGISTICS, Level.MANAGE),
     # --- Platform (cross-cutting) ---
     "user.manage": _PlatformReq(PlatformPerm.IAM),
     "role.manage": _PlatformReq(PlatformPerm.IAM),

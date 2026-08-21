@@ -95,7 +95,7 @@ def test_assignable_modules(client: TestClient) -> None:
     assert r.status_code == 200
     keys = {m["key"] for m in r.json()}
     assert keys == {"document_automation", "projects", "expense_invoice", "sales_orders",
-                    "billing", "finance"}
+                    "billing", "finance", "logistics"}
 
 
 def test_create_edit_role(client: TestClient) -> None:
@@ -205,5 +205,6 @@ def test_me_reflects_effective_permissions(client: TestClient) -> None:
     assert me["is_administrator"] is False
     assert me["module_levels"] == {"document_automation": "VIEW", "projects": "VIEW",
                                    "expense_invoice": "VIEW", "sales_orders": "VIEW",
-                                   "billing": "VIEW", "finance": "VIEW"}
+                                   "billing": "VIEW", "finance": "VIEW",
+                                   "logistics": "VIEW"}
     assert me["platform"] == []
