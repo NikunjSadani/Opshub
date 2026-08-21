@@ -37,6 +37,8 @@ from app.modules.billing.models import (
     BillingBatch,
     BillingBatchStatus,
     CreditNote,
+    CreditNoteLine,
+    CreditNoteStatus,
     LineMatchStatus,
     PaymentReceipt,
     SalesInvoice,
@@ -807,16 +809,14 @@ def apply_manual_match(
 # --------------------------------------------------- §6 invoiced-qty rollup
 
 def invoiced_qty_for_po_line(db: Session, po_line_id: int) -> Decimal:
-    """The §6 per-line invoiced quantity: Σ ``billing_invoice_line.quantity`` over CONFIRMED
-    invoices whose lines map to ``po_line_id``.
+    """The §6 per-line invoiced quantity, NET of confirmed credit notes:
 
-    Only CONFIRMED invoices count (an in-review invoice is not yet a commitment). A NULL line
-    quantity contributes 0.
+        invoiced_qty = Σ confirmed invoice-line qty − Σ confirmed credit-note-line qty
 
-    TODO: once the confirmed-credit-note flow lands, SUBTRACT the matched credit-note-line
-    quantities here (a credit note returns billed quantity) — that flow is not built yet, so
-    this rollup is invoices-only for now."""
-    rows = db.execute(
+    Only CONFIRMED documents count on either side (an in-review invoice/CN is not yet a
+    commitment). A confirmed credit note REOPENS the units it credits — subtracting its matched
+    line quantities here frees them for re-invoicing. A NULL line quantity contributes 0."""
+    invoiced_rows = db.execute(
         select(SalesInvoiceLine.quantity)
         .join(SalesInvoice, SalesInvoice.id == SalesInvoiceLine.invoice_id)
         .where(
@@ -824,7 +824,19 @@ def invoiced_qty_for_po_line(db: Session, po_line_id: int) -> Decimal:
             SalesInvoice.status == SalesInvoiceStatus.CONFIRMED.value,
         )
     ).scalars().all()
-    return sum((q for q in rows if q is not None), Decimal("0"))
+    invoiced = sum((q for q in invoiced_rows if q is not None), Decimal("0"))
+
+    credited_rows = db.execute(
+        select(CreditNoteLine.quantity)
+        .join(CreditNote, CreditNote.id == CreditNoteLine.cn_id)
+        .where(
+            CreditNoteLine.po_line_item_id == po_line_id,
+            CreditNote.status == CreditNoteStatus.CONFIRMED.value,
+        )
+    ).scalars().all()
+    credited = sum((q for q in credited_rows if q is not None), Decimal("0"))
+
+    return invoiced - credited
 
 
 def _required_blocking(invoice: SalesInvoice) -> list[str]:
