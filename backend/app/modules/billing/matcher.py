@@ -9,8 +9,10 @@ invoice's PO and keep the best. The composite (0..1) is a fixed weighted sum:
 
     score = 0.35 * identity + 0.35 * description + 0.15 * price + 0.15 * quantity
 
-* ``identity``    — 1.0 if the product CODE appears as a whole token in the invoice line
-                    text, OR the HSN/SAC codes match exactly; else 0.0. The strongest signal.
+* ``identity``    — 1.0 if the product CODE appears at a WORD BOUNDARY in the invoice line
+                    text (its tokens form a contiguous run of whole tokens — so a short code
+                    like ``"S1"`` never matches inside ``"Gasket GAS-100 rubber"``), OR the
+                    HSN/SAC codes match exactly; else 0.0. The strongest signal.
 * ``description`` — Jaccard token overlap between the invoice line description and the PO
                     line's description + product name/brand/model.
 * ``price``       — 1 − min(1, |inv_rate − po_sell| / po_sell) when both unit prices are
@@ -71,6 +73,30 @@ def _tokens(*values: str | None) -> set[str]:
     return out
 
 
+def _token_list(*values: str | None) -> list[str]:
+    """Lower-case alphanumeric tokens in ORDER (for word-boundary identity matching)."""
+    out: list[str] = []
+    for value in values:
+        if value:
+            out.extend(_TOKEN_RE.findall(value.lower()))
+    return out
+
+
+def _token_run_present(needle: list[str], haystack: list[str]) -> bool:
+    """True when ``needle`` occurs as a CONTIGUOUS run of whole tokens inside ``haystack``.
+
+    This is the word-boundary identity test: a code's tokens must line up on token
+    boundaries (so hyphenated ``'WID-1'`` -> ['wid','1'] still hits 'Widget WID-1', while a
+    short ``'S1'`` -> ['s1'] no longer matches inside the fused text of an unrelated line)."""
+    if not needle:
+        return False
+    span = len(needle)
+    return any(
+        haystack[start:start + span] == needle
+        for start in range(len(haystack) - span + 1)
+    )
+
+
 def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
@@ -96,15 +122,16 @@ def _alnum(value: str | None) -> str:
 
 def _score(line: SalesInvoiceLine, cand: _Candidate) -> float:
     """The documented composite score for one (invoice line, PO candidate) pair."""
-    # identity: the product CODE appears (punctuation-insensitive) in the line text, OR the
-    # HSN/SAC codes match exactly. Substring (not token) match so a hyphenated code like
-    # 'WID-1' still hits 'Widget WID-1'.
-    code = _alnum(cand.code)
-    line_text = _alnum(f"{line.description or ''} {line.hsn_sac or ''}")
+    # identity: the product CODE appears at a WORD BOUNDARY in the line text (its tokens
+    # form a contiguous run of whole tokens), OR the HSN/SAC codes match exactly. A raw
+    # substring test (the old rule) let a short code like 'S1' match inside 'gas100...' —
+    # the token-run test requires real token-boundary agreement (H1).
+    code_tokens = _TOKEN_RE.findall((cand.code or "").lower())
+    line_tokens = _token_list(line.description, line.hsn_sac)
     hsn_match = bool(
         line.hsn_sac and cand.hsn and _alnum(line.hsn_sac) == _alnum(cand.hsn)
     )
-    identity = 1.0 if (code and code in line_text) or hsn_match else 0.0
+    identity = 1.0 if _token_run_present(code_tokens, line_tokens) or hsn_match else 0.0
 
     description = _jaccard(_tokens(line.description), _tokens(cand.text))
     price = _proximity(line.unit_rate_paise, cand.sell_price_paise)

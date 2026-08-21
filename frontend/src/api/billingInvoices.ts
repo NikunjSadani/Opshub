@@ -1,0 +1,441 @@
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type InfiniteData,
+  type UseInfiniteQueryResult,
+  type UseMutationResult,
+  type UseQueryResult,
+} from '@tanstack/react-query';
+import { useApi, ApiError } from './client';
+
+/**
+ * Typed contracts + React Query hooks for the client-invoice capture + match slice
+ * of the Billing & AR module (module key `billing`). Mirrors the backend
+ * app/modules/billing/invoice_routes.py. All paths are relative to `/api/v1`
+ * (added by `useApi()`). MONEY is integer PAISE on the wire.
+ *
+ * Ids are treated as strings (mirroring api/projects.ts + api/purchaseOrders.ts):
+ * they only ever flow through `<select>` values, query strings, route params, and
+ * equality checks — never arithmetic. FastAPI coerces the numeric-string ids to ints.
+ */
+
+// --- status unions ------------------------------------------------------------
+
+/** A stored sales-invoice's lifecycle status (backend SalesInvoiceStatus). */
+export type SalesInvoiceStatus =
+  | 'UPLOADED'
+  | 'EXTRACTED'
+  | 'NEEDS_REVIEW'
+  | 'NEEDS_OCR'
+  | 'NEEDS_MATCH'
+  | 'MATCHED'
+  | 'CONFIRMED'
+  | 'REJECTED'
+  | 'CANCELLED';
+
+/**
+ * The per-file outcome of an upload. Adds the upload-only `DUPLICATE` (a file whose
+ * identity collides an existing invoice) to the in-review status set; a duplicate is
+ * never persisted, so it is not a stored `SalesInvoiceStatus`.
+ */
+export type UploadOutcomeStatus =
+  | 'EXTRACTED'
+  | 'NEEDS_REVIEW'
+  | 'NEEDS_OCR'
+  | 'NEEDS_MATCH'
+  | 'MATCHED'
+  | 'REJECTED'
+  | 'DUPLICATE';
+
+/** A single extracted field's confidence status (backend FieldStatus). */
+export type FieldStatus = 'OK' | 'LOW_CONFIDENCE' | 'MISSING' | 'CORRECTED';
+
+/** A single invoice line's PO-match status (backend LineMatchStatus). */
+export type LineMatchStatus = 'UNMATCHED' | 'MATCHED' | 'MANUAL';
+
+// --- DTOs ---------------------------------------------------------------------
+
+/**
+ * A register row — EXACTLY the scalars the list endpoint returns (backend
+ * `InvoiceOut`). A lean projection: it does NOT carry review_reasons, the tax
+ * sub-totals, confirmation audit, fields, or lines — those live only on the detail
+ * response. Keep in lock-step with the backend list `InvoiceOut`, not `InvoiceDetail`.
+ */
+export interface BillingInvoiceRow {
+  id: string;
+  status: SalesInvoiceStatus;
+  needs_ocr: boolean;
+  client_id: string;
+  po_id: string | null;
+  supplier_gstin: string | null;
+  buyer_gstin: string | null;
+  invoice_number: string | null;
+  /** ISO date string (backend `date`); null when not extracted. */
+  invoice_date: string | null;
+  /** PAISE. */
+  total_taxable_paise: number | null;
+  grand_total_paise: number | null;
+  /** ISO datetime string (backend `created_at`). */
+  created_at: string;
+}
+
+/** One extracted field envelope (backend `FieldOut`). */
+export interface BillingFieldOut {
+  /** e.g. "header.buyer_gstin" | "totals.grand_total_paise". */
+  field_path: string;
+  /** Backend key is `value_norm` (NOT `value_normalized`). Null when missing. */
+  value_norm: string | null;
+  value_raw: string | null;
+  /** 0..1 calibrated confidence. */
+  confidence: number;
+  source_engine: string | null;
+  status: FieldStatus;
+}
+
+/** One line item on an invoice, with its PO-match state (backend `LineOut`). */
+export interface BillingLineOut {
+  id: string;
+  line_no: number;
+  /** The matched PO line item id, or null when UNMATCHED. */
+  po_line_item_id: string | null;
+  match_status: LineMatchStatus;
+  description: string | null;
+  hsn_sac: string | null;
+  /** Decimal serialised as a string; null when absent. */
+  quantity: string | null;
+  unit: string | null;
+  unit_rate_paise: number | null;
+  taxable_paise: number | null;
+  /** Decimal serialised as a string, e.g. "18.00". */
+  gst_rate: string | null;
+  cgst_paise: number | null;
+  sgst_paise: number | null;
+  igst_paise: number | null;
+  line_total_paise: number | null;
+}
+
+/**
+ * Full invoice detail (backend `InvoiceDetailOut`, GET /billing/invoices/{id} and
+ * the PATCH review / match responses). A richer shape than the list row — it adds
+ * review_reasons, the tax sub-totals + round-off, confirmation audit, and the
+ * per-field envelopes + line items with their match state.
+ */
+export interface BillingInvoiceDetail {
+  id: string;
+  batch_id: string | null;
+  status: SalesInvoiceStatus;
+  needs_ocr: boolean;
+  review_reasons: string[];
+  client_id: string;
+  po_id: string | null;
+  source_file_id: string | null;
+  supplier_gstin: string | null;
+  buyer_gstin: string | null;
+  invoice_number: string | null;
+  /** ISO date string (backend `date`); null when not extracted. */
+  invoice_date: string | null;
+  due_date: string | null;
+  /** PAISE. */
+  total_taxable_paise: number | null;
+  total_cgst_paise: number | null;
+  total_sgst_paise: number | null;
+  total_igst_paise: number | null;
+  /** PAISE, SIGNED (round-off can be negative). */
+  round_off_paise: number | null;
+  grand_total_paise: number | null;
+  confirmed_by: string | null;
+  /** ISO datetime string; null until confirmed. */
+  confirmed_at: string | null;
+  fields: BillingFieldOut[];
+  lines: BillingLineOut[];
+}
+
+/**
+ * One file's outcome inside an upload batch (backend `FileOutcomeOut`). The summary
+ * scalars (`buyer_gstin` / `invoice_number` / `grand_total_paise`) and `duplicate_of`
+ * are FLAT: on a DUPLICATE they describe the EXISTING invoice, and `duplicate_of` is
+ * that stored invoice's id (used to delete-and-re-upload).
+ */
+export interface BillingUploadOutcome {
+  file_id: string;
+  filename: string;
+  status: UploadOutcomeStatus;
+  invoice_id: string | null;
+  /** The EXISTING invoice id on a DUPLICATE; null otherwise. */
+  duplicate_of: string | null;
+  buyer_gstin: string | null;
+  invoice_number: string | null;
+  /** PAISE. */
+  grand_total_paise: number | null;
+  review_reasons: string[];
+  message: string | null;
+}
+
+/** The response of a bulk upload (backend POST /billing/invoices → UploadOut). */
+export interface BillingUploadBatch {
+  batch_id: string;
+  invoice_count: number;
+  outcomes: BillingUploadOutcome[];
+}
+
+/**
+ * One field correction submitted from the review panel (backend `CorrectionItem`).
+ * The wire field is `value`. For a money (`*_paise`) field this MUST be an
+ * integer-paise string (the backend coerces money corrections to int); the review
+ * screen converts the operator's rupee input to paise before building this.
+ */
+export interface BillingCorrection {
+  field_path: string;
+  value: string;
+}
+
+/** Register page size for the "Load more" pager (mirrors the backend list default). */
+export const BILLING_INVOICE_PAGE_SIZE = 100;
+
+export interface BillingInvoiceFilters {
+  /** Free-text search over buyer / GSTIN / invoice number. */
+  q?: string;
+  status?: SalesInvoiceStatus | '';
+  /** Restrict to one client (id as a string for the query). */
+  client_id?: string;
+  /** Restrict to one purchase order (id as a string). */
+  po_id?: string;
+  /** Inclusive lower bound on invoice_date (YYYY-MM-DD). */
+  date_from?: string;
+  /** Inclusive upper bound on invoice_date (YYYY-MM-DD). */
+  date_to?: string;
+}
+
+// --- query-string builder (pure, unit-testable) -------------------------------
+
+/**
+ * Build the `?q=&status=&client_id=&po_id=&date_from=&date_to=&limit=&offset=` query
+ * for the register list. Filter params are appended only when non-empty (trimmed);
+ * limit/offset are always sent so the register never silently rides the backend's
+ * default 100-row cap.
+ */
+export function buildBillingInvoiceListQuery(
+  filters: BillingInvoiceFilters,
+  offset: number,
+): string {
+  const params = new URLSearchParams();
+  if (filters.q?.trim()) params.set('q', filters.q.trim());
+  if (filters.status) params.set('status', filters.status);
+  if (filters.client_id?.trim()) params.set('client_id', filters.client_id.trim());
+  if (filters.po_id?.trim()) params.set('po_id', filters.po_id.trim());
+  if (filters.date_from?.trim()) params.set('date_from', filters.date_from.trim());
+  if (filters.date_to?.trim()) params.set('date_to', filters.date_to.trim());
+  params.set('limit', String(BILLING_INVOICE_PAGE_SIZE));
+  params.set('offset', String(offset));
+  return `?${params.toString()}`;
+}
+
+// --- query keys ---------------------------------------------------------------
+
+export const billingInvoiceKeys = {
+  all: ['billing', 'invoices'] as const,
+  list: (filters: BillingInvoiceFilters) => ['billing', 'invoices', filters] as const,
+  // Normalise the id to a string so the detail query (route param = string) and every
+  // mutation's setQueryData / invalidation land on the SAME cache key regardless of
+  // whether the backend serialised the id as a number.
+  detail: (id: string | number) => ['billing', 'invoice', String(id)] as const,
+};
+
+// --- queries ------------------------------------------------------------------
+
+/**
+ * The invoice register, filtered by q / status / client / PO / date range, with
+ * offset-based "Load more" paging. Each page fetches up to `BILLING_INVOICE_PAGE_SIZE`
+ * rows; there is another page only when the last one came back exactly full (a short
+ * OR empty page means the end). Mirrors the expense register's paging semantics.
+ */
+export function useBillingInvoicesQuery(
+  filters: BillingInvoiceFilters,
+): UseInfiniteQueryResult<InfiniteData<BillingInvoiceRow[], number>, Error> {
+  const { get } = useApi();
+  return useInfiniteQuery<
+    BillingInvoiceRow[],
+    Error,
+    InfiniteData<BillingInvoiceRow[], number>,
+    readonly unknown[],
+    number
+  >({
+    queryKey: billingInvoiceKeys.list(filters),
+    initialPageParam: 0,
+    queryFn: ({ pageParam, signal }) =>
+      get<BillingInvoiceRow[]>(
+        `/billing/invoices${buildBillingInvoiceListQuery(filters, pageParam)}`,
+        signal,
+      ),
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length > 0 && lastPage.length === BILLING_INVOICE_PAGE_SIZE
+        ? allPages.reduce((total, page) => total + page.length, 0)
+        : undefined,
+  });
+}
+
+/** A single invoice with its per-field envelopes + line items (and PO-match state). */
+export function useBillingInvoiceQuery(
+  invoiceId: string | null,
+): UseQueryResult<BillingInvoiceDetail, Error> {
+  const { get } = useApi();
+  return useQuery<BillingInvoiceDetail, Error>({
+    queryKey: billingInvoiceKeys.detail(invoiceId ?? ''),
+    enabled: invoiceId != null && invoiceId !== '',
+    queryFn: ({ signal }) =>
+      get<BillingInvoiceDetail>(`/billing/invoices/${invoiceId}`, signal),
+  });
+}
+
+// --- mutations ----------------------------------------------------------------
+
+/**
+ * Arguments for a bulk upload. `clientId` is REQUIRED (the whole batch is tagged to
+ * one client); `poId` is optional but, when given, must belong to that client (the
+ * backend validates before storing any bytes). Ids are strings because they originate
+ * from `<select>` values and ride the multipart form as text.
+ */
+export interface BillingUploadArgs {
+  files: File[];
+  clientId: string;
+  poId?: string;
+}
+
+/**
+ * Bulk-upload N PDFs (one invoice each) as a single multipart batch under the `files`
+ * field, tagged with a client (+ optional PO). Returns the per-file outcomes (incl.
+ * any DUPLICATE carrying the existing invoice's summary). The delete-and-re-upload
+ * flow reuses this hook with a single-element array. Invalidates the register on success.
+ */
+export function useUploadBillingInvoices(): UseMutationResult<
+  BillingUploadBatch,
+  ApiError,
+  BillingUploadArgs
+> {
+  const { postForm } = useApi();
+  const qc = useQueryClient();
+  return useMutation<BillingUploadBatch, ApiError, BillingUploadArgs>({
+    mutationFn: ({ files, clientId, poId }) => {
+      const form = new FormData();
+      for (const f of files) form.append('files', f);
+      form.append('client_id', clientId);
+      if (poId) form.append('po_id', poId);
+      return postForm<BillingUploadBatch>('/billing/invoices', form);
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}
+
+/**
+ * Submit per-field corrections for an invoice, optionally confirming it (OPERATE).
+ * On `confirm: true` the backend freezes the canonical scalars (state → CONFIRMED),
+ * and 409s unless every line is MATCHED/MANUAL and every required field is present.
+ * Seeds the detail cache and refreshes the register on success.
+ */
+export function useSubmitReview(): UseMutationResult<
+  BillingInvoiceDetail,
+  ApiError,
+  { invoiceId: string; corrections?: BillingCorrection[]; confirm?: boolean }
+> {
+  const { patch } = useApi();
+  const qc = useQueryClient();
+  return useMutation<
+    BillingInvoiceDetail,
+    ApiError,
+    { invoiceId: string; corrections?: BillingCorrection[]; confirm?: boolean }
+  >({
+    mutationFn: ({ invoiceId, corrections = [], confirm }) =>
+      patch<BillingInvoiceDetail>(`/billing/invoices/${invoiceId}/review`, {
+        corrections,
+        confirm: confirm ?? false,
+      }),
+    onSuccess: (invoice) => {
+      qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}
+
+/**
+ * Re-run the auto-matcher over the invoice's still-unmatched lines (OPERATE). Seeds
+ * the detail cache (the response carries the updated line match state) and refreshes
+ * the register (the derived status may change).
+ */
+export function useRematch(): UseMutationResult<BillingInvoiceDetail, ApiError, string> {
+  const { post } = useApi();
+  const qc = useQueryClient();
+  return useMutation<BillingInvoiceDetail, ApiError, string>({
+    mutationFn: (invoiceId) =>
+      post<BillingInvoiceDetail>(`/billing/invoices/${invoiceId}/match`),
+    onSuccess: (invoice) => {
+      qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}
+
+/**
+ * Manually map one invoice line to a PO line item (OPERATE, status → MANUAL). Seeds
+ * the detail cache with the response's fresh line state.
+ */
+export function useManualMatch(): UseMutationResult<
+  BillingInvoiceDetail,
+  ApiError,
+  { invoiceId: string; lineId: string; poLineItemId: string }
+> {
+  const { patch } = useApi();
+  const qc = useQueryClient();
+  return useMutation<
+    BillingInvoiceDetail,
+    ApiError,
+    { invoiceId: string; lineId: string; poLineItemId: string }
+  >({
+    mutationFn: ({ invoiceId, lineId, poLineItemId }) =>
+      patch<BillingInvoiceDetail>(
+        `/billing/invoices/${invoiceId}/lines/${lineId}/match`,
+        { po_line_item_id: Number(poLineItemId) },
+      ),
+    onSuccess: (invoice) => {
+      qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}
+
+/** Soft-cancel an in-review invoice (MANAGE). 409 on a confirmed/already-cancelled one. */
+export function useCancelInvoice(): UseMutationResult<BillingInvoiceDetail, ApiError, string> {
+  const { post } = useApi();
+  const qc = useQueryClient();
+  return useMutation<BillingInvoiceDetail, ApiError, string>({
+    mutationFn: (invoiceId) =>
+      post<BillingInvoiceDetail>(`/billing/invoices/${invoiceId}/cancel`),
+    onSuccess: (invoice) => {
+      qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}
+
+/**
+ * Delete an invoice + its source blob (MANAGE, 200 with `{id, deleted}`). Used by the
+ * delete-and-re-upload flow and by the detail screen's Delete action. Invalidates the
+ * register on success.
+ */
+export function useDeleteInvoice(): UseMutationResult<
+  { id: number; deleted: boolean },
+  ApiError,
+  string
+> {
+  const { del } = useApi();
+  const qc = useQueryClient();
+  return useMutation<{ id: number; deleted: boolean }, ApiError, string>({
+    mutationFn: (invoiceId) => del<{ id: number; deleted: boolean }>(`/billing/invoices/${invoiceId}`),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}

@@ -13,8 +13,10 @@ import { usePermissions } from '../../auth/AuthProvider';
 import { useProjectsQuery } from '../../api/projects';
 import {
   useDeleteInvoice,
+  useInvoiceOptions,
   usePaymentMethods,
   useUploadInvoices,
+  type DocType,
   type UploadResult,
 } from '../../api/expense';
 import {
@@ -52,7 +54,13 @@ export function Upload() {
 
   const [projectId, setProjectId] = useState('');
   const [paymentMethodId, setPaymentMethodId] = useState('');
+  // Document kind for the whole batch. Default INVOICE (the overwhelmingly common
+  // case); CREDIT_NOTE reveals an optional "against invoice" picker for context.
+  const [docType, setDocType] = useState<DocType>('INVOICE');
+  const [againstInvoiceId, setAgainstInvoiceId] = useState('');
   const [files, setFiles] = useState<File[]>([]);
+  // The against-invoice options only load once CREDIT_NOTE is chosen (see hook).
+  const invoiceOptionsQuery = useInvoiceOptions(docType === 'CREDIT_NOTE');
   // Outcomes are index-aligned with `files` (the backend returns one outcome per
   // uploaded file, in order), so a row's identity is its position — never its
   // filename, which can collide across two same-named PDFs.
@@ -67,6 +75,8 @@ export function Upload() {
 
   function reset() {
     setFiles([]);
+    setDocType('INVOICE');
+    setAgainstInvoiceId('');
     setResults(null);
     setDupTarget(null);
     setResolvingId(null);
@@ -77,7 +87,7 @@ export function Upload() {
 
   function onUpload() {
     if (files.length === 0 || !projectId || !paymentMethodId) return;
-    upload.mutate({ files, projectId, paymentMethodId }, {
+    upload.mutate({ files, projectId, paymentMethodId, docType, againstInvoiceId }, {
       onSuccess: (batch) => {
         setResults(batch.outcomes);
         const dupes = batch.outcomes.filter((r) => r.status === 'DUPLICATE').length;
@@ -125,7 +135,13 @@ export function Upload() {
     try {
       await del.mutateAsync(target.result.duplicate_of);
       // Re-upload with the SAME batch tags so the replacement keeps its allocation.
-      const batch = await upload.mutateAsync({ files: [file], projectId, paymentMethodId });
+      const batch = await upload.mutateAsync({
+        files: [file],
+        projectId,
+        paymentMethodId,
+        docType,
+        againstInvoiceId,
+      });
       const fresh = batch.outcomes[0];
       // Splice by index so only the resolved row is replaced (same-named rows stay put).
       setResults((prev) => (prev ?? []).map((r, i) => (i === target.index ? fresh : r)));
@@ -149,6 +165,8 @@ export function Upload() {
 
   const projects = projectsQuery.data ?? [];
   const methods = methodsQuery.data ?? [];
+  const invoiceOptions = invoiceOptionsQuery.data ?? [];
+  const isCreditNote = docType === 'CREDIT_NOTE';
   const noProjects = projectsQuery.isSuccess && projects.length === 0;
   const noMethods = methodsQuery.isSuccess && methods.length === 0;
   // Both cost-allocation tags are REQUIRED before an upload can proceed.
@@ -163,6 +181,42 @@ export function Upload() {
 
       <div className="max-w-2xl">
         <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <SelectField
+            label="Document type"
+            value={docType}
+            onChange={(e) => {
+              const next = e.target.value as DocType;
+              setDocType(next);
+              // Leaving CREDIT_NOTE drops any against-invoice pick so it can't
+              // ride along on a subsequent INVOICE upload.
+              if (next !== 'CREDIT_NOTE') setAgainstInvoiceId('');
+            }}
+            hint="A credit note is a vendor reduction; it lowers spend rather than adding to it."
+          >
+            <option value="INVOICE">Invoice</option>
+            <option value="CREDIT_NOTE">Credit note</option>
+          </SelectField>
+          {isCreditNote ? (
+            <SelectField
+              label="Against invoice (optional)"
+              value={againstInvoiceId}
+              onChange={(e) => setAgainstInvoiceId(e.target.value)}
+              disabled={invoiceOptionsQuery.isPending}
+              hint="Link this credit note to the invoice it reduces, for context."
+            >
+              <option value="">
+                {invoiceOptionsQuery.isPending ? 'Loading invoices…' : 'Not linked'}
+              </option>
+              {invoiceOptions.map((inv) => (
+                <option key={inv.id} value={inv.id}>
+                  {inv.invoice_number ?? `#${inv.id}`}
+                  {inv.supplier_name ? ` — ${inv.supplier_name}` : ''}
+                </option>
+              ))}
+            </SelectField>
+          ) : (
+            <div className="hidden sm:block" aria-hidden="true" />
+          )}
           <SelectField
             label="Project"
             required

@@ -96,8 +96,9 @@ def _as(client: TestClient, user: User) -> None:
 def _seed_invoice(
     client: TestClient, *, number: str, grand_total: int,
     due_offset_days: int | None = None, client_id: int | None = None,
+    status: str = SalesInvoiceStatus.CONFIRMED.value,
 ) -> int:
-    """Create a CONFIRMED-style billing_invoice directly; return its id.
+    """Create a billing_invoice directly (CONFIRMED by default); return its id.
     `due_offset_days` is relative to today (negative = already past due)."""
     db = client.app.state.TestSession()
     due = None if due_offset_days is None else date.today() + timedelta(days=due_offset_days)
@@ -108,7 +109,7 @@ def _seed_invoice(
         invoice_date=date.today() - timedelta(days=5),
         due_date=due,
         grand_total_paise=grand_total,
-        status=SalesInvoiceStatus.CONFIRMED.value,
+        status=status,
     )
     db.add(inv)
     db.commit()
@@ -364,3 +365,23 @@ def test_service_missing_invoice_and_advance(client: TestClient) -> None:
     with pytest.raises(ar_service.AdvanceNotFound):
         ar_service.apply_advance(db, advance_id=99999, invoice_id=1, amount_paise=100)
     db.close()
+
+
+def test_ar_excludes_non_confirmed_and_blocks_payment(client: TestClient) -> None:
+    # Money audit (HIGH): AR is CONFIRMED-only — a cancelled/draft/rejected invoice is
+    # NOT a receivable and can't take a payment. (Default acting user is the OPERATOR.)
+    conf = _seed_invoice(client, number="AR-CONF", grand_total=100000, due_offset_days=-120)
+    for st in ("UPLOADED", "NEEDS_REVIEW", "REJECTED", "CANCELLED"):
+        _seed_invoice(client, number=f"AR-{st}", grand_total=100000,
+                      due_offset_days=-120, status=st)
+    rows = client.get("/api/v1/billing/ar").json()
+    numbers = {r["invoice_number"] for r in rows}
+    assert numbers == {"AR-CONF"}, f"AR must list only CONFIRMED, got {numbers}"
+    # A payment against a non-confirmed invoice is rejected (422), against CONFIRMED is 201.
+    draft = _seed_invoice(client, number="AR-DRAFT2", grand_total=50000, status="UPLOADED")
+    bad = client.post("/api/v1/billing/payments",
+                      json={"invoice_id": draft, "amount_paise": 1000})
+    assert bad.status_code == 422, bad.text
+    ok = client.post("/api/v1/billing/payments",
+                     json={"invoice_id": conf, "amount_paise": 1000})
+    assert ok.status_code == 201, ok.text

@@ -42,6 +42,14 @@ export type UploadResultStatus =
 /** A single extracted field's confidence status (backend InvoiceField.status). */
 export type FieldStatus = 'OK' | 'LOW_CONFIDENCE' | 'MISSING' | 'CORRECTED';
 
+/**
+ * The document kind of a stored row. An INVOICE is a spend; a CREDIT_NOTE is a
+ * vendor REDUCTION of a prior invoice — its `grand_total_paise` still arrives as a
+ * POSITIVE magnitude on the wire, so any spend-facing surface must render it as a
+ * negative/parenthesised reduction (the CSV + dashboard already net it).
+ */
+export type DocType = 'INVOICE' | 'CREDIT_NOTE';
+
 // --- DTOs ---------------------------------------------------------------------
 
 /**
@@ -55,6 +63,13 @@ export interface InvoiceOut {
   id: number;
   status: InvoiceStatus;
   needs_ocr: boolean;
+  /**
+   * INVOICE (a spend) or CREDIT_NOTE (a reduction). Backend register rows now
+   * always carry this; treat a missing value as INVOICE for forward safety.
+   */
+  doc_type: DocType;
+  /** For a CREDIT_NOTE, the invoice it reduces (chosen at upload), else null. */
+  against_invoice_id: number | null;
   supplier_name: string | null;
   supplier_gstin: string | null;
   invoice_number: string | null;
@@ -170,6 +185,10 @@ export interface InvoiceDetail {
   batch_id: number;
   status: InvoiceStatus;
   needs_ocr: boolean;
+  /** INVOICE (a spend) or CREDIT_NOTE (a reduction of a prior invoice). */
+  doc_type: DocType;
+  /** For a CREDIT_NOTE, the invoice it reduces, else null. */
+  against_invoice_id: number | null;
   review_reasons: string[];
   source_file_id: number | null;
   supplier_name: string | null;
@@ -246,6 +265,8 @@ export interface InvoiceFilters {
   /** Free-text search over supplier / GSTIN / invoice number. */
   q?: string;
   status?: InvoiceStatus | '';
+  /** Restrict to one document kind (INVOICE / CREDIT_NOTE). */
+  doc_type?: DocType | '';
   /** Inclusive lower bound on invoice_date (YYYY-MM-DD). */
   date_from?: string;
   /** Inclusive upper bound on invoice_date (YYYY-MM-DD). */
@@ -266,6 +287,7 @@ export interface InvoiceFilters {
 function appendInvoiceFilters(params: URLSearchParams, filters: InvoiceFilters): void {
   if (filters.q?.trim()) params.set('q', filters.q.trim());
   if (filters.status) params.set('status', filters.status);
+  if (filters.doc_type) params.set('doc_type', filters.doc_type);
   if (filters.date_from?.trim()) params.set('date_from', filters.date_from.trim());
   if (filters.date_to?.trim()) params.set('date_to', filters.date_to.trim());
   if (filters.project_id?.trim()) params.set('project_id', filters.project_id.trim());
@@ -351,6 +373,23 @@ export function usePaymentMethods(activeOnly = false): UseQueryResult<PaymentMet
   });
 }
 
+/**
+ * A flat list of existing INVOICE rows, for the credit-note "against invoice"
+ * picker on the upload screen. Gated by `enabled` so it fires only once the
+ * operator has actually chosen CREDIT_NOTE (an INVOICE upload never fetches it).
+ * Filtered to `doc_type=INVOICE` — a credit note references an invoice, not
+ * another credit note — and capped at a generous page for picker context.
+ */
+export function useInvoiceOptions(enabled: boolean): UseQueryResult<InvoiceOut[], Error> {
+  const { get } = useApi();
+  return useQuery<InvoiceOut[], Error>({
+    queryKey: ['expense', 'invoice-options'],
+    enabled,
+    queryFn: ({ signal }) =>
+      get<InvoiceOut[]>('/expense/invoices?doc_type=INVOICE&limit=200', signal),
+  });
+}
+
 /** Confirmed-spend rollup for the Overview dashboard (by project + payment method). */
 export function useExpenseSummary(): UseQueryResult<ExpenseSummary, Error> {
   const { get } = useApi();
@@ -386,6 +425,13 @@ export interface UploadArgs {
   files: File[];
   projectId: string;
   paymentMethodId: string;
+  /** The document kind for the whole batch (defaults to INVOICE at the call site). */
+  docType: DocType;
+  /**
+   * For a CREDIT_NOTE batch, the optional invoice it is issued against (id as a
+   * string from the `<select>`). Ignored / omitted for an INVOICE batch or when blank.
+   */
+  againstInvoiceId?: string;
 }
 
 /**
@@ -399,11 +445,17 @@ export function useUploadInvoices(): UseMutationResult<UploadBatchOut, Error, Up
   const { postForm } = useApi();
   const qc = useQueryClient();
   return useMutation<UploadBatchOut, Error, UploadArgs>({
-    mutationFn: ({ files, projectId, paymentMethodId }) => {
+    mutationFn: ({ files, projectId, paymentMethodId, docType, againstInvoiceId }) => {
       const form = new FormData();
       for (const f of files) form.append('files', f);
       form.append('project_id', projectId);
       form.append('payment_method_id', paymentMethodId);
+      form.append('doc_type', docType);
+      // Only a credit note carries an against-invoice ref, and only when one was
+      // actually picked — an INVOICE batch (or a blank pick) sends no field.
+      if (docType === 'CREDIT_NOTE' && againstInvoiceId?.trim()) {
+        form.append('against_invoice_id', againstInvoiceId.trim());
+      }
       return postForm<UploadBatchOut>('/expense/invoices', form);
     },
     onSuccess: () => {

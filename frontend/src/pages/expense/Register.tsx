@@ -23,7 +23,9 @@ import {
   buildInvoiceCsvQuery,
   usePaymentMethods,
   useInvoicesInfiniteQuery,
+  type DocType,
   type InvoiceFilters,
+  type InvoiceOut,
   type InvoiceStatus,
 } from '../../api/expense';
 import {
@@ -35,12 +37,47 @@ import {
   formatPaise,
 } from './expenseFormat';
 
+/** Sentence-case labels + badge tones for a row's document kind. INVOICE reads
+ * neutral (slate); a CREDIT_NOTE is called out distinctly (amber) so a reader
+ * never mistakes a reduction for extra spend. A missing value is treated as an
+ * INVOICE (forward-safe against older rows). */
+const DOC_TYPE_LABEL: Record<DocType, string> = {
+  INVOICE: 'Invoice',
+  CREDIT_NOTE: 'Credit note',
+};
+const DOC_TYPE_TONE: Record<DocType, 'slate' | 'amber'> = {
+  INVOICE: 'slate',
+  CREDIT_NOTE: 'amber',
+};
+
+function docTypeOf(inv: InvoiceOut): DocType {
+  return inv.doc_type === 'CREDIT_NOTE' ? 'CREDIT_NOTE' : 'INVOICE';
+}
+
+/**
+ * Render a row's grand total for the register. A CREDIT_NOTE arrives as a POSITIVE
+ * magnitude but is a REDUCTION, so it is shown as a negative amount (e.g. −₹300.00)
+ * in an amber tone — never mistakable for extra spend. An INVOICE renders plainly.
+ */
+function GrandTotalCell({ inv }: { inv: InvoiceOut }) {
+  const formatted = formatPaise(inv.grand_total_paise);
+  if (docTypeOf(inv) === 'CREDIT_NOTE' && inv.grand_total_paise != null) {
+    return (
+      <span className="tabular-nums text-amber-700" title="Credit note — reduces spend">
+        {`−${formatted}`}
+      </span>
+    );
+  }
+  return <span className="tabular-nums">{formatted}</span>;
+}
+
 export function Register() {
   const toast = useToast();
   const { downloadUrl } = useApi();
 
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<InvoiceStatus | ''>('');
+  const [docType, setDocType] = useState<DocType | ''>('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [projectId, setProjectId] = useState('');
@@ -59,6 +96,7 @@ export function Register() {
   const filters: InvoiceFilters = {
     q,
     status,
+    doc_type: docType,
     date_from: dateFrom,
     date_to: dateTo,
     project_id: projectId,
@@ -140,6 +178,15 @@ export function Register() {
           <option value="CONFIRMED">Confirmed</option>
           <option value="REJECTED">Rejected</option>
         </SelectField>
+        <SelectField
+          label="Doc type"
+          value={docType}
+          onChange={(e) => setDocType(e.target.value as DocType | '')}
+        >
+          <option value="">All types</option>
+          <option value="INVOICE">Invoice</option>
+          <option value="CREDIT_NOTE">Credit note</option>
+        </SelectField>
         <TextField
           label="From date"
           type="date"
@@ -196,6 +243,7 @@ export function Register() {
                 <Th>Supplier</Th>
                 <Th>GSTIN</Th>
                 <Th>Invoice no.</Th>
+                <Th>Doc type</Th>
                 <Th>Date</Th>
                 <Th className="text-right">Grand total</Th>
                 <Th>Project</Th>
@@ -210,8 +258,15 @@ export function Register() {
                   <Td className="font-medium text-slate-900">{inv.supplier_name ?? '—'}</Td>
                   <Td className="tabular-nums">{inv.supplier_gstin ?? '—'}</Td>
                   <Td>{inv.invoice_number ?? '—'}</Td>
+                  <Td>
+                    <Badge tone={DOC_TYPE_TONE[docTypeOf(inv)]}>
+                      {DOC_TYPE_LABEL[docTypeOf(inv)]}
+                    </Badge>
+                  </Td>
                   <Td className="whitespace-nowrap">{formatDate(inv.invoice_date)}</Td>
-                  <Td className="text-right tabular-nums">{formatPaise(inv.grand_total_paise)}</Td>
+                  <Td className="text-right">
+                    <GrandTotalCell inv={inv} />
+                  </Td>
                   <Td className="whitespace-nowrap">
                     {inv.project_code
                       ? inv.project_name

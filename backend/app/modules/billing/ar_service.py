@@ -41,6 +41,7 @@ from app.modules.billing.models import (
     CreditNoteStatus,
     PaymentReceipt,
     SalesInvoice,
+    SalesInvoiceStatus,
 )
 from app.modules.projects.models import ProjectClient
 from app.platform import audit
@@ -83,6 +84,11 @@ class ClientMismatch(ARError):
 
 class OverRemaining(ARError):
     """Applying more than the advance's remaining balance (route -> 422)."""
+
+
+class InvoiceNotConfirmed(ARError):
+    """AR only tracks CONFIRMED invoices — a payment/advance can't post against a
+    draft/rejected/cancelled invoice (route maps to 422)."""
 
 
 class OverOutstanding(ARError):
@@ -254,6 +260,24 @@ def get_invoice(db: Session, invoice_id: int) -> SalesInvoice | None:
     ).scalar_one_or_none()
 
 
+def _lock_confirmed_invoice(db: Session, invoice_id: int) -> SalesInvoice:
+    """Row-lock an invoice for a receivable mutation, requiring it be CONFIRMED.
+
+    AR only tracks CONFIRMED invoices; the FOR UPDATE lock serializes concurrent
+    payments/advance-applications against the same invoice so the outstanding guard
+    is race-safe (a no-op on sqlite, real on Postgres — mirrors expense.delete_invoice)."""
+    invoice = db.execute(
+        select(SalesInvoice).where(SalesInvoice.id == invoice_id).with_for_update()
+    ).scalar_one_or_none()
+    if invoice is None:
+        raise InvoiceNotFound(f"invoice {invoice_id} not found")
+    if invoice.status != SalesInvoiceStatus.CONFIRMED.value:
+        raise InvoiceNotConfirmed(
+            f"invoice {invoice_id} is {invoice.status} — only a CONFIRMED invoice is a receivable"
+        )
+    return invoice
+
+
 def invoice_payments(db: Session, invoice_id: int) -> list[PaymentReceipt]:
     """Payment receipts against an invoice, newest-received first."""
     return list(
@@ -288,7 +312,9 @@ def ar_register(
     derived status (PAID/PART_PAID/UNPAID) and/or overdue. Ordered oldest-due first
     (nulls last) so the most-aged receivables surface at the top."""
     today = today or date.today()
-    stmt = select(SalesInvoice)
+    # AR tracks only CONFIRMED invoices (mirrors finance P&L) — a draft/rejected/cancelled
+    # invoice is not a receivable and must not inflate outstanding or overdue.
+    stmt = select(SalesInvoice).where(SalesInvoice.status == SalesInvoiceStatus.CONFIRMED.value)
     if client_id is not None:
         stmt = stmt.where(SalesInvoice.client_id == client_id)
     stmt = stmt.order_by(
@@ -402,9 +428,7 @@ def record_payment(
     payment). `client_id` is derived from the invoice. Audited."""
     if amount_paise <= 0:
         raise InvalidAmount("payment amount must be a positive number of paise")
-    invoice = get_invoice(db, invoice_id)
-    if invoice is None:
-        raise InvoiceNotFound(f"invoice {invoice_id} not found")
+    invoice = _lock_confirmed_invoice(db, invoice_id)  # CONFIRMED-only + race-safe
     outstanding = outstanding_paise(db, invoice)
     if amount_paise > outstanding:
         raise OverOutstanding(
@@ -494,12 +518,14 @@ def apply_advance(
     invoice must belong to the same client. Audited."""
     if amount_paise <= 0:
         raise InvalidAmount("application amount must be a positive number of paise")
-    advance = get_advance(db, advance_id)
+    # Lock the advance row (serialize concurrent applications so remaining can't be
+    # over-drawn) then the invoice (CONFIRMED-only + serialize its outstanding).
+    advance = db.execute(
+        select(ClientAdvance).where(ClientAdvance.id == advance_id).with_for_update()
+    ).scalar_one_or_none()
     if advance is None:
         raise AdvanceNotFound(f"advance {advance_id} not found")
-    invoice = get_invoice(db, invoice_id)
-    if invoice is None:
-        raise InvoiceNotFound(f"invoice {invoice_id} not found")
+    invoice = _lock_confirmed_invoice(db, invoice_id)
     if advance.client_id != invoice.client_id:
         raise ClientMismatch(
             "advance and invoice belong to different clients — cannot apply"

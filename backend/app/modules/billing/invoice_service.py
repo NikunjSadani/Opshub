@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any, cast
 
 from sqlalchemy import Select, and_, or_, select
@@ -32,9 +33,12 @@ from sqlalchemy.orm import Session
 
 from app.modules.billing import dedup, matcher
 from app.modules.billing.models import (
+    AdvanceApplication,
     BillingBatch,
     BillingBatchStatus,
+    CreditNote,
     LineMatchStatus,
+    PaymentReceipt,
     SalesInvoice,
     SalesInvoiceCorrection,
     SalesInvoiceField,
@@ -45,7 +49,7 @@ from app.modules.expense.canonical import ExtractedInvoice, FieldStatus
 from app.modules.expense.canonical import Field as CField
 from app.modules.expense.extractor import Extractor, get_extractor
 from app.modules.files.models import StoredFile
-from app.modules.sales_orders.models import POLineItem
+from app.modules.sales_orders.models import LineStatus, POLineItem
 from app.platform import audit
 from app.platform.models import Setting
 from app.platform.storage import Storage, get_storage
@@ -785,6 +789,11 @@ def apply_manual_match(
     if po_line is None or po_line.po_id != invoice.po_id:
         raise BillingBadRequest(
             "the PO line does not exist or does not belong to this invoice's PO")
+    # A CLOSED / SHORT_CLOSED line has been retired from open-to-invoice — it can't be billed
+    # against (M4). Only an OPEN line is a valid manual-match target.
+    if po_line.line_status != LineStatus.OPEN.value:
+        raise BillingBadRequest(
+            f"PO line {po_line_item_id} is {po_line.line_status} and can no longer be billed")
 
     matcher.apply_manual_match(db, line, po_line_item_id)
     invoice.status = _derive_status(invoice)
@@ -795,23 +804,105 @@ def apply_manual_match(
     return invoice
 
 
+# --------------------------------------------------- §6 invoiced-qty rollup
+
+def invoiced_qty_for_po_line(db: Session, po_line_id: int) -> Decimal:
+    """The §6 per-line invoiced quantity: Σ ``billing_invoice_line.quantity`` over CONFIRMED
+    invoices whose lines map to ``po_line_id``.
+
+    Only CONFIRMED invoices count (an in-review invoice is not yet a commitment). A NULL line
+    quantity contributes 0.
+
+    TODO: once the confirmed-credit-note flow lands, SUBTRACT the matched credit-note-line
+    quantities here (a credit note returns billed quantity) — that flow is not built yet, so
+    this rollup is invoices-only for now."""
+    rows = db.execute(
+        select(SalesInvoiceLine.quantity)
+        .join(SalesInvoice, SalesInvoice.id == SalesInvoiceLine.invoice_id)
+        .where(
+            SalesInvoiceLine.po_line_item_id == po_line_id,
+            SalesInvoice.status == SalesInvoiceStatus.CONFIRMED.value,
+        )
+    ).scalars().all()
+    return sum((q for q in rows if q is not None), Decimal("0"))
+
+
+def _required_blocking(invoice: SalesInvoice) -> list[str]:
+    """Required fields that BLOCK confirm: MISSING / LOW_CONFIDENCE, OR (L1) present-but-empty.
+
+    A human correction flips a field to CORRECTED regardless of the value it wrote, so a
+    required field corrected to blank/whitespace (or a money total with no value) would slip
+    past a pure status test — a required field must carry real content."""
+    blocking: set[str] = set()
+    for f in invoice.fields:
+        if f.field_path not in REQUIRED_FIELD_PATHS:
+            continue
+        weak = f.status in (FieldStatus.MISSING.value, FieldStatus.LOW_CONFIDENCE.value)
+        empty = f.value_norm is None or not f.value_norm.strip()
+        if weak or empty:
+            blocking.add(f.field_path)
+    return sorted(blocking)
+
+
+def _over_invoiced_lines(db: Session, invoice: SalesInvoice) -> list[dict[str, Any]]:
+    """The matched lines whose confirmation would push their PO line's total invoiced_qty
+    ABOVE its ordered_qty (§6 soft over-billing check).
+
+    ``invoice`` is NOT yet CONFIRMED, so ``invoiced_qty_for_po_line`` already EXCLUDES it —
+    the new total is ``already_invoiced + this invoice's own qty for that PO line``. Several
+    lines can map to one PO line, so this invoice's quantities are summed per PO line first.
+    Returns [] when nothing over-bills."""
+    matched = (LineMatchStatus.MATCHED.value, LineMatchStatus.MANUAL.value)
+    this_qty: dict[int, Decimal] = {}
+    line_nos: dict[int, list[int]] = {}
+    for ln in invoice.lines:
+        if ln.po_line_item_id is None or ln.match_status not in matched:
+            continue
+        this_qty[ln.po_line_item_id] = (
+            this_qty.get(ln.po_line_item_id, Decimal("0")) + (ln.quantity or Decimal("0")))
+        line_nos.setdefault(ln.po_line_item_id, []).append(ln.line_no)
+
+    over: list[dict[str, Any]] = []
+    for po_line_id, added in this_qty.items():
+        po_line = db.get(POLineItem, po_line_id)
+        if po_line is None or po_line.ordered_qty is None:
+            continue
+        new_total = invoiced_qty_for_po_line(db, po_line_id) + added
+        if new_total > po_line.ordered_qty:
+            over.append({
+                "po_line_item_id": po_line_id,
+                "line_nos": sorted(line_nos[po_line_id]),
+                "ordered_qty": str(po_line.ordered_qty),
+                "invoiced_qty": str(new_total),
+            })
+    return over
+
+
 # --------------------------------------------------------------- confirm
 
 def confirm_invoice(db: Session, invoice: SalesInvoice, *, actor_uid: str | None) -> SalesInvoice:
     """Freeze an in-review invoice into the immutable CONFIRMED record (drives §6 invoiced_qty).
 
     Blocked (409) unless: at least one line; every REQUIRED field present (not MISSING /
-    LOW_CONFIDENCE); and every line MATCHED or MANUAL (mapped to a PO line)."""
+    LOW_CONFIDENCE / corrected-to-blank); and every line MATCHED or MANUAL (mapped to a PO
+    line). Over-billing (confirming would push a PO line's invoiced_qty above its ordered_qty)
+    is a SOFT flag only — it appends an ``over_invoiced`` review reason and returns the
+    offending lines on the result, never blocks (the accounting software is the source of
+    truth)."""
+    # Re-read under a row lock and re-validate status (M3): a concurrent confirm/cancel/delete
+    # must not race off a stale session snapshot (mirrors delete_invoice).
+    locked = db.execute(
+        select(SalesInvoice).where(SalesInvoice.id == invoice.id).with_for_update()
+    ).scalar_one_or_none()
+    if locked is None:
+        raise BillingNotFound("invoice not found")
+    invoice = locked
     if invoice.status not in _EDITABLE_STATUSES:
         raise BillingConflict(
             f"invoice is {invoice.status}; only in-review invoices can be confirmed")
     if not invoice.lines:
         raise BillingConflict("a confirmable invoice needs at least one line item")
-    blocking = sorted(
-        f.field_path for f in invoice.fields
-        if f.field_path in REQUIRED_FIELD_PATHS
-        and f.status in (FieldStatus.MISSING.value, FieldStatus.LOW_CONFIDENCE.value)
-    )
+    blocking = _required_blocking(invoice)
     if blocking:
         raise BillingConflict(
             "these required fields still need review before confirming: "
@@ -825,12 +916,27 @@ def confirm_invoice(db: Session, invoice: SalesInvoice, *, actor_uid: str | None
         raise BillingConflict(
             "match every line to a PO line before confirming; still unmatched: line(s) "
             + ", ".join(str(n) for n in unmatched))
+
+    # §6 SOFT over-billing flag (M1): compute BEFORE flipping status so the rollup still
+    # excludes this invoice; record it as a review reason but do NOT block.
+    over_invoiced_lines = _over_invoiced_lines(db, invoice)
+    if over_invoiced_lines:
+        pos = ", ".join(str(o["po_line_item_id"]) for o in over_invoiced_lines)
+        invoice.review_reasons = [
+            *invoice.review_reasons,
+            f"over_invoiced: confirming exceeds ordered_qty on PO line(s) {pos}",
+        ]
+
     invoice.status = SalesInvoiceStatus.CONFIRMED.value
     invoice.confirmed_by = actor_uid
     invoice.confirmed_at = datetime.now(UTC)
-    _audit(db, "billing.invoice_confirmed", actor_uid, invoice.id, {})
+    _audit(db, "billing.invoice_confirmed", actor_uid, invoice.id,
+           {"over_invoiced_lines": over_invoiced_lines})
     db.commit()
     db.refresh(invoice)
+    # Surface the structured soft-flag on the result for a direct service caller (the HTTP
+    # signal is the persisted ``over_invoiced`` review reason above).
+    invoice.over_invoiced_lines = over_invoiced_lines  # type: ignore[attr-defined]
     return invoice
 
 
@@ -840,6 +946,14 @@ def cancel_invoice(db: Session, invoice: SalesInvoice, *, actor_uid: str | None)
     """Soft-cancel an in-review invoice (status → CANCELLED). A CONFIRMED (immutable) record
     cannot be cancelled — it already drives the invoiced-qty rollup; use delete if truly
     needed. An already-cancelled invoice is a no-op conflict."""
+    # Re-read under a row lock and re-validate status (M3): mirror delete so a concurrent
+    # confirm/cancel can't race off a stale snapshot.
+    locked = db.execute(
+        select(SalesInvoice).where(SalesInvoice.id == invoice.id).with_for_update()
+    ).scalar_one_or_none()
+    if locked is None:
+        raise BillingNotFound("invoice not found")
+    invoice = locked
     if invoice.status == SalesInvoiceStatus.CONFIRMED.value:
         raise BillingConflict(
             "a confirmed invoice is immutable and cannot be cancelled")
@@ -875,6 +989,12 @@ def delete_invoice(db: Session, invoice: SalesInvoice, *, actor_uid: str | None)
             "this invoice has corrections promoted to the gold set and cannot be deleted "
             "(its gold provenance would be lost)")
 
+    # AR children (payment receipt / credit note / advance application) reference this invoice
+    # with PLAIN FKs (no cascade) — deleting would raise a raw FK 500. Refuse cleanly (M2).
+    if _has_receivable_records(db, invoice_id):
+        raise BillingConflict(
+            "invoice has receivable records and cannot be deleted")
+
     was_confirmed = locked.status == SalesInvoiceStatus.CONFIRMED.value
     source_file_id = locked.source_file_id
     # ORDER MATTERS (immediate FK checks on Postgres): delete + flush the invoice FIRST so
@@ -904,6 +1024,18 @@ def delete_invoice(db: Session, invoice: SalesInvoice, *, actor_uid: str | None)
 
 
 # --------------------------------------------------------------- helpers
+
+def _has_receivable_records(db: Session, invoice_id: int) -> bool:
+    """True when a payment receipt, credit note, or advance application references this
+    invoice (plain FKs with no cascade — the reason delete must refuse rather than 500)."""
+    for model in (PaymentReceipt, CreditNote, AdvanceApplication):
+        hit = db.execute(
+            select(model.id).where(model.invoice_id == invoice_id).limit(1)
+        ).scalar_one_or_none()
+        if hit is not None:
+            return True
+    return False
+
 
 def _read_source(db: Session, storage: Storage, file_id: int) -> bytes:
     sf = db.get(StoredFile, file_id)

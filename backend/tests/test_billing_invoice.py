@@ -24,8 +24,15 @@ from starlette.testclient import TestClient
 
 from app.db import Base, get_db
 from app.modules.billing import invoice_service as service
+from app.modules.billing import matcher
 from app.modules.billing.invoice_routes import router
-from app.modules.billing.models import SalesInvoice, SalesInvoiceCorrection
+from app.modules.billing.matcher import _Candidate
+from app.modules.billing.models import (
+    PaymentReceipt,
+    SalesInvoice,
+    SalesInvoiceCorrection,
+    SalesInvoiceLine,
+)
 from app.modules.expense.canonical import (
     CANONICAL_SCHEMA_VERSION,
     ArithmeticChecks,
@@ -38,6 +45,7 @@ from app.modules.expense.canonical import (
 )
 from app.modules.projects import service as projects_service
 from app.modules.sales_orders.models import (
+    LineStatus,
     POLineItem,
     Product,
     PurchaseOrder,
@@ -457,3 +465,124 @@ def test_missing_invoice_404(client: TestClient) -> None:
     assert client.get("/api/v1/billing/invoices/99999").status_code == 404
     _as(client, MANAGER)
     assert client.delete("/api/v1/billing/invoices/99999").status_code == 404
+
+
+# ------------------------------------------------- H1: matcher word-boundary identity
+
+def _score_of(
+    description: str, hsn: str, code: str, cand_text: str, cand_hsn: str,
+) -> float:
+    line = SalesInvoiceLine(
+        description=description, hsn_sac=hsn, unit_rate_paise=None, quantity=None)
+    cand = _Candidate(
+        po_line_id=1, code=code, hsn=cand_hsn, text=cand_text,
+        sell_price_paise=None, ordered_qty=None)
+    return matcher._score(line, cand)
+
+
+def test_matcher_identity_requires_word_boundary(client: TestClient) -> None:
+    thr = matcher.MATCH_THRESHOLD
+    # H1 (reproduced): a short code must NOT substring-match inside an unrelated word.
+    assert _score_of("Gasket GAS-100 rubber", "998877", "S1", "Sprocket", "111111") < thr
+    assert _score_of("Bearing BRG-9", "998877", "A", "Axle", "222222") < thr
+    # A legit hyphenated code STILL auto-matches at a token boundary.
+    assert _score_of("Widget WID-1", "847130", "WID-1", "Widget WID-1", "847130") >= thr
+
+
+# ------------------------------------------------- M1: invoiced_qty rollup + soft over-billing
+
+def _confirm(client: TestClient, inv_id: int) -> Any:
+    return client.patch(f"/api/v1/billing/invoices/{inv_id}/review", json={"confirm": True})
+
+
+def test_over_invoiced_soft_flag_on_second_confirm(client: TestClient) -> None:
+    widget_line_id = client.app.state.widget_line_id  # ordered_qty = 10
+    a = _upload(client, _spec(
+        invoice_number="CINV-A", grand_total_paise=600000, total_taxable_paise=600000,
+        lines=[{"description": "Widget WID-1", "hsn": "847130",
+                "unit_rate_paise": 100000, "qty": 6}],
+    )).json()["outcomes"][0]["invoice_id"]
+    ra = _confirm(client, a)
+    assert ra.status_code == 200, ra.text
+    # 6 of 10 -> under ordered_qty, no soft flag
+    assert not any("over_invoiced" in r for r in ra.json()["review_reasons"])
+
+    b = _upload(client, _spec(
+        invoice_number="CINV-B", grand_total_paise=600001, total_taxable_paise=600001,
+        lines=[{"description": "Widget WID-1", "hsn": "847130",
+                "unit_rate_paise": 100000, "qty": 6}],
+    )).json()["outcomes"][0]["invoice_id"]
+    rb = _confirm(client, b)
+    # 6 + 6 = 12 > 10 -> SOFT flag, but confirm STILL succeeds (never blocks)
+    assert rb.status_code == 200, rb.text
+    assert rb.json()["status"] == "CONFIRMED"
+    assert any("over_invoiced" in r for r in rb.json()["review_reasons"])
+
+    # the §6 rollup now sums BOTH confirmed invoices' quantities for that PO line
+    db = client.app.state.TestSession()
+    assert service.invoiced_qty_for_po_line(db, widget_line_id) == Decimal("12")
+    db.close()
+
+
+# ------------------------------------------------- M2: delete blocked by AR children
+
+def test_delete_blocked_when_receivable_records_exist(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="CINV-AR")
+                     ).json()["outcomes"][0]["invoice_id"]
+    assert _confirm(client, inv_id).status_code == 200
+    db = client.app.state.TestSession()
+    db.add(PaymentReceipt(
+        client_id=client.app.state.client_id, invoice_id=inv_id,
+        amount_paise=100000, received_on=date(2026, 6, 20)))
+    db.commit()
+    db.close()
+    _as(client, MANAGER)
+    r = client.delete(f"/api/v1/billing/invoices/{inv_id}")
+    assert r.status_code == 409, r.text
+    assert "receivable" in r.json()["detail"].lower()
+
+
+# ------------------------------------------------- M3: confirm/cancel re-validate under lock
+
+def test_confirm_and_cancel_revalidate_status_under_lock(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="CINV-LOCK")
+                     ).json()["outcomes"][0]["invoice_id"]
+    assert _confirm(client, inv_id).status_code == 200
+    # a re-confirm is rejected under the lock (status re-checked after re-read)
+    assert _confirm(client, inv_id).status_code == 409
+    # a confirmed invoice cannot be cancelled (cancel re-reads + re-validates too)
+    _as(client, MANAGER)
+    r = client.post(f"/api/v1/billing/invoices/{inv_id}/cancel")
+    assert r.status_code == 409, r.text
+
+
+# ------------------------------------------------- M4: manual match rejects a retired PO line
+
+def test_manual_match_rejects_closed_po_line(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(lines=[
+        {"description": "Mystery", "hsn": "000000", "unit_rate_paise": 1, "qty": 1}])
+    ).json()["outcomes"][0]["invoice_id"]
+    line_id = client.get(f"/api/v1/billing/invoices/{inv_id}").json()["lines"][0]["id"]
+    db = client.app.state.TestSession()
+    gl = db.get(POLineItem, client.app.state.gadget_line_id)
+    assert gl is not None
+    gl.line_status = LineStatus.SHORT_CLOSED.value
+    db.commit()
+    db.close()
+    r = client.patch(f"/api/v1/billing/invoices/{inv_id}/lines/{line_id}/match",
+                     json={"po_line_item_id": client.app.state.gadget_line_id})
+    assert r.status_code == 400, r.text
+    assert "SHORT_CLOSED" in r.json()["detail"]
+
+
+# ------------------------------------------------- L1: required field corrected to blank blocks
+
+def test_required_field_corrected_to_blank_blocks_confirm(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="CINV-BLANK")
+                     ).json()["outcomes"][0]["invoice_id"]
+    r = client.patch(f"/api/v1/billing/invoices/{inv_id}/review",
+                     json={"corrections": [{"field_path": "header.buyer_gstin", "value": ""}]})
+    assert r.status_code == 200, r.text
+    blocked = _confirm(client, inv_id)
+    assert blocked.status_code == 409, blocked.text
+    assert "buyer_gstin" in blocked.json()["detail"]

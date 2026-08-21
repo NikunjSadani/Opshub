@@ -76,6 +76,8 @@ const INVOICE_ROW = {
   id: 1,
   status: 'CONFIRMED',
   needs_ocr: false,
+  doc_type: 'INVOICE',
+  against_invoice_id: null,
   review_reasons: [],
   project_id: 10,
   project_code: 'BRI-001',
@@ -95,6 +97,18 @@ const INVOICE_ROW = {
   round_off_paise: 0,
   grand_total_paise: 1180000,
   amount_in_words: 'Eleven thousand eight hundred rupees',
+};
+
+/** A CREDIT_NOTE register row: the grand total arrives POSITIVE (30000 paise =
+ * ₹300.00) but must render as a reduction (−₹300.00) with a distinct badge. */
+const CREDIT_NOTE_ROW = {
+  ...INVOICE_ROW,
+  id: 2,
+  doc_type: 'CREDIT_NOTE',
+  against_invoice_id: 1,
+  invoice_number: 'CN-2026-007',
+  supplier_name: 'Acme Supplies Pvt Ltd',
+  grand_total_paise: 30000,
 };
 
 afterEach(() => {
@@ -129,6 +143,33 @@ describe('Register', () => {
     expect(within(row).getByText('Bank transfer')).toBeInTheDocument();
     // The row's status badge (not the filter <option>) reads Confirmed.
     expect(within(row).getByText('Confirmed')).toBeInTheDocument();
+    // An INVOICE row carries the neutral "Invoice" doc-type badge.
+    expect(within(row).getByText('Invoice')).toBeInTheDocument();
+  });
+
+  it('badges a CREDIT_NOTE and renders its amount as a signed reduction', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/expense/payment-methods')) return json(PAYMENT_METHODS);
+        if (url.includes('/expense/invoices')) return json([CREDIT_NOTE_ROW]);
+        if (url.includes('/projects')) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse();
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(<Register />);
+
+    const cell = await screen.findByText('CN-2026-007');
+    const row = cell.closest('tr') as HTMLElement;
+    // The row carries the distinct "Credit note" badge...
+    expect(within(row).getByText('Credit note')).toBeInTheDocument();
+    // ...and its POSITIVE-on-the-wire total (30000 paise) is shown as a reduction.
+    expect(within(row).getByText('−₹300.00')).toBeInTheDocument();
+    // It is NOT shown as plain positive spend.
+    expect(within(row).queryByText('₹300.00')).not.toBeInTheDocument();
   });
 });
 
@@ -203,6 +244,58 @@ describe('Upload', () => {
     expect(postedForm).not.toBeNull();
     expect((postedForm as unknown as FormData).get('project_id')).toBe('10');
     expect((postedForm as unknown as FormData).get('payment_method_id')).toBe('3');
+  });
+
+  it('posts doc_type=CREDIT_NOTE with the chosen against_invoice_id', async () => {
+    let postedForm: FormData | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.includes('/expense/payment-methods')) return json(PAYMENT_METHODS);
+        if (url.includes('/expense/invoices') && method === 'POST') {
+          postedForm = init?.body as FormData;
+          return json({
+            batch_id: 9,
+            invoice_count: 1,
+            outcomes: [
+              { file_id: 1, filename: 'cn.pdf', invoice_id: 21, status: 'EXTRACTED', review_reasons: [] },
+            ],
+          });
+        }
+        // The against-invoice picker loads existing invoices once CREDIT_NOTE is chosen.
+        if (url.includes('/expense/invoices')) return json([INVOICE_ROW]);
+        if (url.includes('/projects')) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse();
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<Upload />);
+
+    await screen.findByRole('option', { name: /BRI-001 — Q3 Trade Rewards/i });
+
+    const input = document.getElementById('expense-files') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(['c'], 'cn.pdf', { type: 'application/pdf' })] },
+    });
+    fireEvent.change(screen.getByLabelText(/project/i), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText(/payment method/i), { target: { value: '3' } });
+
+    // Switch the document type to Credit note → the against-invoice picker appears.
+    fireEvent.change(screen.getByLabelText(/document type/i), { target: { value: 'CREDIT_NOTE' } });
+    // Its options load from GET /expense/invoices; pick the existing invoice.
+    await screen.findByRole('option', { name: /INV-2026-001/i });
+    fireEvent.change(screen.getByLabelText(/against invoice/i), { target: { value: '1' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /upload 1 file/i }));
+
+    expect(await screen.findByText('cn.pdf')).toBeInTheDocument();
+    expect(postedForm).not.toBeNull();
+    // The multipart body carries the credit-note doc type + the linked invoice.
+    expect((postedForm as unknown as FormData).get('doc_type')).toBe('CREDIT_NOTE');
+    expect((postedForm as unknown as FormData).get('against_invoice_id')).toBe('1');
   });
 
   it('surfaces the delete-and-re-upload dialog on a DUPLICATE and DELETEs then re-uploads on confirm', async () => {
