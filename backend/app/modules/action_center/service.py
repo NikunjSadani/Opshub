@@ -10,10 +10,10 @@ The three categories (all dates relative to ``date.today()`` — never a hardcod
 1. procurement    — POs whose ``expected_procurement_date`` is set and falls within the
                     horizon (``<= today + horizon_days``) and are still live (status not
                     CLOSED / CANCELLED). ``days_until`` is negative when already past.
-2. invoicing_due  — POs (status not CANCELLED) that still carry unbilled units. Per line
-                    ``open_qty = ordered_qty − invoiced_qty_for_po_line − short_closed_qty``
-                    clamped at 0 (reusing billing's §6 net-of-CN rollup); a PO is included
-                    when Σ open_qty > 0. Money stays integer paise (no float).
+2. invoicing_due  — CONFIRMED / IN_PROGRESS POs that still carry unbilled units. Per OPEN
+                    line ``open_qty = ordered_qty − invoiced_qty_for_po_line`` clamped at 0
+                    (reusing billing's §6 net-of-CN rollup); retired (SHORT_CLOSED / CLOSED)
+                    lines are skipped. A PO is included when Σ open_qty > 0. Integer paise.
 3. ar_overdue     — CONFIRMED client invoices past ``due_date`` with outstanding > 0,
                     straight off ``ar_service.ar_register(overdue=True)`` plus days-overdue.
 
@@ -33,7 +33,7 @@ from sqlalchemy.orm import Session
 from app.modules.billing.ar_service import ar_register
 from app.modules.billing.invoice_service import invoiced_qty_for_po_line
 from app.modules.projects.models import Project, ProjectClient
-from app.modules.sales_orders.models import POStatus, PurchaseOrder
+from app.modules.sales_orders.models import LineStatus, POStatus, PurchaseOrder
 
 _ZERO = Decimal("0")
 
@@ -150,7 +150,8 @@ def procurement_followups(db: Session, horizon_days: int) -> list[ProcurementIte
 def invoicing_due(db: Session) -> list[InvoicingDueItem]:
     """Live POs (status CONFIRMED or IN_PROGRESS) that still have units to invoice.
 
-    Per line ``open_qty = ordered_qty − invoiced_qty_for_po_line(line.id) − short_closed_qty``,
+    Only OPEN lines carry units to invoice; SHORT_CLOSED / CLOSED lines are retired and
+    skipped. Per OPEN line ``open_qty = ordered_qty − invoiced_qty_for_po_line(line.id)``,
     clamped at 0 (the §6 rollup already nets confirmed credit notes and floors at 0); a PO is
     included when Σ open_qty > 0. Money is integer paise: ``uninvoiced_value_paise`` sums
     ``open_qty × sell_price_paise`` (Decimal) then rounds HALF_UP to paise — no float. Ordered
@@ -171,8 +172,12 @@ def invoicing_due(db: Session) -> list[InvoicingDueItem]:
         total_open = _ZERO
         total_value = _ZERO
         for line in po.lines:
-            open_qty = line.ordered_qty - invoiced_qty_for_po_line(db, line.id) \
-                - line.short_closed_qty
+            # Only an OPEN line has units left to invoice. A SHORT_CLOSED / CLOSED line is
+            # retired — never invoicing-due, even if a later credit note nets its invoiced
+            # qty back down (which would otherwise make ordered − invoiced go positive again).
+            if line.line_status != LineStatus.OPEN.value:
+                continue
+            open_qty = line.ordered_qty - invoiced_qty_for_po_line(db, line.id)
             if open_qty <= _ZERO:
                 continue
             total_open += open_qty

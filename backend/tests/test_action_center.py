@@ -13,7 +13,7 @@ The seed builds a REAL cross-module graph, one row per membership/exclusion case
     (the invoicing POs carry a null expected date, so the two axes never cross-pollute)
 
   invoicing_due (only CONFIRMED / IN_PROGRESS POs qualify):
-    * PO-BIG   CONFIRMED line ordered 10, short_closed 1, unbilled -> open 9,  value 81000
+    * PO-BIG   CONFIRMED line ordered 10, 1 invoiced, unbilled -> open 9,  value 81000
     * PO-SMALL CONFIRMED line ordered 10,                unbilled -> open 10, value 50000
     * PO-BILLED CONFIRMED line ordered 4, fully invoiced (inv qty 4) -> open 0, EXCLUDED
     * PO-DRAFT DRAFT line ordered 5, unbilled -> open 5 but EXCLUDED (not yet confirmed)
@@ -32,7 +32,7 @@ from decimal import Decimal
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -41,9 +41,15 @@ import app.main  # noqa: F401
 from app.db import Base, get_db
 from app.modules.action_center import service
 from app.modules.action_center.routes import router as action_center_router
-from app.modules.billing.models import SalesInvoice, SalesInvoiceLine
+from app.modules.billing.models import (
+    CreditNote,
+    CreditNoteLine,
+    SalesInvoice,
+    SalesInvoiceLine,
+)
 from app.modules.files.models import StoredFile
 from app.modules.projects.models import Project, ProjectClient
+from app.modules.sales_orders import po_service
 from app.modules.sales_orders.models import POLineItem, Product, PurchaseOrder
 from app.platform.auth import current_user
 from app.platform.models import Level
@@ -161,8 +167,14 @@ def _seed(TestSession: sessionmaker[Session]) -> dict[str, int]:
 
     # --- invoicing_due axis.
     po_big = _po(db, number="PO-BIG", client_id=acm.id, project_id=proj.id, expected=None)
-    _line(db, po_id=po_big.id, product_id=widget.id, ordered="10", sell_paise=9000,
-          short_closed="1")                                        # open 9 -> 81000
+    big_line = _line(db, po_id=po_big.id, product_id=widget.id, ordered="10", sell_paise=9000)
+    # 1 of 10 genuinely invoiced (a REAL partial-invoice state — an OPEN line never carries a
+    # non-zero short_closed_qty) -> open 9 -> 81000. due_date None so it is not an overdue AR row.
+    big_inv = _confirmed_invoice(db, client_id=acm.id, po_id=po_big.id, number="INV-BIG",
+                                 due_date=None, grand_total_paise=0)
+    db.add(SalesInvoiceLine(
+        invoice_id=big_inv.id, po_line_item_id=big_line.id, line_no=1,
+        description="Widget", quantity=Decimal("1"), match_status="MATCHED"))
     po_small = _po(db, number="PO-SMALL", client_id=acm.id, project_id=proj.id, expected=None)
     _line(db, po_id=po_small.id, product_id=widget.id, ordered="10", sell_paise=5000)  # 50000
 
@@ -245,7 +257,7 @@ def test_invoicing_due_membership_and_math(
     # the two open CONFIRMED POs remain.
     assert set(by_po) == {ids["po_big"], ids["po_small"]}
     assert ids["po_draft"] not in by_po
-    # PO-BIG: open = 10 − 0 invoiced − 1 short_closed = 9; value 9 × 9000.
+    # PO-BIG: open = 10 − 1 invoiced = 9; value 9 × 9000.
     assert by_po[ids["po_big"]].uninvoiced_qty == Decimal("9")
     assert by_po[ids["po_big"]].uninvoiced_value_paise == 81000
     # PO-SMALL: open 10; value 10 × 5000.
@@ -261,6 +273,48 @@ def test_invoicing_due_ordered_by_value_desc(
     rows = service.invoicing_due(db)
     db.close()
     assert [r.po_id for r in rows] == [ids["po_big"], ids["po_small"]]  # 81000 > 50000
+
+
+def test_short_close_retires_remaining_open_and_excludes_from_invoicing_due(
+    env: tuple[TestClient, sessionmaker[Session], dict[str, int]]
+) -> None:
+    """Short-closing a partially-invoiced line records the REMAINING-OPEN qty
+    (ordered − invoiced), not the full ordered qty — and the retired line is excluded from
+    invoicing-due permanently, even after a credit note nets its invoiced qty back to zero
+    (which, without the OPEN-line guard, would reopen ordered − invoiced as positive)."""
+    _client, TestSession, ids = env
+    db = TestSession()
+    widget_id = db.execute(select(Product.id).where(Product.code == "WID-1")).scalar_one()
+
+    # A CONFIRMED PO: line ordered 10, 4 genuinely invoiced -> 6 open to invoice.
+    po = _po(db, number="PO-SC", client_id=ids["acm"], project_id=ids["proj"], expected=None)
+    line = _line(db, po_id=po.id, product_id=widget_id, ordered="10", sell_paise=5000)
+    inv = _confirmed_invoice(db, client_id=ids["acm"], po_id=po.id, number="INV-SC",
+                             due_date=None, grand_total_paise=0)
+    db.add(SalesInvoiceLine(
+        invoice_id=inv.id, po_line_item_id=line.id, line_no=1,
+        description="Widget", quantity=Decimal("4"), match_status="MATCHED"))
+    db.flush()
+    assert po.id in {r.po_id for r in service.invoicing_due(db)}  # 6 open -> due
+
+    # Short-close the line: retire only the remaining-open 6 (NOT the full ordered 10).
+    po_service.short_close(db, po, reason="vendor discontinued", line_id=line.id)
+    db.flush()
+    assert line.short_closed_qty == Decimal("6")
+    assert line.line_status == "SHORT_CLOSED"
+    assert po.id not in {r.po_id for r in service.invoicing_due(db)}  # retired -> excluded
+
+    # A confirmed credit note credits back all 4 invoiced units. invoiced_qty nets to 0, so
+    # ordered − invoiced = 10 > 0 — yet the retired line must STAY out of invoicing-due.
+    cn = CreditNote(invoice_id=inv.id, client_id=ids["acm"], source_file_id=_stored_file(db).id,
+                    cn_number="CN-SC", status="CONFIRMED")
+    db.add(cn)
+    db.flush()
+    db.add(CreditNoteLine(cn_id=cn.id, po_line_item_id=line.id, line_no=1,
+                          description="Widget", quantity=Decimal("4"), match_status="MATCHED"))
+    db.flush()
+    assert po.id not in {r.po_id for r in service.invoicing_due(db)}  # still excluded
+    db.close()
 
 
 # --------------------------------------------------------------- service: ar_overdue

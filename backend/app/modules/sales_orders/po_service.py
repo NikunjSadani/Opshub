@@ -567,9 +567,10 @@ def short_close(
 ) -> PurchaseOrder:
     """Short-close open-to-invoice quantity (retire, never delete).
 
-    With ``line_id``: that one OPEN line becomes SHORT_CLOSED with
-    ``short_closed_qty = ordered_qty``. Without it: EVERY OPEN line is short-closed
-    and the whole PO moves to CLOSED. Blocked on a CANCELLED/CLOSED PO. Audited."""
+    With ``line_id``: that one OPEN line becomes SHORT_CLOSED, retiring its
+    REMAINING-OPEN qty (``ordered_qty − already-invoiced``). Without it: EVERY OPEN line
+    is short-closed and the whole PO moves to CLOSED. Blocked on a CANCELLED/CLOSED PO.
+    Audited."""
     reason = reason.strip()
     if not reason:
         raise POValidationError("reason is required")
@@ -584,13 +585,13 @@ def short_close(
             raise PONotFound(f"line {line_id} is not on this purchase order")
         if line.line_status != LineStatus.OPEN.value:
             raise POValidationError(f"line {line_id} is not OPEN")
-        _short_close_line(line, reason)
+        _short_close_line(db, line, reason)
     else:
         open_lines = [ln for ln in po.lines if ln.line_status == LineStatus.OPEN.value]
         if not open_lines:
             raise POValidationError("this purchase order has no OPEN lines to short-close")
         for line in open_lines:
-            _short_close_line(line, reason)
+            _short_close_line(db, line, reason)
         po.status = POStatus.CLOSED.value
         po.close_reason = reason
         po.closed_by = actor_uid
@@ -608,9 +609,14 @@ def short_close(
     return po
 
 
-def _short_close_line(line: POLineItem, reason: str) -> None:
+def _short_close_line(db: Session, line: POLineItem, reason: str) -> None:
+    # Retire only the REMAINING-OPEN qty (ordered − already-invoiced), clamped ≥ 0 — NOT the
+    # full ordered qty. A line invoiced 4 of 10 retires 6. Lazy import: billing.invoice_service
+    # imports po_service (the confirm hook), so a load-time import here would cycle.
+    from app.modules.billing.invoice_service import invoiced_qty_for_po_line
+    remaining = line.ordered_qty - invoiced_qty_for_po_line(db, line.id)
     line.line_status = LineStatus.SHORT_CLOSED.value
-    line.short_closed_qty = line.ordered_qty
+    line.short_closed_qty = remaining if remaining > Decimal("0") else Decimal("0")
     line.short_close_reason = reason
 
 
