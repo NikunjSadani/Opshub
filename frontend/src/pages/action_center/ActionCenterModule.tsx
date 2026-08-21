@@ -226,12 +226,12 @@ export function ActionCenterModule() {
             <CountTile
               label="Procurement follow-ups"
               value={query.data.counts.procurement}
-              hint={`Due within ${DEFAULT_HORIZON_DAYS} days`}
+              hint={`Due within ${DEFAULT_HORIZON_DAYS} days or overdue`}
             />
             <CountTile
               label="Invoicing due"
               value={query.data.counts.invoicing_due}
-              hint="Delivered but not yet invoiced"
+              hint="Ordered but not yet invoiced"
             />
             <CountTile
               label="Overdue receivables"
