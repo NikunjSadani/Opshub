@@ -48,7 +48,7 @@ Critical path: Stage 0 (me) → PO+line-items BE (#3, heaviest) → integrate/ga
 
 **Wave 1 COMPLETE (2026-08-20).** Gate: BE ruff·mypy·**pytest 463**·no-drift · FE typecheck·build·**vitest 100** · **E2E 11/11** · runtime-verified in-browser (live data, 0 console errors). Commits `44482d9` (BE), `b631c83` (FE + BE audit fixes), `471b007` (UI/UX + E2E fixes). Audits found + fixed **1 HIGH backend** (cross-client project linkage) + **2 HIGH frontend** (add-first-child, stale detail) + 8 MED/LOW.
 
-**Owner-decision residual (surfaced, NOT auto-deferred):** L1 — concurrent "add default GSTIN/address/contact" can leave two defaults (no partial-unique DB constraint; `_unset_sibling_defaults` demotes after insert). Cosmetic, internal-tool low-concurrency. Recommended follow-up: a partial unique index `WHERE is_default` (a small migration). Owner to decide fix-now vs accept.
+**Owner-decision residual (L1) — ✅ RESOLVED (`537d7e0`):** the concurrent "two defaults" race was closed by partial unique indexes `WHERE is_default` on `client_gstin`/`client_address`/`client_contact` (migration `15c87b87e5af`) + demote-sibling-first. No longer open.
 
 ## Known long poles / risks
 
