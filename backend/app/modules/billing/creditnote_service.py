@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any, cast
 
 from sqlalchemy import Select, and_, or_, select
@@ -54,7 +55,6 @@ from app.modules.expense.canonical import ExtractedInvoice
 from app.modules.expense.canonical import Field as CField
 from app.modules.expense.extractor import Extractor, get_extractor
 from app.modules.files.models import StoredFile
-from app.modules.sales_orders.models import POLineItem
 from app.platform import audit
 from app.platform.storage import Storage, get_storage
 
@@ -450,8 +450,29 @@ def _upload_status(cn: CreditNote, extracted: ExtractedInvoice) -> str:
 
 # --------------------------------------------------------------- matching
 
+def _billed_po_line_ids(db: Session, invoice_id: int) -> set[int]:
+    """The ``po_line_item`` ids the REFERENCED invoice actually BILLED (its lines' non-null
+    ``po_line_item_id``s). A credit note reverses units a SPECIFIC invoice billed, so it may only
+    credit THESE lines — never the PO's other OPEN lines that this invoice never touched."""
+    return {
+        pid for pid in db.execute(
+            select(SalesInvoiceLine.po_line_item_id).where(
+                SalesInvoiceLine.invoice_id == invoice_id,
+                SalesInvoiceLine.po_line_item_id.is_not(None),
+            )
+        ).scalars()
+        if pid is not None
+    }
+
+
 def match_credit_note(db: Session, cn: CreditNote) -> None:
-    """Auto-match every UNMATCHED line of ``cn`` to a PO line on the CREDITED invoice's ``po_id``.
+    """Auto-match every UNMATCHED line of ``cn`` to a PO line the REFERENCED invoice BILLED.
+
+    Candidates are the ``po_line_item`` rows the credited invoice actually billed (its lines'
+    non-null ``po_line_item_id``s), NOT the PO's OPEN lines — a credit note reverses units a
+    specific invoice billed, and those lines are frequently CLOSED / SHORT_CLOSED (so
+    ``line_status`` is deliberately ignored). This both scopes the auto-match to the correct set
+    and closes the "matcher only sees OPEN lines" gap.
 
     Reuses the invoice matcher's deterministic scoring (word-boundary identity, 0.60 threshold,
     greedy 1:1). A CreditNoteLine has only description + quantity, so identity/price fall back to
@@ -466,7 +487,7 @@ def match_credit_note(db: Session, cn: CreditNote) -> None:
     if not pending:
         return
 
-    candidates = matcher._load_candidates(db, invoice.po_id)
+    candidates = matcher.load_candidates_by_ids(db, _billed_po_line_ids(db, cn.invoice_id))
     taken: set[int] = {
         ln.po_line_item_id for ln in cn.lines if ln.po_line_item_id is not None
     }
@@ -512,11 +533,13 @@ def apply_manual_cn_match(
     db: Session, cn: CreditNote, line_id: int, po_line_item_id: int,
     *, actor_uid: str | None,
 ) -> CreditNote:
-    """Map one CN line to a specific PO line (status → MANUAL). The PO line must exist and belong
-    to the CREDITED invoice's PO (else 400); an unknown CN line is 404.
+    """Map one CN line to a specific PO line (status → MANUAL). The target must be a PO line the
+    REFERENCED invoice actually BILLED (else 400); an unknown CN line is 404.
 
-    Unlike the invoice lane a CN may target ANY line on that PO — even a CLOSED / SHORT_CLOSED one
-    — because a credit note REVERSES billing (it can return units on a line that was retired)."""
+    A credit note may target a CLOSED / SHORT_CLOSED billed line — ``line_status`` is ignored —
+    because a credit note REVERSES billing (it returns units on a line that was retired). But it
+    may ONLY credit a line the referenced invoice billed: crediting a PO line that invoice never
+    touched would drive that line's ``invoiced_qty`` negative (misattribution)."""
     if cn.status not in _EDITABLE_STATUSES:
         raise BillingConflict(
             f"credit note is {cn.status}; matching applies only to in-review credit notes")
@@ -526,10 +549,10 @@ def apply_manual_cn_match(
     invoice = db.get(SalesInvoice, cn.invoice_id)
     if invoice is None or invoice.po_id is None:
         raise BillingBadRequest("the credited invoice has no PO to match against")
-    po_line = db.get(POLineItem, po_line_item_id)
-    if po_line is None or po_line.po_id != invoice.po_id:
+    if po_line_item_id not in _billed_po_line_ids(db, cn.invoice_id):
         raise BillingBadRequest(
-            "the PO line does not exist or does not belong to the credited invoice's PO")
+            "the PO line was not billed by the credited invoice; a credit note can only credit "
+            "a line that invoice actually billed")
 
     line.po_line_item_id = po_line_item_id
     line.match_status = LineMatchStatus.MANUAL.value
@@ -635,6 +658,79 @@ def _resync_number(db: Session, cn: CreditNote) -> None:
             f"credit-note number {cn.cn_number} already exists for this client (#{clash})")
 
 
+# --------------------------------------------------- over-credit soft flag (§6)
+
+def _billed_qty_by_po_line(db: Session, invoice_id: int) -> dict[int, Decimal]:
+    """{po_line_item_id -> Σ the REFERENCED invoice's line qty on it} — what that invoice billed
+    per PO line (matched lines only; a NULL qty contributes 0). The ceiling a credit note may
+    reverse on each line."""
+    out: dict[int, Decimal] = {}
+    for pid, qty in db.execute(
+        select(SalesInvoiceLine.po_line_item_id, SalesInvoiceLine.quantity).where(
+            SalesInvoiceLine.invoice_id == invoice_id,
+            SalesInvoiceLine.po_line_item_id.is_not(None),
+        )
+    ):
+        if pid is not None:
+            out[pid] = out.get(pid, Decimal("0")) + (qty or Decimal("0"))
+    return out
+
+
+def _confirmed_cn_credit_by_po_line(
+    db: Session, invoice_id: int, exclude_cn_id: int,
+) -> dict[int, Decimal]:
+    """{po_line_item_id -> Σ already-CONFIRMED credit-note qty on it} across the OTHER credit
+    notes referencing the same invoice (this CN excluded — it is not yet confirmed). NULL qty
+    contributes 0."""
+    out: dict[int, Decimal] = {}
+    for pid, qty in db.execute(
+        select(CreditNoteLine.po_line_item_id, CreditNoteLine.quantity)
+        .join(CreditNote, CreditNote.id == CreditNoteLine.cn_id)
+        .where(
+            CreditNote.invoice_id == invoice_id,
+            CreditNote.status == CreditNoteStatus.CONFIRMED.value,
+            CreditNote.id != exclude_cn_id,
+            CreditNoteLine.po_line_item_id.is_not(None),
+        )
+    ):
+        if pid is not None:
+            out[pid] = out.get(pid, Decimal("0")) + (qty or Decimal("0"))
+    return out
+
+
+def _over_credited_lines(db: Session, cn: CreditNote) -> list[dict[str, Any]]:
+    """The matched CN lines whose confirmation would push the cumulative confirmed-CN credited
+    qty for their PO line ABOVE what the REFERENCED invoice billed on it (§6 soft over-credit
+    check). ``cn`` is NOT yet CONFIRMED, so it is excluded from the already-credited total; the
+    new total is ``already_credited + this CN's own qty for that PO line``. Several CN lines can
+    map to one PO line, so this CN's quantities are summed per PO line first. Returns [] when
+    nothing over-credits."""
+    matched = (LineMatchStatus.MATCHED.value, LineMatchStatus.MANUAL.value)
+    this_qty: dict[int, Decimal] = {}
+    line_nos: dict[int, list[int]] = {}
+    for ln in cn.lines:
+        if ln.po_line_item_id is None or ln.match_status not in matched:
+            continue
+        this_qty[ln.po_line_item_id] = (
+            this_qty.get(ln.po_line_item_id, Decimal("0")) + (ln.quantity or Decimal("0")))
+        line_nos.setdefault(ln.po_line_item_id, []).append(ln.line_no)
+
+    billed = _billed_qty_by_po_line(db, cn.invoice_id)
+    already = _confirmed_cn_credit_by_po_line(db, cn.invoice_id, cn.id)
+    over: list[dict[str, Any]] = []
+    for po_line_id, added in this_qty.items():
+        billed_qty = billed.get(po_line_id, Decimal("0"))
+        credited_total = already.get(po_line_id, Decimal("0")) + added
+        if credited_total > billed_qty:
+            over.append({
+                "po_line_item_id": po_line_id,
+                "line_nos": sorted(line_nos[po_line_id]),
+                "billed_qty": str(billed_qty),
+                "credited_qty": str(credited_total),
+            })
+    return over
+
+
 # --------------------------------------------------------------- confirm
 
 def confirm_credit_note(
@@ -645,7 +741,12 @@ def confirm_credit_note(
 
     Blocked (409) unless: the CREDITED invoice is itself CONFIRMED (a CN can't credit an
     unconfirmed / cancelled invoice); at least one line; every required header field present; and
-    every line MATCHED or MANUAL (mapped to a PO line)."""
+    every line MATCHED or MANUAL (mapped to a PO line).
+
+    Over-crediting (confirming would push a PO line's cumulative confirmed-CN credited qty above
+    what the referenced invoice billed on it) is a SOFT flag only — it appends an ``over_credited``
+    note to ``reason`` + the audit and returns the offending lines on the result, never blocks
+    (the accounting software is the source of truth)."""
     # Re-read under a row lock + re-validate status (a concurrent confirm/cancel/delete must not
     # race off a stale snapshot; mirrors the invoice lane).
     locked = db.execute(
@@ -681,12 +782,24 @@ def confirm_credit_note(
             "match every line to a PO line before confirming; still unmatched: line(s) "
             + ", ".join(str(n) for n in unmatched))
 
+    # §6 SOFT over-credit flag: compute BEFORE flipping status so the already-credited rollup
+    # still excludes this CN; record it as a note + audit but do NOT block.
+    over_credited_lines = _over_credited_lines(db, cn)
+    if over_credited_lines:
+        pos = ", ".join(str(o["po_line_item_id"]) for o in over_credited_lines)
+        flag = f"over_credited: confirming exceeds billed qty on PO line(s) {pos}"
+        cn.reason = (flag if not cn.reason else f"{cn.reason}; {flag}")[:500]
+
     cn.status = CreditNoteStatus.CONFIRMED.value
     cn.confirmed_by = actor_uid
     cn.confirmed_at = datetime.now(UTC)
-    _audit(db, "billing.credit_note_confirmed", actor_uid, cn.id, {"invoice_id": cn.invoice_id})
+    _audit(db, "billing.credit_note_confirmed", actor_uid, cn.id,
+           {"invoice_id": cn.invoice_id, "over_credited_lines": over_credited_lines})
     db.commit()
     db.refresh(cn)
+    # Surface the structured soft-flag on the result for a direct service caller (the HTTP
+    # signal is the persisted ``over_credited`` note in ``reason`` above).
+    cn.over_credited_lines = over_credited_lines  # type: ignore[attr-defined]
     return cn
 
 

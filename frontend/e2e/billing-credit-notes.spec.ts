@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
  *   2. assert it lands in the CN register against that invoice,
  *   3. open the CN detail, manual-map its line to the referenced invoice's PO line, then
  *      Confirm (unlocks only because the referenced invoice is CONFIRMED + every line mapped),
- *   4. downstream: the invoice's AR outstanding drops by the full credit (→ Paid) AND the
+ *   4. downstream: the invoice's AR outstanding drops by the full credit (stays UNPAID — cash-based) AND the
  *      project's Finance revenue nets to zero (invoice taxable − equal credit-note taxable).
  *
  * SHARED-DB ORDERING (why this file is named `billing-credit-notes`): every spec that
@@ -217,17 +217,17 @@ test.describe('Billing — client credit-note capture (admin end-to-end)', () =>
     await expect(page.getByRole('heading', { name: `Invoice ${INVOICE_NUMBER}` })).toBeVisible();
 
     // The confirmed credit note (₹19,470 grand total) fully credits the ₹19,470 invoice:
-    // Credited = ₹19,470.00, Outstanding = ₹0.00, and the invoice reads Paid.
+    // Credited = ₹19,470.00, Outstanding = ₹0.00. Status reflects CASH (owner decision):
+    // no payment was made, so a fully-CREDITED-but-unpaid invoice stays UNPAID (credits
+    // reduce what's owed but are not "paid").
     const creditedStat = page.getByText('Credited').locator('xpath=following-sibling::p[1]');
     await expect(creditedStat).toHaveText(`₹${GRAND_TOTAL}`);
     const outstandingStat = page
       .getByText('Outstanding', { exact: true })
       .locator('xpath=following-sibling::p[1]');
     await expect(outstandingStat).toHaveText('₹0.00');
-    // The invoice's derived AR status is now Paid (scope to the Status stat's badge — the
-    // separate "Paid" stat LABEL also reads "Paid").
     const statusBadge = page.getByText('Status', { exact: true }).locator('xpath=following-sibling::div[1]');
-    await expect(statusBadge).toContainText('Paid');
+    await expect(statusBadge).toContainText('Unpaid');
 
     // ================= 4b. downstream: Finance revenue nets to zero =================
     await page.goto('/m/finance');

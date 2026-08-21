@@ -145,6 +145,20 @@ def _score(line: SalesInvoiceLine, cand: _Candidate) -> float:
     )
 
 
+def _candidate_from(po_line: POLineItem, product: Product) -> _Candidate:
+    """One scorable candidate from a (PO line, Product) pair."""
+    return _Candidate(
+        po_line_id=po_line.id,
+        code=product.code,
+        hsn=product.hsn,
+        text=" ".join(filter(None, (
+            product.name, product.brand, product.model_number, po_line.description,
+        ))),
+        sell_price_paise=po_line.sell_price_paise,
+        ordered_qty=po_line.ordered_qty,
+    )
+
+
 def _load_candidates(db: Session, po_id: int) -> list[_Candidate]:
     """OPEN PO lines for ``po_id`` with their Product identity, ready to score."""
     rows = db.execute(
@@ -153,19 +167,23 @@ def _load_candidates(db: Session, po_id: int) -> list[_Candidate]:
         .where(POLineItem.po_id == po_id, POLineItem.line_status == LineStatus.OPEN.value)
         .order_by(POLineItem.id)
     ).all()
-    candidates: list[_Candidate] = []
-    for po_line, product in rows:
-        candidates.append(_Candidate(
-            po_line_id=po_line.id,
-            code=product.code,
-            hsn=product.hsn,
-            text=" ".join(filter(None, (
-                product.name, product.brand, product.model_number, po_line.description,
-            ))),
-            sell_price_paise=po_line.sell_price_paise,
-            ordered_qty=po_line.ordered_qty,
-        ))
-    return candidates
+    return [_candidate_from(po_line, product) for po_line, product in rows]
+
+
+def load_candidates_by_ids(db: Session, po_line_ids: set[int]) -> list[_Candidate]:
+    """PO lines by EXPLICIT id (IGNORING ``line_status``) with their Product identity, ready to
+    score. Used by the credit-note matcher: a CN credits the specific lines its referenced
+    invoice billed, which are frequently CLOSED / SHORT_CLOSED — ``line_status`` must NOT filter
+    them out (that is exactly the set a credit note legitimately reverses)."""
+    if not po_line_ids:
+        return []
+    rows = db.execute(
+        select(POLineItem, Product)
+        .join(Product, Product.id == POLineItem.product_id)
+        .where(POLineItem.id.in_(po_line_ids))
+        .order_by(POLineItem.id)
+    ).all()
+    return [_candidate_from(po_line, product) for po_line, product in rows]
 
 
 def match_invoice(db: Session, invoice: SalesInvoice) -> None:

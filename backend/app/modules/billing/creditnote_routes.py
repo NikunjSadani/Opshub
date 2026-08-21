@@ -38,7 +38,12 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_db
 from app.modules.billing import creditnote_service as service
-from app.modules.billing.models import CreditNote, CreditNoteStatus, SalesInvoice
+from app.modules.billing.models import (
+    CreditNote,
+    CreditNoteStatus,
+    SalesInvoice,
+    SalesInvoiceStatus,
+)
 from app.modules.files.models import StoredFile
 from app.modules.sales_orders.models import POLineItem, Product
 from app.platform import rbac
@@ -240,6 +245,12 @@ def upload_credit_note(
     invoice = db.get(SalesInvoice, invoice_id)
     if invoice is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "credited invoice not found")
+    # A credit note reverses a CONFIRMED invoice — reject uploading one against a non-confirmed
+    # invoice (enforces confirm-then-credit order; avoids a stray CN pinning a draft invoice).
+    if invoice.status != SalesInvoiceStatus.CONFIRMED.value:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"the credited invoice is {invoice.status}; confirm it before crediting it")
 
     max_bytes = get_settings().max_upload_bytes
     storage = get_storage()

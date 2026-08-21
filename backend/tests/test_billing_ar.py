@@ -280,13 +280,22 @@ def test_unapply_advance_reopens_outstanding(client: TestClient) -> None:
 
 # ---------------------------------------------------------------- credit notes
 
-def test_credit_note_reduces_outstanding(client: TestClient) -> None:
+def test_credit_note_reduces_outstanding_but_status_stays_unpaid(client: TestClient) -> None:
+    # Owner decision: status reflects CASH. A credit note reduces outstanding but is NOT
+    # a payment, so a credited-but-unpaid invoice stays UNPAID (visible to collections);
+    # only a real payment/advance moves it to PART_PAID.
     inv = _seed_invoice(client, number="INV-10", grand_total=100000, due_offset_days=15)
     _seed_credit_note(client, invoice_id=inv, number="CN-1", amount=30000)
     ar = client.get(f"/api/v1/billing/invoices/{inv}/ar").json()
     assert ar["credited_paise"] == 30000
     assert ar["outstanding_paise"] == 70000
-    assert ar["status"] == "PART_PAID"
+    assert ar["status"] == "UNPAID"  # credited != paid
+    # A cash payment now DOES move it to PART_PAID.
+    assert client.post("/api/v1/billing/payments",
+                       json={"invoice_id": inv, "amount_paise": 20000}).status_code == 201
+    ar2 = client.get(f"/api/v1/billing/invoices/{inv}/ar").json()
+    assert ar2["outstanding_paise"] == 50000
+    assert ar2["status"] == "PART_PAID"
 
 
 # ---------------------------------------------------------------- aging buckets

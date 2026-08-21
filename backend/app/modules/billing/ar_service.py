@@ -225,14 +225,17 @@ def invoice_ar(db: Session, invoice: SalesInvoice, *, today: date | None = None)
     paid = paid_paise(db, invoice.id)
     applied = applied_paise(db, invoice.id)
     outstanding = total - credited - paid - applied
-    settled = credited + paid + applied
-
-    if outstanding <= 0:
-        status = STATUS_PAID
-    elif settled > 0:
-        status = STATUS_PART_PAID
+    # Status reflects actual CASH collected (payments + applied advances) — credit notes
+    # reduce the outstanding but are NOT "payment", so a credited-but-unpaid invoice stays
+    # UNPAID (owner decision) and remains visible to a collections/unpaid view; only cash
+    # moves it to PART_PAID/PAID. (`credited_paise` is surfaced separately on the row.)
+    cash = paid + applied
+    if cash == 0:
+        status = STATUS_UNPAID          # credits alone never count as paid
+    elif outstanding <= 0:
+        status = STATUS_PAID            # cash covered the balance net of credits
     else:
-        status = STATUS_UNPAID
+        status = STATUS_PART_PAID
 
     overdue = outstanding > 0 and invoice.due_date is not None and invoice.due_date < today
 

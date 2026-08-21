@@ -3,9 +3,10 @@
 Same harness (in-memory sqlite StaticPool, FK-pragma ON, overridden get_db + current_user,
 FILES_DIR -> tmp) and the same FAKE extractor injected via `creditnote_service.get_extractor`,
 so each case controls exactly what the "PDF" yields. The seed builds a real money graph to
-credit AGAINST: a client + project + PO (two products) and a CONFIRMED billing_invoice whose
-one line is MATCHED to the widget PO line (qty 6) — plus an UPLOADED invoice to prove a CN
-can't confirm against an unconfirmed invoice.
+credit AGAINST: a client + project + PO (three products) and a CONFIRMED billing_invoice that
+BILLED two of them — the widget PO line (qty 6) and the gadget PO line (qty 3) — while the
+third "gizmo" PO line is NEVER billed (so a CN may not credit it). Plus an UPLOADED invoice to
+prove a CN can't confirm against an unconfirmed invoice.
 """
 from __future__ import annotations
 
@@ -182,7 +183,8 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     seed.flush()
     widget = Product(code="WID-1", name="Widget", hsn="847130", uom="NOS")
     gadget = Product(code="GAD-2", name="Gadget", hsn="852990", uom="NOS")
-    seed.add_all([widget, gadget])
+    gizmo = Product(code="GIZ-3", name="Gizmo", hsn="853890", uom="NOS")
+    seed.add_all([widget, gadget, gizmo])
     seed.flush()
     po = PurchaseOrder(
         po_number="PO-1", client_id=seed_client.id, project_id=project.id,
@@ -195,7 +197,11 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     gadget_line = POLineItem(
         po_id=po.id, product_id=gadget.id, description="Gadget GAD-2", uom="NOS",
         ordered_qty=Decimal("5"), cost_price_paise=40000, sell_price_paise=50000)
-    seed.add_all([widget_line, gadget_line])
+    # A PO line the CONFIRMED invoice never bills — a CN may NOT credit it.
+    gizmo_line = POLineItem(
+        po_id=po.id, product_id=gizmo.id, description="Gizmo GIZ-3", uom="NOS",
+        ordered_qty=Decimal("7"), cost_price_paise=30000, sell_price_paise=40000)
+    seed.add_all([widget_line, gadget_line, gizmo_line])
     seed.flush()
 
     inv_file = StoredFile(
@@ -204,8 +210,9 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     seed.add(inv_file)
     seed.flush()
 
-    # A CONFIRMED billing_invoice whose one line is MATCHED to the widget PO line (qty 6),
-    # so invoiced_qty_for_po_line(widget_line) == 6 before any credit note confirms.
+    # A CONFIRMED billing_invoice that BILLED two lines: the widget PO line (qty 6) and the
+    # gadget PO line (qty 3). So invoiced_qty_for_po_line(widget_line) == 6 before any CN
+    # confirms; the billed set the CN may credit is {widget_line, gadget_line} (NOT gizmo_line).
     conf_inv = SalesInvoice(
         client_id=seed_client.id, po_id=po.id, source_file_id=inv_file.id,
         invoice_number="CINV-CONF", invoice_date=date(2026, 6, 10),
@@ -213,9 +220,14 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
         status=SalesInvoiceStatus.CONFIRMED.value)
     seed.add(conf_inv)
     seed.flush()
-    seed.add(SalesInvoiceLine(
-        invoice_id=conf_inv.id, po_line_item_id=widget_line.id, line_no=1,
-        description="Widget WID-1", quantity=Decimal("6"), match_status="MATCHED"))
+    seed.add_all([
+        SalesInvoiceLine(
+            invoice_id=conf_inv.id, po_line_item_id=widget_line.id, line_no=1,
+            description="Widget WID-1", quantity=Decimal("6"), match_status="MATCHED"),
+        SalesInvoiceLine(
+            invoice_id=conf_inv.id, po_line_item_id=gadget_line.id, line_no=2,
+            description="Gadget GAD-2", quantity=Decimal("3"), match_status="MATCHED"),
+    ])
     # An UPLOADED (unconfirmed) invoice — a CN may not confirm against it.
     draft_inv = SalesInvoice(
         client_id=seed_client.id, po_id=po.id, source_file_id=inv_file.id,
@@ -226,6 +238,7 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     seed.commit()
     client_id = seed_client.id
     widget_line_id, gadget_line_id = widget_line.id, gadget_line.id
+    gizmo_line_id = gizmo_line.id
     conf_inv_id, draft_inv_id = conf_inv.id, draft_inv.id
     seed.close()
 
@@ -244,6 +257,7 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     app.state.client_id = client_id
     app.state.widget_line_id = widget_line_id
     app.state.gadget_line_id = gadget_line_id
+    app.state.gizmo_line_id = gizmo_line_id
     app.state.conf_inv_id = conf_inv_id
     app.state.draft_inv_id = draft_inv_id
     yield TestClient(app)
@@ -310,14 +324,16 @@ def test_manual_match_leftover_line(client: TestClient) -> None:
     assert mapped["po_line_item_id"] == client.app.state.gadget_line_id
 
 
-def test_confirm_blocked_unless_referenced_invoice_confirmed(client: TestClient) -> None:
-    # A CN against the UPLOADED invoice auto-matches, but confirm is refused (409): a credit
-    # note can only credit a CONFIRMED invoice.
-    cn_id = _upload(client, _spec(cn_number="CCN-DRAFT"),
-                    invoice_id=client.app.state.draft_inv_id).json()["outcomes"][0]["cn_id"]
-    blocked = _confirm(client, cn_id)
-    assert blocked.status_code == 409, blocked.text
-    assert "confirmed invoice" in blocked.json()["detail"].lower()
+def test_upload_rejected_against_unconfirmed_invoice(client: TestClient) -> None:
+    # F4: a credit note reverses a CONFIRMED invoice — uploading one against the UPLOADED
+    # (non-confirmed) invoice is rejected up front (400), enforcing confirm-then-credit order.
+    r = _upload(client, _spec(cn_number="CCN-DRAFT"), invoice_id=client.app.state.draft_inv_id)
+    assert r.status_code == 400, r.text
+    assert "confirm it before crediting" in r.json()["detail"].lower()
+    # ...and nothing was persisted against that draft invoice.
+    reg = client.get(
+        f"/api/v1/billing/credit-notes?invoice_id={client.app.state.draft_inv_id}").json()
+    assert reg == []
 
 
 def test_confirm_sets_confirmed_and_is_immutable(client: TestClient) -> None:
@@ -417,3 +433,40 @@ def test_manual_match_rejects_cross_po_line(client: TestClient) -> None:
     r = client.patch(f"/api/v1/billing/credit-notes/{cn_id}/lines/{line_id}/match",
                      json={"po_line_item_id": 999999})
     assert r.status_code == 400, r.text
+
+
+def test_cn_cannot_credit_line_the_invoice_did_not_bill(client: TestClient) -> None:
+    # F1: the gizmo PO line exists on the same PO but the credited invoice never billed it.
+    # (a) auto-match: a gizmo-looking CN line is NOT a candidate -> stays UNMATCHED.
+    cn_id = _upload(client, _spec(cn_number="CCN-GIZ", lines=[
+        {"description": "Gizmo GIZ-3", "hsn": "853890", "unit_rate_paise": 40000, "qty": 1}])
+    ).json()["outcomes"][0]["cn_id"]
+    detail = client.get(f"/api/v1/billing/credit-notes/{cn_id}").json()
+    assert detail["status"] == "NEEDS_MATCH"
+    line = detail["lines"][0]
+    assert line["match_status"] == "UNMATCHED"
+
+    # (b) manual match to that un-billed gizmo PO line is rejected (400).
+    r = client.patch(f"/api/v1/billing/credit-notes/{cn_id}/lines/{line['id']}/match",
+                     json={"po_line_item_id": client.app.state.gizmo_line_id})
+    assert r.status_code == 400, r.text
+    assert "not billed by the credited invoice" in r.json()["detail"].lower()
+
+
+def test_over_credit_soft_flag_and_invoiced_qty_floors_at_zero(client: TestClient) -> None:
+    # F1: the credited invoice billed 6 widget units; credit 8 (more than billed).
+    widget_line_id = client.app.state.widget_line_id
+    cn_id = _upload(client, _spec(cn_number="CCN-OVER", lines=[
+        {"description": "Widget WID-1", "hsn": "847130", "unit_rate_paise": 100000, "qty": 8}])
+    ).json()["outcomes"][0]["cn_id"]
+    r = _confirm(client, cn_id)
+    # SOFT flag — confirm still SUCCEEDS (never blocks; accounting software is source of truth).
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "CONFIRMED"
+    assert "over_credited" in (r.json()["reason"] or "")
+
+    # The §6 rollup FLOORS at 0 (6 − 8 = −2 would be negative) so the over-invoice baseline
+    # can't be driven below zero.
+    db = client.app.state.TestSession()
+    assert invoice_service.invoiced_qty_for_po_line(db, widget_line_id) == Decimal("0")
+    db.close()

@@ -15,7 +15,7 @@ SEPARATE single-grain aggregate so no join ever fan-outs and double-counts money
   * Cost         = Σ CONFIRMED ``expense_invoice.total_taxable_paise`` grouped by
                    ``expense_invoice.project_id``, SIGN-AWARE on ``doc_type``: an INVOICE
                    adds, a vendor CREDIT_NOTE subtracts (no join at all).
-  * Margin       = revenue − cost;  margin % = margin / revenue * 100 (None if revenue 0).
+  * Margin       = revenue − cost;  margin % = margin / revenue * 100 (None if revenue ≤ 0).
 
 The GEN / GEN-001 "General / Overhead" project (its client's code is ``GEN``) is the
 general bucket for overhead + consolidated freight. It is NEVER split into client
@@ -60,7 +60,7 @@ _CONFIRMED_EXPENSE = ExpenseInvoiceStatus.CONFIRMED.value
 @dataclass(frozen=True)
 class PnlLine:
     """A single P&L line (a project, the general bucket, or the consolidated total).
-    All money is integer paise; ``margin_pct`` is None when revenue is exactly 0."""
+    All money is integer paise; ``margin_pct`` is None when revenue is 0 or negative."""
 
     revenue_paise: int
     cost_paise: int
@@ -108,8 +108,12 @@ class PnlFilters:
 # ----------------------------------------------------------------- math helpers
 
 def _margin_pct(revenue_paise: int, margin_paise: int) -> float | None:
-    """margin / revenue * 100, or None when revenue is exactly 0 (undefined)."""
-    if revenue_paise == 0:
+    """margin / revenue * 100, or None when revenue is 0 OR NEGATIVE (undefined).
+
+    A negative revenue (an over-credited project) would make ``margin / revenue`` flip sign and
+    report a misleadingly POSITIVE margin %, so a non-positive revenue yields None (rendered as
+    "—"), never a spurious percentage."""
+    if revenue_paise <= 0:
         return None
     return round(margin_paise / revenue_paise * 100, 2)
 
@@ -149,13 +153,18 @@ def _billing_credit_note_reduction(
     db: Session, *, date_from: date | None, date_to: date | None
 ) -> dict[int, int]:
     """{project_id -> Σ CONFIRMED client credit-note taxable paise}, attributed via the
-    credited invoice's PO. 1:1 PK joins (CN → one invoice → one PO)."""
+    credited invoice's PO. 1:1 PK joins (CN → one invoice → one PO). The credited invoice must
+    itself be CONFIRMED — symmetric with ``_billing_invoice_revenue`` (whose invoices are all
+    CONFIRMED), so a CN can never reduce revenue an invoice never contributed."""
     amt = func.coalesce(CreditNote.total_taxable_paise, 0)
     stmt = (
         select(PurchaseOrder.project_id, func.coalesce(func.sum(amt), 0))
         .join(SalesInvoice, SalesInvoice.id == CreditNote.invoice_id)
         .join(PurchaseOrder, PurchaseOrder.id == SalesInvoice.po_id)
-        .where(CreditNote.status == _CONFIRMED_CN)
+        .where(
+            CreditNote.status == _CONFIRMED_CN,
+            SalesInvoice.status == _CONFIRMED_INVOICE,
+        )
     )
     if date_from is not None:
         stmt = stmt.where(CreditNote.cn_date >= date_from)

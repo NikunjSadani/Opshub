@@ -95,6 +95,21 @@ test.describe('Billing — credit-note RBAC gating', () => {
     const invoiceId = String((await invUp.json()).outcomes[0].invoice_id);
     expect(invoiceId).not.toBe('null');
 
+    // A credit note can only be uploaded against a CONFIRMED invoice, so confirm it first:
+    // match its (single) extracted line to the PO line, then confirm.
+    const invDetail = await (
+      await request.get(`/api/v1/billing/invoices/${invoiceId}`, { headers: DEV_ADMIN })
+    ).json();
+    await request.patch(
+      `/api/v1/billing/invoices/${invoiceId}/lines/${invDetail.lines[0].id}/match`,
+      { headers: DEV_ADMIN, data: { po_line_item_id: po.lines[0].id } },
+    );
+    const conf = await request.patch(`/api/v1/billing/invoices/${invoiceId}/review`, {
+      headers: DEV_ADMIN,
+      data: { confirm: true },
+    });
+    expect(conf.ok(), `invoice confirm -> ${conf.status()} ${await conf.text()}`).toBeTruthy();
+
     const cnUp = await request.post('/api/v1/billing/credit-notes', {
       headers: DEV_ADMIN,
       multipart: {

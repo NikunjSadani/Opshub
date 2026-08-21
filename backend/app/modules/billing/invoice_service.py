@@ -809,13 +809,17 @@ def apply_manual_match(
 # --------------------------------------------------- §6 invoiced-qty rollup
 
 def invoiced_qty_for_po_line(db: Session, po_line_id: int) -> Decimal:
-    """The §6 per-line invoiced quantity, NET of confirmed credit notes:
+    """The §6 per-line invoiced quantity, NET of confirmed credit notes, FLOORED at 0:
 
-        invoiced_qty = Σ confirmed invoice-line qty − Σ confirmed credit-note-line qty
+        invoiced_qty = max(0, Σ confirmed invoice-line qty − Σ confirmed credit-note-line qty)
 
     Only CONFIRMED documents count on either side (an in-review invoice/CN is not yet a
     commitment). A confirmed credit note REOPENS the units it credits — subtracting its matched
-    line quantities here frees them for re-invoicing. A NULL line quantity contributes 0."""
+    line quantities here frees them for re-invoicing. A NULL line quantity contributes 0.
+
+    The floor guards the over-invoice soft-flag baseline: an over-credit anomaly (more credited
+    than invoiced on a line) must never drive this negative, which would silently let a PO line
+    be re-invoiced BELOW zero and defeat the over-invoice check."""
     invoiced_rows = db.execute(
         select(SalesInvoiceLine.quantity)
         .join(SalesInvoice, SalesInvoice.id == SalesInvoiceLine.invoice_id)
@@ -836,7 +840,7 @@ def invoiced_qty_for_po_line(db: Session, po_line_id: int) -> Decimal:
     ).scalars().all()
     credited = sum((q for q in credited_rows if q is not None), Decimal("0"))
 
-    return invoiced - credited
+    return max(Decimal("0"), invoiced - credited)
 
 
 def _required_blocking(invoice: SalesInvoice) -> list[str]:

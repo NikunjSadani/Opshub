@@ -25,7 +25,7 @@ from datetime import date
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -320,3 +320,92 @@ def test_rbac_non_finance_user_forbidden(
     # And the finance viewer is allowed (proving the 403s are the gate, not a broken route).
     _as(client, FINANCE_VIEWER)
     assert client.get("/api/v1/finance/pnl/projects").status_code == 200
+
+
+# ------------------------------------------------- F2 / F3: isolated money-edge cases
+
+def _fresh_session() -> sessionmaker[Session]:
+    """A private in-memory DB (FKs ON) so an edge-case graph never perturbs the tuned seed."""
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
+                           poolclass=StaticPool, future=True)
+
+    @event.listens_for(engine, "connect")
+    def _fk_on(dbapi_conn: object, _rec: object) -> None:
+        cur = dbapi_conn.cursor()  # type: ignore[attr-defined]
+        cur.execute("PRAGMA foreign_keys=ON")
+        cur.close()
+
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
+def _client_project_po(db: Session) -> tuple[int, int]:
+    """Seed one client + project + PO; return (project_id, po_id)."""
+    cli = ProjectClient(name="Edge Co", code="EDG", active=True)
+    db.add(cli)
+    db.flush()
+    proj = Project(client_id=cli.id, seq=1, code="EDG-001", name="Edge", status="ACTIVE")
+    db.add(proj)
+    db.flush()
+    po = PurchaseOrder(po_number="PO-E", client_id=cli.id, project_id=proj.id,
+                       po_date=date(2026, 1, 1), status="CONFIRMED")
+    db.add(po)
+    db.flush()
+    return proj.id, po.id
+
+
+def test_cn_reduction_ignored_when_credited_invoice_not_confirmed() -> None:
+    # F2: a CONFIRMED credit note against a NON-confirmed invoice must NOT reduce revenue
+    # (symmetric with the revenue side, which only counts CONFIRMED invoices).
+    TestSession = _fresh_session()
+    db = TestSession()
+    project_id, po_id = _client_project_po(db)
+    client_id = db.execute(select(PurchaseOrder.client_id).where(
+        PurchaseOrder.id == po_id)).scalar_one()
+
+    inv_conf = SalesInvoice(client_id=client_id, po_id=po_id,
+                            source_file_id=_stored_file(db).id, invoice_number="INV-C",
+                            invoice_date=date(2026, 2, 1), total_taxable_paise=100000,
+                            status="CONFIRMED")
+    inv_draft = SalesInvoice(client_id=client_id, po_id=po_id,
+                             source_file_id=_stored_file(db).id, invoice_number="INV-D",
+                             invoice_date=date(2026, 2, 2), total_taxable_paise=50000,
+                             status="UPLOADED")
+    db.add_all([inv_conf, inv_draft])
+    db.flush()
+    # CONFIRMED CN, but it credits the UNCONFIRMED invoice -> excluded by the F2 filter.
+    db.add(CreditNote(invoice_id=inv_draft.id, client_id=client_id,
+                      source_file_id=_stored_file(db).id, cn_number="CN-D",
+                      cn_date=date(2026, 2, 3), total_taxable_paise=30000, status="CONFIRMED"))
+    db.commit()
+
+    line = service.project_pnl(db, project_id)
+    db.close()
+    # Only the confirmed invoice counts; the CN against the draft is ignored.
+    assert line.revenue_paise == 100000
+
+
+def test_negative_revenue_margin_pct_is_none() -> None:
+    # F3: an over-credited project has NEGATIVE net revenue; margin_pct must be None (not a
+    # misleading positive % from margin/revenue with two negatives).
+    TestSession = _fresh_session()
+    db = TestSession()
+    project_id, po_id = _client_project_po(db)
+    client_id = db.execute(select(PurchaseOrder.client_id).where(
+        PurchaseOrder.id == po_id)).scalar_one()
+
+    inv = SalesInvoice(client_id=client_id, po_id=po_id, source_file_id=_stored_file(db).id,
+                       invoice_number="INV-N", invoice_date=date(2026, 2, 1),
+                       total_taxable_paise=10000, status="CONFIRMED")
+    db.add(inv)
+    db.flush()
+    # A confirmed CN larger than the invoice -> net revenue goes negative.
+    db.add(CreditNote(invoice_id=inv.id, client_id=client_id,
+                      source_file_id=_stored_file(db).id, cn_number="CN-N",
+                      cn_date=date(2026, 2, 2), total_taxable_paise=30000, status="CONFIRMED"))
+    db.commit()
+
+    line = service.project_pnl(db, project_id)
+    db.close()
+    assert line.revenue_paise == -20000  # 10000 − 30000
+    assert line.margin_pct is None
