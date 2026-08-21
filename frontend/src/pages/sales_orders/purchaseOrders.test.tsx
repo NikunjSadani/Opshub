@@ -324,6 +324,12 @@ describe('PO confirm flow', () => {
     await waitFor(() => expect(confirmUrl).not.toBeNull());
     expect(confirmUrl).toMatch(/\/purchase-orders\/1\/confirm$/);
     expect(await screen.findByText('Confirmed')).toBeInTheDocument();
+    // Focus moves to the status region (the Confirm button just unmounted) — not dropped to body.
+    await waitFor(() =>
+      expect(screen.getByText('Confirmed').closest('span[tabindex="-1"]')).toBe(
+        document.activeElement,
+      ),
+    );
   });
 
   it('a CONFIRMED PO does NOT show the Confirm button', async () => {

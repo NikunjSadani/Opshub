@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   Badge,
@@ -92,6 +92,9 @@ function PODetailBody({
 }) {
   const amend = useAmendPurchaseOrder();
   const confirmPo = useConfirmPurchaseOrder();
+  // On confirm success the Confirm button unmounts (status leaves DRAFT); move focus to the
+  // status region so a keyboard/screen-reader user isn't dropped to <body>.
+  const statusRef = useRef<HTMLSpanElement>(null);
   const shortClose = useShortClosePO();
   const voidPo = useVoidPO();
 
@@ -129,7 +132,10 @@ function PODetailBody({
     confirmPo.mutate(
       { id: po.id },
       {
-        onSuccess: () => toast.success('Purchase order confirmed.'),
+        onSuccess: () => {
+          toast.success('Purchase order confirmed.');
+          statusRef.current?.focus();
+        },
         onError: (err) => toast.error(errorMessage(err)),
       },
     );
@@ -217,9 +223,15 @@ function PODetailBody({
       <div className="mb-6 rounded-xl border border-slate-200 bg-white p-4">
         <dl className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
           <DefItem label="Status">
-            <Badge tone={PO_STATUS_TONE[po.status as POStatus]}>
-              {PO_STATUS_LABEL[po.status as POStatus] ?? po.status}
-            </Badge>
+            <span
+              ref={statusRef}
+              tabIndex={-1}
+              className="inline-flex rounded outline-none ring-offset-2 focus-visible:ring-2 focus-visible:ring-brand-500"
+            >
+              <Badge tone={PO_STATUS_TONE[po.status as POStatus]}>
+                {PO_STATUS_LABEL[po.status as POStatus] ?? po.status}
+              </Badge>
+            </span>
           </DefItem>
           <DefItem label="Client">{po.client_name ?? '—'}</DefItem>
           <DefItem label="Project">{po.project_code ?? '—'}</DefItem>
