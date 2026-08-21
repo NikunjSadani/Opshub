@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   Badge,
@@ -79,6 +79,13 @@ function ShipmentDetailBody({ shipment }: { shipment: ShipmentDetailType }) {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [downloadingPod, setDownloadingPod] = useState(false);
 
+  // Re-sync the staged selection when the server's status changes underneath us (a
+  // refetch after our own update, or an external edit) — otherwise the control keeps
+  // a stale value and "Update" could push it back over the newer server truth.
+  useEffect(() => {
+    setStatus(shipment.status);
+  }, [shipment.status]);
+
   const statusChanged = status !== shipment.status;
 
   function onUpdateStatus() {
@@ -154,9 +161,9 @@ function ShipmentDetailBody({ shipment }: { shipment: ShipmentDetailType }) {
           <DefItem label="Consignee">{shipment.consignee_name ?? '—'}</DefItem>
           <DefItem label="Dispatched on">{formatDate(shipment.dispatched_on)}</DefItem>
           <DefItem label="Delivered on">{formatDate(shipment.delivered_on)}</DefItem>
-          <DefItem label="Invoice #">{shipment.challan_invoice_number ?? '—'}</DefItem>
-          <DefItem label="PO #">{shipment.challan_po_number ?? '—'}</DefItem>
-          <DefItem label="Project">{shipment.challan_project_code ?? '—'}</DefItem>
+          <DefItem label="Invoice #">{shipment.challan?.invoice_number ?? '—'}</DefItem>
+          <DefItem label="PO #">{shipment.challan?.po_number ?? '—'}</DefItem>
+          <DefItem label="Project">{shipment.challan?.project_code ?? '—'}</DefItem>
           <DefItem label="Phone">{shipment.phone ?? '—'}</DefItem>
           <DefItem label="Pincode">{shipment.pincode ?? '—'}</DefItem>
           <DefItem label="Address">{shipment.address ?? '—'}</DefItem>
@@ -227,6 +234,7 @@ function ShipmentDetailBody({ shipment }: { shipment: ShipmentDetailType }) {
             <input
               ref={podInputRef}
               type="file"
+              aria-label="Proof of delivery file"
               disabled={setPod.isPending}
               onChange={(e) => onPodChange(e.target.files)}
               className="block w-full max-w-md text-sm text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-brand-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-brand-700 hover:file:bg-brand-100 disabled:opacity-50"

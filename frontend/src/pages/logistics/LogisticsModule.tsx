@@ -24,6 +24,7 @@ import {
   DELIVERY_STATUSES,
   DELIVERY_STATUS_LABEL,
   DELIVERY_STATUS_TONE,
+  SHIPMENTS_PAGE_LIMIT,
   useCreateShipment,
   useShipmentsQuery,
   type DeliveryStatus,
@@ -188,8 +189,8 @@ function Register({ canOperate }: { canOperate: boolean }) {
                   <Td>{s.delivery_partner ?? '—'}</Td>
                   <Td className="whitespace-nowrap">{s.tracking_id ?? '—'}</Td>
                   <Td>{s.consignee_name ?? '—'}</Td>
-                  <Td className="whitespace-nowrap">{s.challan_invoice_number ?? '—'}</Td>
-                  <Td className="whitespace-nowrap">{s.challan_po_number ?? '—'}</Td>
+                  <Td className="whitespace-nowrap">{s.challan?.invoice_number ?? '—'}</Td>
+                  <Td className="whitespace-nowrap">{s.challan?.po_number ?? '—'}</Td>
                   <Td className="whitespace-nowrap">{formatDate(s.dispatched_on)}</Td>
                   <Td className="whitespace-nowrap">{formatDate(s.delivered_on)}</Td>
                   <Td>
@@ -206,7 +207,11 @@ function Register({ canOperate }: { canOperate: boolean }) {
               ))}
             </tbody>
           </Table>
-          <p className="mt-4 text-sm text-slate-500">Showing {rows.length}</p>
+          <p className="mt-4 text-sm text-slate-500">
+            {rows.length >= SHIPMENTS_PAGE_LIMIT
+              ? `Showing first ${SHIPMENTS_PAGE_LIMIT} — refine filters to narrow the list.`
+              : `Showing ${rows.length}`}
+          </p>
         </>
       )}
     </div>

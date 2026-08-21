@@ -66,8 +66,20 @@ export const DELIVERY_STATUS_TONE: Record<DeliveryStatus, Tone> = {
 
 // --- DTOs ---------------------------------------------------------------------
 
-/** A register row (backend shipment summary). The `challan_*` fields are resolved
- * from the linked challan and may be null. */
+/** The resolved challan's display fields, surfaced on a shipment (backend `challan`
+ * object — the module-boundary LEFT JOIN result). Null when the challan number
+ * matched no issued challan. */
+export interface ChallanInfo {
+  invoice_number: string;
+  po_number: string;
+  project_code: string;
+  consignee_name: string;
+  consignee_gstin: string;
+  consignee_address: string;
+}
+
+/** A register row (backend shipment summary). The resolved challan info arrives as a
+ * nested `challan` object (null when the number can't yet be resolved). */
 export interface ShipmentSummary {
   id: string;
   challan_number: string;
@@ -79,9 +91,7 @@ export interface ShipmentSummary {
   dispatched_on: string | null;
   delivered_on: string | null;
   /** Resolved from the linked challan; null when unresolved. */
-  challan_invoice_number: string | null;
-  challan_po_number: string | null;
-  challan_project_code: string | null;
+  challan: ChallanInfo | null;
 }
 
 /** A stored POD file reference (backend `pod_file`). */
@@ -132,11 +142,12 @@ export interface ShipmentPatch {
   notes?: string | null;
 }
 
-/** One row-level error from a bulk .xlsx upload (unresolved / malformed row). */
+/** One row-level error from a bulk .xlsx upload (unresolved / malformed row). The
+ * backend sends the human-readable text under `message`. */
 export interface ShipmentUploadError {
   row?: number;
   challan_number?: string;
-  reason: string;
+  message: string;
 }
 
 /** The result of a bulk .xlsx upload (upsert on challan_number). */
@@ -182,6 +193,13 @@ export const logisticsKeys = {
 
 // --- queries ------------------------------------------------------------------
 
+/**
+ * How many register rows one page requests (matches the backend's `limit` ceiling).
+ * When the register returns exactly this many rows the UI says so honestly ("Showing
+ * first N — refine filters") instead of implying the list is complete.
+ */
+export const SHIPMENTS_PAGE_LIMIT = 200;
+
 /** The shipment tracker register, filtered by status / challan# / partner / free-text (VIEW). */
 export function useShipmentsQuery(
   filters: ShipmentFilters,
@@ -189,8 +207,11 @@ export function useShipmentsQuery(
   const { get } = useApi();
   return useQuery<ShipmentSummary[], Error>({
     queryKey: logisticsKeys.list(filters),
-    queryFn: ({ signal }) =>
-      get<ShipmentSummary[]>(`/logistics/shipments${buildShipmentsQuery(filters)}`, signal),
+    queryFn: ({ signal }) => {
+      const qs = buildShipmentsQuery(filters);
+      const url = `/logistics/shipments${qs}${qs ? '&' : '?'}limit=${SHIPMENTS_PAGE_LIMIT}`;
+      return get<ShipmentSummary[]>(url, signal);
+    },
   });
 }
 

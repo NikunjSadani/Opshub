@@ -107,7 +107,7 @@ def create_app() -> FastAPI:
     app.include_router(sales_orders_router, prefix="/api/v1", tags=["sales_orders"])
     app.include_router(billing_router, prefix="/api/v1", tags=["billing"])
     app.include_router(finance_router, prefix="/api/v1", tags=["finance"])
-    app.include_router(logistics_router, prefix="/api/v1", tags=["logistics"])
+    app.include_router(logistics_router, prefix="/api/v1/logistics", tags=["logistics"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
     # User Management + Roles — platform primitives (admin-managed accounts and the
     # roles that grant access); NOT nav ModuleSpecs, mounted like files/settings above.

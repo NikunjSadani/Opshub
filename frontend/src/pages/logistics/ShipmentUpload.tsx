@@ -121,7 +121,7 @@ export function ShipmentUpload() {
                           ? e.challan_number
                           : 'Row'}
                     </span>
-                    <span className="text-slate-600"> — {e.reason}</span>
+                    <span className="text-slate-600"> — {e.message}</span>
                   </li>
                 ))}
               </ul>

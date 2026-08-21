@@ -373,6 +373,13 @@ def _parse_row_dates(
     return parsed[0], parsed[1], ok
 
 
+def _existing_by_number(db: Session, number: str) -> Shipment | None:
+    """The shipment currently stored for `challan_number`, or None (bulk-upsert lookup)."""
+    return db.execute(
+        select(Shipment).where(Shipment.challan_number == number)
+    ).scalar_one_or_none()
+
+
 def _upsert_row(
     db: Session,
     row: int,
@@ -399,9 +406,7 @@ def _upsert_row(
     if not dates_ok:
         return None
 
-    existing = db.execute(
-        select(Shipment).where(Shipment.challan_number == number)
-    ).scalar_one_or_none()
+    existing = _existing_by_number(db, number)
 
     # Only NON-BLANK cells overwrite; a blank cell leaves the stored value alone.
     def present(col: str) -> str | None:
@@ -423,9 +428,24 @@ def _upsert_row(
             notes=present("notes"),
             created_by=actor_uid,
         )
-        db.add(shipment)
-        db.flush()  # materialise so a later duplicate number in the SAME file updates it
-        return "created"
+        try:
+            # SAVEPOINT (mirrors create_shipment): a concurrent insert of the SAME
+            # challan_number (two overlapping dumps, or an upload racing a manual
+            # create) trips uq_logistics_shipment_challan_number — the savepoint
+            # contains that failure so the whole batch's transaction isn't poisoned.
+            with db.begin_nested():
+                db.add(shipment)
+                db.flush()  # materialise so a later dup number in the SAME file updates it
+            return "created"
+        except IntegrityError:
+            # Lost the race: another writer inserted this number first. The savepoint
+            # rolled the failed insert back — re-SELECT the now-existing row and fold
+            # this row into the UPDATE path instead of 500-ing + losing the batch.
+            existing = _existing_by_number(db, number)
+            if existing is None:
+                raise  # not the duplicate we assumed — surface the real error
+            if shipment in db:
+                db.expunge(shipment)  # drop the never-persisted transient
 
     # Update path — set only supplied (non-blank) fields.
     if status_value is not None:

@@ -27,6 +27,7 @@ from sqlalchemy.pool import StaticPool
 import app.main  # noqa: F401
 from app.db import Base, get_db
 from app.modules.challan.models import Challan, ChallanBatch
+from app.modules.logistics import service
 from app.modules.logistics.models import Shipment
 from app.modules.logistics.routes import router as logistics_router
 from app.modules.numbering.models import NumberingAllocation
@@ -256,6 +257,49 @@ def test_bulk_bad_status_row_errors_others_land(client: TestClient) -> None:
     assert numbers == {"GIF/DC/26-27/L/000010"}
 
 
+def test_bulk_insert_race_converts_to_update_not_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M1: if the row exists at INSERT time but the pre-INSERT existence check missed
+    it (a concurrent insert of the SAME challan_number), the new-row branch must NOT
+    500 + poison the batch — the savepoint catches the IntegrityError and the row folds
+    into an UPDATE instead."""
+    number = "GIF/DC/26-27/L/000777"
+    _act(client, "operator")
+    # Seed the row that the racing insert will collide with.
+    assert client.post("/api/v1/logistics/shipments", json={
+        "challan_number": number, "status": "PENDING", "tracking_id": "OLD"}).status_code == 201
+
+    # Simulate the race: the FIRST existence lookup (pre-INSERT) misses, so the code
+    # takes the new-row branch and its INSERT trips the UNIQUE constraint; the recovery
+    # re-SELECT (2nd call) delegates to the real query and finds the committed row.
+    real_lookup = service._existing_by_number
+    calls = {"n": 0}
+
+    def flaky(db: object, num: str) -> object:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return real_lookup(db, num)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "_existing_by_number", flaky)
+
+    data = _xlsx(_BULK_HEADER, [
+        [number, "NEW", "BlueDart", "DELIVERED", "", "", "", "", "", "", ""],
+    ])
+    r = client.post("/api/v1/logistics/shipments/upload",
+                    files={"file": ("dump.xlsx", data, "application/xlsx")})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"created": 0, "updated": 1, "errors": []}
+
+    db = client.app.state.TestSession()
+    ships = db.execute(select(Shipment).where(Shipment.challan_number == number)).scalars().all()
+    db.close()
+    assert len(ships) == 1  # folded into an update, not duplicated / not 500
+    assert ships[0].status == "DELIVERED"
+    assert ships[0].tracking_id == "NEW"
+
+
 # -------------------------------------------------------------------- list
 
 
@@ -331,6 +375,36 @@ def test_pod_attach(client: TestClient) -> None:
     miss = client.post(f"/api/v1/logistics/shipments/{sid}/pod",
                        json={"pod_file_id": 999999})
     assert miss.status_code == 404
+
+
+def test_pod_attach_rejects_foreign_module_file(client: TestClient) -> None:
+    """M3: a logistics user cannot attach a NON-logistics file (e.g. an expense
+    invoice) — it must be rejected (404) so a foreign file id can't be linked and have
+    its filename surfaced."""
+    _act(client, "operator")
+    sid = client.post("/api/v1/logistics/shipments", json={
+        "challan_number": "GIF/DC/26-27/L/000031"}).json()["id"]
+
+    # A stored file that belongs to a DIFFERENT module.
+    db = client.app.state.TestSession()
+    from app.modules.files.models import StoredFile
+    foreign = StoredFile(kind="upload", filename="secret-invoice.pdf",
+                         content_type="application/pdf", size=10,
+                         storage_ref="x/inv.pdf", uploaded_by="operator",
+                         module_key="expense")
+    db.add(foreign)
+    db.commit()
+    foreign_id = foreign.id
+    db.close()
+
+    r = client.post(f"/api/v1/logistics/shipments/{sid}/pod",
+                    json={"pod_file_id": foreign_id})
+    assert r.status_code == 404, r.text
+
+    # And the shipment did NOT get the foreign file linked.
+    detail = client.get(f"/api/v1/logistics/shipments/{sid}").json()
+    assert detail["pod_file_id"] is None
+    assert detail["pod_file"] is None
 
 
 # -------------------------------------------------------------------- rbac

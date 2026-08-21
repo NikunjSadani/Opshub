@@ -312,11 +312,14 @@ def attach_pod(
     shipment = service.get_shipment(db, shipment_id)
     if shipment is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "shipment not found")
-    # The referenced file must exist (FK would fail at flush; a clean 404 is friendlier).
+    # The referenced file must exist (FK would fail at flush; a clean 404 is friendlier)
+    # AND be a logistics file — else a logistics user could attach (and surface the
+    # filename of) an arbitrary/foreign file id (e.g. an expense invoice). A 404 (not
+    # 403) avoids confirming a foreign file's existence.
     pod_file = db.execute(
         select(StoredFile).where(StoredFile.id == body.pod_file_id)
     ).scalar_one_or_none()
-    if pod_file is None:
+    if pod_file is None or pod_file.module_key != MODULE_KEY:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "pod file not found")
     service.set_pod(db, shipment=shipment, pod_file_id=body.pod_file_id,
                     actor_uid=user.firebase_uid)
