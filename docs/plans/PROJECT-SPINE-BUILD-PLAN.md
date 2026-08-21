@@ -21,7 +21,7 @@ Standing rules honoured every wave: full gate (never a piped exit code), runtime
 |---|---|---|---|---|---|
 | **1 — Foundation** (Product · Client master · PO+line items · numbering prefix · quote search · `sales_orders` RBAC) | 8 (4 BE + 4 FE) | 3 | Single + UI/UX | ~3–5 hrs | ✅ DONE (`471b007`) |
 | **2 — Revenue+AR ∥ Finance ∥ Vendor CN** (`billing` · `finance` · expense `doc_type`) | 5 BE + 4 FE | DUAL money + UI/UX + eval | **DUAL (money)** | done | ✅ BE+FE+DUAL-audit done; E2E 13/13. Reframed to UPLOAD-and-tally (accounting-software invoices) + line-level PO match. `1226c21` (Stage 0) → `1572072` (BE) → `a695621` (FE+fixes) |
-| **3 — Fulfilment** (logistics · POD) | 1 BE + 1 FE | audit + E2E | Single + UI/UX | done | ✅ BE+FE done; audit+E2E in progress. Owner: challan already carries invoice#/PO#/project (inc 15) so the link is IN PLACE — statutory challan generation UNTOUCHED; Wave 3 = logistics tracking only. `8e8ff49` (Stage 0) → `b073ba7` (BE+FE). migr `86fd55b35152` |
+| **3 — Fulfilment** (logistics · POD) | 1 BE + 1 FE | audit + E2E | Single + UI/UX | done | ✅ DONE. Owner: challan already carries invoice#/PO#/project (inc 15) → link IN PLACE, statutory challan generation UNTOUCHED; Wave 3 = logistics only. Gate BE pytest 539 · FE vitest 128 · **E2E 15/15**. Audit+E2E caught a mount-prefix 404 + BE↔FE shape drift (nested vs flat, message vs reason) + a bulk-upsert SAVEPOINT gap — all fixed. `8e8ff49`→`b073ba7`→`0faa96e`. migr `86fd55b35152` |
 | **4 — Action Center** (computed reminders: procurement T-15 · invoicing-due · AR aging) | 2 (1 BE + 1 FE) | 3 | Single + UI/UX | ~1.5–2.5 hrs | ☐ pending |
 | **5 — Cloud** (Sheet sync · push reminders/scheduler · e-invoice/e-way) | — | — | — | blocked on GCP/Firebase | ☐ owner-gated |
 
