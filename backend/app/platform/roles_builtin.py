@@ -17,6 +17,7 @@ from app.platform.models import (
     RoleModulePermission,
 )
 from app.platform.rbac import (
+    ACTION_CENTER,
     BILLING,
     CHALLAN,
     EXPENSE,
@@ -46,7 +47,7 @@ _PRESETS: dict[str, tuple[str, dict[str, Level]]] = {
         "Read-only access to every module.",
         {CHALLAN: Level.VIEW, PROJECTS: Level.VIEW, EXPENSE: Level.VIEW,
          SALES_ORDERS: Level.VIEW, BILLING: Level.VIEW, FINANCE: Level.VIEW,
-         LOGISTICS: Level.VIEW},
+         LOGISTICS: Level.VIEW, ACTION_CENTER: Level.VIEW},
     ),
 }
 

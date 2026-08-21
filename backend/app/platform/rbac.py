@@ -33,6 +33,7 @@ SALES_ORDERS = "sales_orders"
 BILLING = "billing"
 FINANCE = "finance"
 LOGISTICS = "logistics"
+ACTION_CENTER = "action_center"
 
 
 @dataclass(frozen=True)

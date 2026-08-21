@@ -11,6 +11,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
 
 from app.config import get_settings
+from app.modules.action_center.routes import router as action_center_router
 from app.modules.billing.routes import router as billing_router
 from app.modules.challan.routes import router as challan_router
 from app.modules.expense.routes import router as expense_router
@@ -87,6 +88,13 @@ register_module(ModuleSpec(
     router=APIRouter(),
     nav_group="Operations",
 ))
+# Action Center (computed reminders, read-only) — nav entry only.
+register_module(ModuleSpec(
+    key="action_center",
+    title="Action Center",
+    router=APIRouter(),
+    nav_group="Operations",
+))
 
 
 def create_app() -> FastAPI:
@@ -108,6 +116,7 @@ def create_app() -> FastAPI:
     app.include_router(billing_router, prefix="/api/v1", tags=["billing"])
     app.include_router(finance_router, prefix="/api/v1", tags=["finance"])
     app.include_router(logistics_router, prefix="/api/v1/logistics", tags=["logistics"])
+    app.include_router(action_center_router, prefix="/api/v1", tags=["action_center"])
     app.include_router(settings_router, prefix="/api/v1", tags=["settings"])
     # User Management + Roles — platform primitives (admin-managed accounts and the
     # roles that grant access); NOT nav ModuleSpecs, mounted like files/settings above.
