@@ -16,6 +16,7 @@ service layer. A confirmed credit note drives the §6 invoiced-qty write-back.
 from __future__ import annotations
 
 import re
+from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import Annotated, Any
 from uuid import uuid4
@@ -134,6 +135,19 @@ class CNLineOut(BaseModel):
     po_line_item_id: int | None
     po_line_label: str | None
     match_status: str
+    # Over-credit tally (matched lines only; null when UNMATCHED). billed_qty = the referenced
+    # invoice's qty on this PO line; already_credited_qty = Σ OTHER confirmed CNs' qty on it.
+    billed_qty: str | None
+    already_credited_qty: str | None
+
+
+class CNFieldOut(BaseModel):
+    field_path: str
+    value_norm: str | None
+    value_raw: str | None
+    confidence: float
+    source_engine: str | None
+    status: str
 
 
 class CNDetailOut(BaseModel):
@@ -150,6 +164,9 @@ class CNDetailOut(BaseModel):
     grand_total_paise: int | None
     status: str
     reason: str | None
+    needs_ocr: bool
+    review_reasons: list[str]
+    fields: list[CNFieldOut]
     source_file: SourceFileOut | None
     referenced_invoice: ReferencedInvoiceOut | None
     lines: list[CNLineOut]
@@ -188,7 +205,13 @@ def _po_line_labels(db: Session, po_line_ids: set[int]) -> dict[int, str]:
     return {pid: f"{name} — {desc}" for pid, name, desc in rows}
 
 
-def _line_out(line: Any, labels: dict[int, str]) -> CNLineOut:
+def _line_out(
+    line: Any,
+    labels: dict[int, str],
+    billed: dict[int, Any],
+    already: dict[int, Any],
+) -> CNLineOut:
+    pid = line.po_line_item_id
     return CNLineOut(
         id=line.id,
         line_no=line.line_no,
@@ -196,10 +219,12 @@ def _line_out(line: Any, labels: dict[int, str]) -> CNLineOut:
         quantity=None if line.quantity is None else str(line.quantity),
         taxable_paise=line.taxable_paise,
         line_total_paise=line.line_total_paise,
-        po_line_item_id=line.po_line_item_id,
-        po_line_label=(labels.get(line.po_line_item_id)
-                       if line.po_line_item_id is not None else None),
+        po_line_item_id=pid,
+        po_line_label=labels.get(pid) if pid is not None else None,
         match_status=line.match_status,
+        # Only a matched line has a PO line to compare against; unmatched → null (not "0").
+        billed_qty=None if pid is None else str(billed.get(pid, Decimal("0"))),
+        already_credited_qty=None if pid is None else str(already.get(pid, Decimal("0"))),
     )
 
 
@@ -215,14 +240,30 @@ def _detail_out(db: Session, cn: CreditNote) -> CNDetailOut:
             source = SourceFileOut(id=sf.id, filename=sf.filename)
     labels = _po_line_labels(
         db, {ln.po_line_item_id for ln in cn.lines if ln.po_line_item_id is not None})
+    # The over-credit ceiling per PO line: what the referenced invoice billed vs what OTHER
+    # confirmed CNs already credited (this CN excluded). The exact server truth _over_credited_lines
+    # uses at confirm — surfaced here so the reviewer sees an over-credit BEFORE confirming.
+    billed = service._billed_qty_by_po_line(db, cn.invoice_id)
+    already = service._confirmed_cn_credit_by_po_line(db, cn.invoice_id, cn.id)
     return CNDetailOut(
         id=cn.id, cn_number=cn.cn_number, client_id=cn.client_id, invoice_id=cn.invoice_id,
         cn_date=cn.cn_date, total_taxable_paise=cn.total_taxable_paise,
         total_cgst_paise=cn.total_cgst_paise, total_sgst_paise=cn.total_sgst_paise,
         total_igst_paise=cn.total_igst_paise, round_off_paise=cn.round_off_paise,
         grand_total_paise=cn.grand_total_paise, status=cn.status, reason=cn.reason,
+        needs_ocr=cn.needs_ocr, review_reasons=list(cn.review_reasons),
+        fields=[
+            CNFieldOut(
+                field_path=f.field_path, value_norm=f.value_norm, value_raw=f.value_raw,
+                confidence=f.confidence, source_engine=f.source_engine, status=f.status,
+            )
+            for f in sorted(cn.fields, key=lambda x: x.field_path)
+        ],
         source_file=source, referenced_invoice=referenced,
-        lines=[_line_out(ln, labels) for ln in sorted(cn.lines, key=lambda x: x.line_no)],
+        lines=[
+            _line_out(ln, labels, billed, already)
+            for ln in sorted(cn.lines, key=lambda x: x.line_no)
+        ],
     )
 
 

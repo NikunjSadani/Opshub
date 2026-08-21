@@ -258,6 +258,8 @@ class CreditNote(Base):
     round_off_paise: Mapped[int | None] = mapped_column(BigInteger)
     grand_total_paise: Mapped[int | None] = mapped_column(BigInteger)
     source_engine: Mapped[str | None] = mapped_column(String(32))
+    needs_ocr: Mapped[bool] = mapped_column(Boolean, default=False)
+    review_reasons: Mapped[list[Any]] = mapped_column(JSON, default=list)
     dedup_key: Mapped[str | None] = mapped_column(String(64), unique=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(16), default=CreditNoteStatus.UPLOADED.value)
@@ -268,6 +270,9 @@ class CreditNote(Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     lines: Mapped[list["CreditNoteLine"]] = relationship(
+        back_populates="credit_note", cascade="all, delete-orphan"
+    )
+    fields: Mapped[list["CreditNoteField"]] = relationship(
         back_populates="credit_note", cascade="all, delete-orphan"
     )
 
@@ -290,6 +295,30 @@ class CreditNoteLine(Base):
     match_status: Mapped[str] = mapped_column(String(12), default=LineMatchStatus.UNMATCHED.value)
 
     credit_note: Mapped[CreditNote] = relationship(back_populates="lines")
+
+
+class CreditNoteField(Base):
+    """Per-field extraction envelope for a credit note (mirrors SalesInvoiceField) — drives
+    the review field-editor's low-confidence / missing highlighting and CORRECTED status."""
+
+    __tablename__ = "billing_credit_note_field"
+    __table_args__ = (
+        UniqueConstraint("cn_id", "field_path", name="uq_billing_cn_field"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    cn_id: Mapped[int] = mapped_column(
+        ForeignKey("billing_credit_note.id", ondelete="CASCADE"), index=True
+    )
+    field_path: Mapped[str] = mapped_column(String(64))  # the CN attr, e.g. "grand_total_paise"
+    value_raw: Mapped[str | None] = mapped_column(String(500))
+    value_norm: Mapped[str | None] = mapped_column(String(500))  # normalized string form
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    source_engine: Mapped[str | None] = mapped_column(String(32))
+    # OK / LOW_CONFIDENCE / MISSING / CORRECTED (mirrors the canonical FieldStatus).
+    status: Mapped[str] = mapped_column(String(16), default="OK")
+
+    credit_note: Mapped[CreditNote] = relationship(back_populates="fields")
 
 
 class PaymentReceipt(Base):

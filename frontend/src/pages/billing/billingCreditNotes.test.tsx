@@ -157,6 +157,9 @@ function detail(overrides: Record<string, unknown> = {}) {
     round_off_paise: 0,
     grand_total_paise: 236000,
     status: 'NEEDS_MATCH',
+    needs_ocr: false,
+    review_reasons: [],
+    fields: [],
     reason: 'Short shipment',
     source_file: { id: 9, filename: 'cn-005.pdf' },
     referenced_invoice: {
@@ -177,13 +180,16 @@ function detail(overrides: Record<string, unknown> = {}) {
         po_line_item_id: null,
         po_line_label: null,
         match_status: 'UNMATCHED',
+        // Null on an UNMATCHED line — no invoice line to compare against.
+        billed_qty: null,
+        already_credited_qty: null,
       },
     ],
     ...overrides,
   };
 }
 
-/** A MATCHED copy of the detail — the manual-match PATCH returns this. */
+/** A MATCHED copy of the detail — the manual-match PATCH returns this. Not over-credited. */
 function matchedDetail() {
   return detail({
     status: 'MATCHED',
@@ -198,6 +204,8 @@ function matchedDetail() {
         po_line_item_id: 501,
         po_line_label: 'Biscuits carton · qty 100 · ₹100.00',
         match_status: 'MANUAL',
+        billed_qty: '100',
+        already_credited_qty: '0',
       },
     ],
   });
@@ -437,5 +445,103 @@ describe('CreditNoteReview — detail + match', () => {
     fireEvent.click(confirm);
     await waitFor(() => expect(captured.length).toBe(1));
     expect(captured[0]).toEqual({ confirm: true });
+  });
+
+  it('flags an over-credited matched line but leaves Confirm enabled (soft warning)', async () => {
+    // A MATCHED line where already-credited (4) + this credit (2) = 6 exceeds the 4 the
+    // invoice billed on the line. The tally is a SOFT flag — it must NOT gate Confirm.
+    const overCredited = detail({
+      status: 'MATCHED',
+      lines: [
+        {
+          id: 71,
+          line_no: 1,
+          description: 'Biscuits carton',
+          quantity: '2',
+          taxable_paise: 200000,
+          line_total_paise: 236000,
+          po_line_item_id: 501,
+          po_line_label: 'Biscuits carton · qty 100 · ₹100.00',
+          match_status: 'MANUAL',
+          billed_qty: '4',
+          already_credited_qty: '4',
+        },
+      ],
+    });
+    stub({ level: 'OPERATE', onDetail: () => json(overCredited) });
+
+    renderReview();
+
+    // The honest over-credit warning renders on the line…
+    expect(
+      await screen.findByText(/Credits 6 but the invoice billed only 4 on this line/i),
+    ).toBeInTheDocument();
+    // …and the invoice-billed context line is shown too.
+    expect(screen.getByText(/Invoice billed 4 · already credited 4/i)).toBeInTheDocument();
+
+    // …but Confirm stays ENABLED — the backend soft-flags, never blocks.
+    const confirm = await screen.findByRole('button', { name: /confirm credit note/i });
+    expect(confirm).toBeEnabled();
+  });
+
+  it('renders an editable input for a MISSING field and Saves it as corrections keyed by `field`', async () => {
+    const captured: unknown[] = [];
+    const withMissing = detail({
+      fields: [
+        {
+          field_path: 'total_taxable_paise',
+          value_norm: null,
+          value_raw: null,
+          confidence: 0.2,
+          source_engine: 'text',
+          status: 'MISSING',
+        },
+      ],
+    });
+    stub({
+      level: 'OPERATE',
+      onDetail: () => json(withMissing),
+      capture: { confirm: (b) => captured.push(b) },
+    });
+
+    renderReview();
+
+    // The flagged field surfaces as an editable, labelled input (money → edited in ₹).
+    const input = (await screen.findByLabelText(/Total taxable/i)) as HTMLInputElement;
+    expect(input).toBeInTheDocument();
+
+    // Correcting it reveals Save; the value is converted ₹100 → 10000 paise on the wire.
+    fireEvent.change(input, { target: { value: '100' } });
+    const save = await screen.findByRole('button', { name: /save corrections/i });
+    fireEvent.click(save);
+
+    await waitFor(() => expect(captured.length).toBe(1));
+    // Frozen contract: array of { field, value } — the key is `field`, NOT `field_path`.
+    expect(captured[0]).toEqual({
+      corrections: [{ field: 'total_taxable_paise', value: '10000' }],
+      confirm: false,
+    });
+  });
+
+  it('renders the review-reasons and needs-OCR banners when present', async () => {
+    stub({
+      onDetail: () =>
+        json(
+          detail({
+            needs_ocr: true,
+            review_reasons: ['Credit total exceeds the invoice grand total', 'line 1 is not matched'],
+          }),
+        ),
+    });
+
+    renderReview();
+
+    // The amber review-reasons list…
+    expect(
+      await screen.findByText(/Credit total exceeds the invoice grand total/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/line 1 is not matched/i)).toBeInTheDocument();
+    // …and the needs-OCR banner.
+    expect(screen.getByText(/no text layer/i)).toBeInTheDocument();
   });
 });

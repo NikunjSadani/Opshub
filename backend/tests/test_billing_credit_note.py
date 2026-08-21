@@ -470,3 +470,67 @@ def test_over_credit_soft_flag_and_invoiced_qty_floors_at_zero(client: TestClien
     db = client.app.state.TestSession()
     assert invoice_service.invoiced_qty_for_po_line(db, widget_line_id) == Decimal("0")
     db.close()
+
+
+def test_review_envelope_needs_ocr_and_reasons_exposed(client: TestClient) -> None:
+    # A review-flagged CN (grand-total LOW_CONFIDENCE) persists + exposes the per-field envelope,
+    # needs_ocr, and review_reasons — parity with the invoice lane's review screen.
+    cn_id = _upload(client, _spec(cn_number="CCN-ENV", review=True)
+                    ).json()["outcomes"][0]["cn_id"]
+    detail = client.get(f"/api/v1/billing/credit-notes/{cn_id}").json()
+
+    assert detail["needs_ocr"] is False
+    assert detail["review_reasons"] == ["grand total low confidence"]
+    fields = {f["field_path"]: f for f in detail["fields"]}
+    # 8 header/totals fields carry an envelope (reason is free text — no envelope).
+    assert set(fields) == {
+        "cn_number", "cn_date", "total_taxable_paise", "total_cgst_paise",
+        "total_sgst_paise", "total_igst_paise", "round_off_paise", "grand_total_paise",
+    }
+    assert fields["grand_total_paise"]["status"] == "LOW_CONFIDENCE"
+    assert fields["grand_total_paise"]["confidence"] == pytest.approx(0.4)
+    assert fields["cn_number"]["status"] == "OK"
+    assert fields["cn_number"]["value_norm"] == "CCN-ENV"
+
+
+def test_review_correction_flips_envelope_to_corrected(client: TestClient) -> None:
+    # Correcting a flagged field flips its envelope to CORRECTED (human-sourced) so the editor
+    # shows it resolved — mirroring the invoice lane.
+    cn_id = _upload(client, _spec(cn_number="CCN-FIX", review=True)
+                    ).json()["outcomes"][0]["cn_id"]
+    client.patch(f"/api/v1/billing/credit-notes/{cn_id}/review",
+                 json={"corrections": [{"field": "grand_total_paise", "value": "150000"}]})
+    detail = client.get(f"/api/v1/billing/credit-notes/{cn_id}").json()
+    gt = next(f for f in detail["fields"] if f["field_path"] == "grand_total_paise")
+    assert gt["status"] == "CORRECTED"
+    assert gt["value_norm"] == "150000"
+    assert gt["source_engine"] == "human"
+
+
+def test_line_billed_and_already_credited_qty(client: TestClient) -> None:
+    # A matched line surfaces the referenced invoice's billed qty (the over-credit ceiling); an
+    # unmatched line has no PO line to compare against.
+    cn_id = _upload(client, _spec(cn_number="CCN-A", lines=[
+        {"description": "Widget WID-1", "hsn": "847130", "unit_rate_paise": 100000, "qty": 2},
+        {"description": "Mystery item", "hsn": "000000", "unit_rate_paise": 1, "qty": 1},
+    ])).json()["outcomes"][0]["cn_id"]
+    detail = client.get(f"/api/v1/billing/credit-notes/{cn_id}").json()
+    widget = next(ln for ln in detail["lines"]
+                  if ln["po_line_item_id"] == client.app.state.widget_line_id)
+    unmatched = next(ln for ln in detail["lines"] if ln["match_status"] == "UNMATCHED")
+    assert Decimal(widget["billed_qty"]) == Decimal("6")        # invoice billed 6 on this line
+    assert Decimal(widget["already_credited_qty"]) == Decimal("0")
+    assert unmatched["billed_qty"] is None
+    assert unmatched["already_credited_qty"] is None
+
+
+def test_already_credited_reflects_other_confirmed_cn(client: TestClient) -> None:
+    # already_credited_qty rolls up OTHER confirmed CNs on the same PO line (this CN excluded).
+    first = _upload(client, _spec(cn_number="CCN-1")).json()["outcomes"][0]["cn_id"]
+    assert _confirm(client, first).status_code == 200
+    second = _upload(client, _spec(cn_number="CCN-2")).json()["outcomes"][0]["cn_id"]
+    detail = client.get(f"/api/v1/billing/credit-notes/{second}").json()
+    widget = next(ln for ln in detail["lines"]
+                  if ln["po_line_item_id"] == client.app.state.widget_line_id)
+    assert Decimal(widget["billed_qty"]) == Decimal("6")
+    assert Decimal(widget["already_credited_qty"]) == Decimal("2")  # first CN credited 2

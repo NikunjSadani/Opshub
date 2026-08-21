@@ -44,6 +44,7 @@ from app.modules.billing.invoice_service import (
 )
 from app.modules.billing.models import (
     CreditNote,
+    CreditNoteField,
     CreditNoteLine,
     CreditNoteStatus,
     LineMatchStatus,
@@ -51,7 +52,7 @@ from app.modules.billing.models import (
     SalesInvoiceLine,
     SalesInvoiceStatus,
 )
-from app.modules.expense.canonical import ExtractedInvoice
+from app.modules.expense.canonical import ExtractedInvoice, FieldStatus
 from app.modules.expense.canonical import Field as CField
 from app.modules.expense.extractor import Extractor, get_extractor
 from app.modules.files.models import StoredFile
@@ -129,6 +130,31 @@ _SPEC_BY_ATTR: dict[str, _Spec] = {s.attr: s for s in _CN_FIELD_SPECS}
 _REQUIRED_ATTRS: tuple[str, ...] = (
     "cn_number", "cn_date", "total_taxable_paise", "grand_total_paise",
 )
+
+# Per-field review envelope (mirrors SalesInvoiceField) — the field_path (bare CN attr) mapped
+# to its canonical (section, attr) source + kind. ``reason`` is free text (never extracted) so
+# it carries no envelope. Drives the review field-editor's low-confidence / missing highlighting.
+_CN_ENVELOPE_SPECS: tuple[tuple[str, str, str, str], ...] = (
+    ("cn_number", "header", "invoice_number", "text"),
+    ("cn_date", "header", "invoice_date", "date"),
+    ("total_taxable_paise", "totals", "total_taxable_paise", "money"),
+    ("total_cgst_paise", "totals", "total_cgst_paise", "money"),
+    ("total_sgst_paise", "totals", "total_sgst_paise", "money"),
+    ("total_igst_paise", "totals", "total_igst_paise", "money"),
+    ("round_off_paise", "totals", "round_off_paise", "money"),
+    ("grand_total_paise", "totals", "grand_total_paise", "money"),
+)
+_ENVELOPE_PATHS: frozenset[str] = frozenset(fp for fp, *_ in _CN_ENVELOPE_SPECS)
+
+
+def _env_norm(kind: str, value: Any) -> str | None:
+    """Stored string form of an envelope value (paise->int-str, date->ISO) — mirrors the invoice
+    lane's _norm_str."""
+    if value is None:
+        return None
+    if kind == "date":
+        return cast("date", value).isoformat()
+    return str(value)
 
 
 def _coerce(spec: _Spec, raw: str) -> Any:
@@ -351,6 +377,8 @@ def _persist_cn(
         round_off_paise=scalars.get("round_off_paise"),
         grand_total_paise=scalars.get("grand_total_paise"),
         source_engine=extracted.source_engine,
+        needs_ocr=extracted.needs_ocr,
+        review_reasons=list(extracted.review_reasons),
         dedup_key=key,
         content_hash=content_hash,
         status=CreditNoteStatus.UPLOADED.value,  # refined below after match
@@ -363,6 +391,18 @@ def _persist_cn(
             quantity=line.quantity.value_normalized,
             taxable_paise=line.taxable_paise.value_normalized,
             line_total_paise=line.line_total_paise.value_normalized,
+        ))
+    # Per-field extraction envelope (value/raw/confidence/status) for the review field-editor.
+    for field_path, section, canonical_attr, kind in _CN_ENVELOPE_SPECS:
+        cfield = cast("CField[Any]", getattr(
+            extracted.header if section == "header" else extracted.totals, canonical_attr))
+        cn.fields.append(CreditNoteField(
+            field_path=field_path,
+            value_norm=_env_norm(kind, cfield.value_normalized),
+            value_raw=cfield.value_raw,
+            confidence=float(cfield.confidence),
+            source_engine=cfield.source_engine,
+            status=cfield.status.value,
         ))
     db.add(cn)
     db.flush()
@@ -632,7 +672,9 @@ def submit_cn_corrections(
         spec = _SPEC_BY_ATTR.get(attr)
         if spec is None:
             raise BillingBadRequest(f"unknown field '{raw_attr}'")
-        setattr(cn, spec.attr, _coerce(spec, raw_value))
+        typed = _coerce(spec, raw_value)
+        setattr(cn, spec.attr, typed)
+        _mark_field_corrected(cn, attr, spec.kind, typed, raw_value)
         changed.append(attr)
 
     _resync_number(db, cn)
@@ -641,6 +683,23 @@ def submit_cn_corrections(
     db.commit()
     db.refresh(cn)
     return cn
+
+
+def _mark_field_corrected(
+    cn: CreditNote, attr: str, kind: str, typed: Any, raw: str
+) -> None:
+    """Flip the review envelope for a corrected header field to CORRECTED (human-sourced) so the
+    field-editor shows it resolved. ``reason`` has no envelope (free text) — nothing to update."""
+    if attr not in _ENVELOPE_PATHS:
+        return
+    field = next((f for f in cn.fields if f.field_path == attr), None)
+    if field is None:  # envelope row absent (e.g. a pre-migration CN) — create it
+        field = CreditNoteField(cn_id=cn.id, field_path=attr)
+        cn.fields.append(field)
+    field.value_norm = _env_norm(kind, typed)
+    field.value_raw = raw
+    field.status = FieldStatus.CORRECTED.value
+    field.source_engine = "human"
 
 
 def _resync_number(db: Session, cn: CreditNote) -> None:

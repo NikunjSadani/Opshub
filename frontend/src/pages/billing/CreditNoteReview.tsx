@@ -25,20 +25,28 @@ import {
   useManualCnMatch,
   useRematchCn,
   useSubmitCnReview,
+  type CnCorrection,
+  type CnFieldOut,
   type CreditNoteDetail,
   type CreditNoteLine,
 } from '../../api/billingCreditNotes';
 import { BILLING_BASE } from './billingFormat';
 import {
+  FIELD_STATUS_LABEL,
+  FIELD_STATUS_TONE,
   MATCH_STATUS_LABEL,
   MATCH_STATUS_TONE,
   errorMessage,
+  formatConfidence,
   formatDate,
+  isMoneyField,
   money,
+  parseRupeesToPaise,
 } from './billingInvoiceFormat';
 import {
   CN_STATUS_LABEL,
   CN_STATUS_TONE,
+  cnFieldLabel,
   referencedInvoiceTone,
 } from './creditNoteFormat';
 
@@ -51,6 +59,124 @@ const EDITABLE_STATUSES = new Set([
   'NEEDS_MATCH',
   'MATCHED',
 ]);
+
+/** A field is editable in review only while it is flagged low-confidence or missing. */
+function isEditableField(f: CnFieldOut): boolean {
+  return f.status === 'LOW_CONFIDENCE' || f.status === 'MISSING';
+}
+
+/** Parse a Decimal qty string to a number; treat a missing value as 0 for the tally. */
+function qtyNum(s: string | null): number {
+  return s == null ? 0 : Number(s);
+}
+
+/** Show a qty as-is when whole, else to 2 dp — keeps the over-credit copy tidy. */
+function fmtQty(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+const FIELD_CONTROL =
+  'w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/40';
+
+/**
+ * One flagged CN field: an editable input while LOW_CONFIDENCE/MISSING, else a read-only
+ * value (a CORRECTED field reads as resolved). Mirrors the invoice lane's FieldRow —
+ * money is edited in ₹ (the wire stores integer paise), status is conveyed by a text
+ * badge (not colour alone), and hints/errors are wired via aria-describedby.
+ */
+function CnFieldRow({
+  field,
+  edit,
+  error,
+  onEdit,
+}: {
+  field: CnFieldOut;
+  edit: string | undefined;
+  error?: boolean;
+  onEdit: (value: string) => void;
+}) {
+  const inputId = `cn-field-${field.field_path}`;
+  const hintId = `${inputId}-hint`;
+  const errorId = `${inputId}-error`;
+  const editable = isEditableField(field);
+  const isMoney = isMoneyField(field.field_path);
+  // Money fields are EDITED in rupees; an untouched money value shows value_norm/100.
+  // Raw OCR text is not prefilled for money — it is often the exact misread that flagged it.
+  const shown = isMoney
+    ? edit ?? (field.value_norm != null ? (Number(field.value_norm) / 100).toFixed(2) : '')
+    : edit ?? field.value_norm ?? field.value_raw ?? '';
+  const hint = isMoney
+    ? 'Enter amount in ₹'
+    : field.value_raw
+      ? `Extracted text: “${field.value_raw}”`
+      : undefined;
+  const describedBy = [error ? errorId : null, hint ? hintId : null].filter(Boolean).join(' ');
+  return (
+    <div className="grid grid-cols-1 gap-1 border-t border-slate-100 py-3 sm:grid-cols-[14rem_1fr] sm:gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <label
+          htmlFor={editable ? inputId : undefined}
+          className="text-sm font-medium text-slate-700"
+        >
+          {cnFieldLabel(field.field_path)}
+        </label>
+        <Badge tone={FIELD_STATUS_TONE[field.status]}>{FIELD_STATUS_LABEL[field.status]}</Badge>
+        <span className="text-xs tabular-nums text-slate-400">
+          {formatConfidence(field.confidence)}
+        </span>
+      </div>
+      <div>
+        {editable ? (
+          <>
+            <div className={isMoney ? 'relative' : undefined}>
+              {isMoney && (
+                <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-sm text-slate-500">
+                  ₹
+                </span>
+              )}
+              <input
+                id={inputId}
+                value={shown}
+                onChange={(e) => onEdit(e.target.value)}
+                inputMode={isMoney ? 'decimal' : undefined}
+                aria-describedby={describedBy || undefined}
+                aria-invalid={error || undefined}
+                placeholder={
+                  isMoney
+                    ? '0.00'
+                    : field.status === 'MISSING'
+                      ? 'Not found — enter a value'
+                      : undefined
+                }
+                className={`${FIELD_CONTROL}${isMoney ? ' pl-7' : ''}${
+                  error ? ' border-red-400 focus:border-red-500 focus:ring-red-500/40' : ''
+                }`}
+              />
+            </div>
+            {error && (
+              <span id={errorId} className="mt-1 block text-xs text-red-600">
+                Enter a valid rupee amount (numbers, up to 2 decimals).
+              </span>
+            )}
+            {hint && (
+              <span id={hintId} className="mt-1 block text-xs text-slate-400">
+                {hint}
+              </span>
+            )}
+          </>
+        ) : (
+          <p className="text-sm text-slate-900">
+            {isMoney && field.value_norm != null ? (
+              money(Number(field.value_norm))
+            ) : (
+              field.value_norm || field.value_raw || <span className="text-slate-400">—</span>
+            )}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /** A concise label for a PO line offered as a manual-match target. */
 function poLineLabel(l: POLine): string {
@@ -115,6 +241,11 @@ function LinesMatchTable({
           // longer OPEN — so the control's current value is always representable.
           const options = matched && matched.line_status !== 'OPEN' ? [matched, ...openLines] : openLines;
           const busy = mappingLineId === l.id;
+          // Over-credit tally (matched lines only — billed/already-credited are null when
+          // UNMATCHED). credited-so-far = other confirmed CNs + THIS line's credit qty.
+          const hasBilled = l.billed_qty != null;
+          const creditedSoFar = qtyNum(l.already_credited_qty) + qtyNum(l.quantity);
+          const overCredited = hasBilled && creditedSoFar > qtyNum(l.billed_qty);
           return (
             <Tr key={l.id}>
               <Td className="tabular-nums text-slate-500">{l.line_no}</Td>
@@ -132,6 +263,18 @@ function LinesMatchTable({
                   </div>
                   {l.po_line_label && (
                     <span className="text-xs text-slate-500">→ {l.po_line_label}</span>
+                  )}
+                  {hasBilled && (
+                    <span className="text-xs text-slate-500">
+                      Invoice billed {fmtQty(qtyNum(l.billed_qty))} · already credited{' '}
+                      {fmtQty(qtyNum(l.already_credited_qty))}
+                    </span>
+                  )}
+                  {overCredited && (
+                    <span role="status" className="text-xs font-medium text-amber-700">
+                      Credits {fmtQty(creditedSoFar)} but the invoice billed only{' '}
+                      {fmtQty(qtyNum(l.billed_qty))} on this line.
+                    </span>
                   )}
                   {noPo ? (
                     <span className="text-xs text-amber-700">
@@ -194,9 +337,14 @@ export function CreditNoteReview() {
   const cancel = useCancelCn();
   const del = useDeleteCn();
 
+  const [edits, setEdits] = useState<Record<string, string>>({});
   const [mappingLineId, setMappingLineId] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  function setEdit(fieldPath: string, value: string) {
+    setEdits((prev) => ({ ...prev, [fieldPath]: value }));
+  }
 
   const backLink = (
     <Link
@@ -237,15 +385,59 @@ export function CreditNoteReview() {
   const isRejected = cn.status === 'REJECTED';
   const refInvoiceConfirmed = cn.referenced_invoice?.status === 'CONFIRMED';
 
+  // Flagged header/total fields (LOW_CONFIDENCE / MISSING / CORRECTED) surface in the
+  // editor card; a CORRECTED field reads as resolved. Clean (OK) fields stay in the
+  // read-only totals summary.
+  const flaggedFields = cn.fields.filter((f) => f.status !== 'OK');
+
+  const moneyErrorPaths = new Set(
+    Object.entries(edits)
+      .filter(([path, v]) => isMoneyField(path) && v.trim() !== '' && parseRupeesToPaise(v) == null)
+      .map(([path]) => path),
+  );
+  const hasMoneyError = moneyErrorPaths.size > 0;
+  const hasEdits = Object.values(edits).some((v) => v.trim() !== '');
+
+  // Build the frozen-contract corrections array: key is `field` (= field_path), money
+  // values converted ₹→integer-paise; blank / unparseable money edits are dropped.
+  function buildCorrections(): CnCorrection[] {
+    return Object.entries(edits).flatMap(([field, raw]) => {
+      const v = raw.trim();
+      if (v === '') return [];
+      if (isMoneyField(field)) {
+        const paise = parseRupeesToPaise(v);
+        return paise == null ? [] : [{ field, value: String(paise) }];
+      }
+      return [{ field, value: v }];
+    });
+  }
+
+  // Soft over-credit visibility: the CN's credit total exceeds the credited invoice's
+  // grand total. NEVER blocks Confirm — the backend intentionally soft-flags.
+  const ref = cn.referenced_invoice;
+  const creditExceedsInvoice =
+    ref?.grand_total_paise != null &&
+    cn.grand_total_paise != null &&
+    cn.grand_total_paise > ref.grand_total_paise;
+
+  // Confirm gating is unchanged (operate + editable + all-matched + ref-invoice CONFIRMED);
+  // a visibly-broken money edit is the only added guard (mirrors the invoice lane). The
+  // over-credit tally is a SOFT warning and deliberately does NOT gate.
   const canConfirm =
-    canOperate && isEditableStatus && hasLines && allLinesMatched && refInvoiceConfirmed;
+    canOperate &&
+    isEditableStatus &&
+    hasLines &&
+    allLinesMatched &&
+    refInvoiceConfirmed &&
+    !hasMoneyError;
 
   function onConfirm() {
     if (!canConfirm) return;
     submit.mutate(
-      { id: cn!.id, confirm: true },
+      { id: cn!.id, corrections: buildCorrections(), confirm: true },
       {
         onSuccess: (updated) => {
+          setEdits({});
           if (updated.status === 'CONFIRMED') {
             toast.success('Credit note confirmed.');
           } else {
@@ -254,6 +446,22 @@ export function CreditNoteReview() {
         },
         // Surface the backend's honest 409 reason VERBATIM (invoice not confirmed /
         // unmatched line).
+        onError: (err) => toast.error(errorMessage(err)),
+      },
+    );
+  }
+
+  function onSaveDraft() {
+    if (hasMoneyError) return;
+    const corrections = buildCorrections();
+    if (corrections.length === 0) return;
+    submit.mutate(
+      { id: cn!.id, corrections, confirm: false },
+      {
+        onSuccess: () => {
+          setEdits({});
+          toast.success('Corrections saved.');
+        },
         onError: (err) => toast.error(errorMessage(err)),
       },
     );
@@ -310,17 +518,17 @@ export function CreditNoteReview() {
     });
   }
 
-  const confirmReason = !hasLines
-    ? 'At least one line item is required to confirm.'
-    : !allLinesMatched
-      ? 'Match every line to a PO line to confirm.'
-      : !refInvoiceConfirmed
-        ? 'The credited invoice must be Confirmed before this credit note can be confirmed.'
-        : !canOperate
-          ? 'You need Operate access to confirm this credit note.'
-          : '';
-
-  const ref = cn.referenced_invoice;
+  const confirmReason = hasMoneyError
+    ? 'Fix the highlighted amount to confirm.'
+    : !hasLines
+      ? 'At least one line item is required to confirm.'
+      : !allLinesMatched
+        ? 'Match every line to a PO line to confirm.'
+        : !refInvoiceConfirmed
+          ? 'The credited invoice must be Confirmed before this credit note can be confirmed.'
+          : !canOperate
+            ? 'You need Operate access to confirm this credit note.'
+            : '';
 
   return (
     <div>
@@ -331,6 +539,30 @@ export function CreditNoteReview() {
         subtitle="A credit note reduces the amount receivable against the invoice it references."
         actions={<Badge tone={CN_STATUS_TONE[cn.status]}>{CN_STATUS_LABEL[cn.status]}</Badge>}
       />
+
+      {cn.review_reasons.length > 0 && (
+        <div
+          role="status"
+          className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+        >
+          <p className="mb-1 font-semibold">Why this needs a look</p>
+          <ul className="list-disc pl-5">
+            {cn.review_reasons.map((reason, i) => (
+              <li key={i}>{reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {cn.needs_ocr && (
+        <div
+          role="status"
+          className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600"
+        >
+          This PDF has no text layer (scanned/image). OCR is not available yet, so its fields could
+          not be extracted automatically.
+        </div>
+      )}
 
       {/* Referenced invoice header — the CN can only be confirmed once this is CONFIRMED. */}
       <Card className="mb-6 p-5">
@@ -392,12 +624,42 @@ export function CreditNoteReview() {
           <span className="text-slate-900">Credit total</span>
           <span className="tabular-nums text-slate-900">{money(cn.grand_total_paise)}</span>
         </div>
+        {creditExceedsInvoice && ref != null && (
+          <p
+            role="status"
+            className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800"
+          >
+            This credit note's total ({money(cn.grand_total_paise)}) exceeds the credited invoice's
+            total ({money(ref.grand_total_paise)}). Confirm only if this is intended.
+          </p>
+        )}
         {cn.reason && (
           <p className="mt-3 text-xs text-slate-500">
             <span className="font-medium text-slate-600">Reason:</span> {cn.reason}
           </p>
         )}
       </Card>
+
+      {/* Field editor — only the header/total fields flagged for review (low-confidence,
+          missing, or already corrected). Mirrors the invoice lane's affordance. */}
+      {flaggedFields.length > 0 && (
+        <Card className="mb-6 p-5">
+          <h2 className="mb-1 text-sm font-semibold text-slate-900">Fields flagged for review</h2>
+          <p className="mb-2 text-xs text-slate-500">
+            Fields the extractor was unsure about are editable. Correct them, then Save corrections
+            or Confirm.
+          </p>
+          {flaggedFields.map((f) => (
+            <CnFieldRow
+              key={f.field_path}
+              field={f}
+              edit={edits[f.field_path]}
+              error={moneyErrorPaths.has(f.field_path)}
+              onEdit={(v) => setEdit(f.field_path, v)}
+            />
+          ))}
+        </Card>
+      )}
 
       <div className="mb-6">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -447,6 +709,16 @@ export function CreditNoteReview() {
             <Button onClick={onConfirm} disabled={!canConfirm} loading={submit.isPending}>
               Confirm credit note
             </Button>
+            {hasEdits && canOperate && (
+              <Button
+                variant="secondary"
+                onClick={onSaveDraft}
+                disabled={submit.isPending || hasMoneyError}
+                loading={submit.isPending}
+              >
+                Save corrections
+              </Button>
+            )}
             {!canConfirm && confirmReason && (
               <span className="text-xs text-slate-500">{confirmReason}</span>
             )}

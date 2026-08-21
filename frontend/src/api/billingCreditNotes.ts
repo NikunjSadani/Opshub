@@ -57,6 +57,12 @@ export type CnUploadOutcomeStatus =
 /** One credit-note line's PO-match status (backend CNLine.match_status). */
 export type CnLineMatchStatus = 'MATCHED' | 'MANUAL' | 'UNMATCHED';
 
+/**
+ * A single extracted CN field's confidence status. Structurally identical to the
+ * invoice `FieldStatus` — the field-editor reuses the shared FIELD_STATUS_* maps.
+ */
+export type CnFieldStatus = 'OK' | 'LOW_CONFIDENCE' | 'MISSING' | 'CORRECTED';
+
 // --- DTOs ---------------------------------------------------------------------
 
 /**
@@ -101,6 +107,23 @@ export interface CnReferencedInvoice {
 }
 
 /**
+ * One extracted CN header/total field envelope (backend `CNFieldOut`). Unlike the
+ * invoice fields, the `field_path` is BARE (no `header.`/`totals.` prefix), one of:
+ * cn_number, cn_date, total_taxable_paise, total_cgst_paise, total_sgst_paise,
+ * total_igst_paise, round_off_paise, grand_total_paise. Money paths end in `_paise`.
+ */
+export interface CnFieldOut {
+  field_path: string;
+  /** Null when missing. Money values are integer-paise strings. */
+  value_norm: string | null;
+  value_raw: string | null;
+  /** 0..1 calibrated confidence. */
+  confidence: number;
+  source_engine: string | null;
+  status: CnFieldStatus;
+}
+
+/**
  * One line item on a credit note, with its PO-match state (backend `CNLine`). The
  * matched PO line is carried BOTH as an id AND as a ready-to-show `po_line_label`, so
  * the review table can render the current mapping without a second lookup.
@@ -120,6 +143,17 @@ export interface CreditNoteLine {
   /** A ready-to-display label for the matched PO line, or null when UNMATCHED. */
   po_line_label: string | null;
   match_status: CnLineMatchStatus;
+  /**
+   * The referenced invoice line's billed quantity (Decimal string), for the
+   * over-credit tally. Null when the line is UNMATCHED (no invoice line to compare to).
+   */
+  billed_qty: string | null;
+  /**
+   * Quantity already credited on this invoice line by OTHER confirmed credit notes
+   * (Decimal string). Null when the line is UNMATCHED. This CN's own `quantity` is
+   * added on top to get the credited-so-far total.
+   */
+  already_credited_qty: string | null;
 }
 
 /**
@@ -143,6 +177,12 @@ export interface CreditNoteDetail {
   round_off_paise: number | null;
   grand_total_paise: number | null;
   status: CreditNoteStatus;
+  /** True when the source PDF had no text layer (scanned/image) — fields not auto-extracted. */
+  needs_ocr: boolean;
+  /** Human-readable reasons this CN was flagged for review (amber banner). */
+  review_reasons: string[];
+  /** Per-field extraction envelopes for the header + totals (the review field-editor). */
+  fields: CnFieldOut[];
   /** Why the credit note was issued (free text), or null. */
   reason: string | null;
   source_file: CnSourceFile | null;
@@ -170,20 +210,15 @@ export interface CnUploadBatch {
 }
 
 /**
- * Header/total corrections submitted from the review panel (backend CN review
- * `corrections`). An OBJECT of the editable header + totals fields (NOT an array) —
- * only the supplied keys apply. Money fields are integer PAISE.
+ * One field correction submitted from the review panel (backend `CNCorrectionItem`).
+ * An ARRAY of these rides the wire under `corrections`. NOTE the wire key is `field`
+ * (= the envelope's `field_path`), NOT `field_path`. For a money (`*_paise`) field the
+ * `value` MUST be an integer-paise string (the backend coerces money corrections to
+ * int); the review screen converts the operator's rupee input to paise before building it.
  */
-export interface CnCorrections {
-  /** YYYY-MM-DD. */
-  cn_date?: string;
-  reason?: string;
-  total_taxable_paise?: number;
-  total_cgst_paise?: number;
-  total_sgst_paise?: number;
-  total_igst_paise?: number;
-  round_off_paise?: number;
-  grand_total_paise?: number;
+export interface CnCorrection {
+  field: string;
+  value: string;
 }
 
 export interface CreditNoteFilters {
@@ -306,18 +341,20 @@ export function useUploadCreditNotes(): UseMutationResult<
 export function useSubmitCnReview(): UseMutationResult<
   CreditNoteDetail,
   ApiError,
-  { id: string; corrections?: CnCorrections; confirm?: boolean }
+  { id: string; corrections?: CnCorrection[]; confirm?: boolean }
 > {
   const { patch } = useApi();
   const qc = useQueryClient();
   return useMutation<
     CreditNoteDetail,
     ApiError,
-    { id: string; corrections?: CnCorrections; confirm?: boolean }
+    { id: string; corrections?: CnCorrection[]; confirm?: boolean }
   >({
+    // Send `corrections` only when there is something to correct — a bare confirm
+    // posts just `{ confirm: true }` (the backend treats a missing key as no edits).
     mutationFn: ({ id, corrections, confirm }) =>
       patch<CreditNoteDetail>(`/billing/credit-notes/${id}/review`, {
-        ...(corrections ? { corrections } : {}),
+        ...(corrections && corrections.length > 0 ? { corrections } : {}),
         confirm: confirm ?? false,
       }),
     onSuccess: (cn) => {
