@@ -1209,6 +1209,7 @@ def _build_view(ch: Challan) -> ChallanView:
     return ChallanView(
         number=ch.number,
         project_id=ch.project_code,
+        po_number=ch.po_number,
         invoice_number=ch.invoice_number,
         challan_date=_ordinal_date(ch.challan_date),
         consignor=ConsignorView(

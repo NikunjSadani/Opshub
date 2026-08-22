@@ -37,7 +37,7 @@ from decimal import Decimal
 # (master data), so it is NOT an upload column. Order = template column order. ---
 CHALLAN_COLUMNS: tuple[str, ...] = (
     "challan_group",           # grouping key: rows sharing it -> one challan
-    "project_id",              # references an ACTIVE Project (<CODE>-<seq>); printed
+    "project_id",              # references an ACTIVE Project (<CODE>-<seq>); NOT printed
     "ship_to_enterprise",      # ship-to block ("Detail of Shipment to") ...
     "ship_to_name",
     "ship_to_address_line1",
@@ -60,7 +60,7 @@ CHALLAN_COLUMNS: tuple[str, ...] = (
     "rate",                    # optional; may be free text; pre-tax unit rate
     "amount",                  # optional; tax-INCLUSIVE line amount in rupees -> paise
     "gst_rate",                # optional; if present must match the HSN's rate
-    "po_number",               # optional (not printed on L/433)
+    "po_number",               # optional; printed as "PO No." when present
     "invoice_number",          # optional (printed above the challan number)
 )
 
@@ -314,7 +314,8 @@ class LineView:
 @dataclass
 class ChallanView:
     number: str          # GIF/DC/26-27/L/000189
-    project_id: str      # printed on the document ("" -> omitted)
+    project_id: str      # NOT printed on the document (internal reference only)
+    po_number: str       # printed as "PO No." just below the challan number ("" -> omitted)
     invoice_number: str  # printed just above the challan number ("" -> omitted)
     challan_date: str    # display "28th July 2026"
     consignor: ConsignorView

@@ -2,6 +2,13 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "opshub-backend",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["frontend/e2e/serve-backend.mjs"],
+      "port": 8000,
+      "url": "http://localhost:8000/docs"
+    },
+    {
       "name": "opshub-frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "frontend", "run", "dev"],

@@ -375,7 +375,7 @@ import datetime as _dt  # noqa: E402
 
 
 def _seed_challan(db: object, n: int, status: str = "ISSUED", *, with_pdf: bool = True) -> None:
-    """Seed one challan (series L, FY 26-27, number_int=n) + a stored A4 PDF."""
+    """Seed one challan (series L, FY 26-27, number_int=n) + a stored half-A4 PDF."""
     from app.platform.storage import get_storage
     alloc = NumberingAllocation(series="L", fy="26-27", number=n,
                                 formatted=f"GIF/DC/26-27/L/{n:06d}", status="ISSUED")

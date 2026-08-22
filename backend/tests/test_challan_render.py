@@ -24,6 +24,7 @@ def _view(show_amount: bool = True) -> ChallanView:
     return ChallanView(
         number="GIF/DC/26-27/L/000189",
         project_id="BRI-001",
+        po_number="PO-2026-778",
         invoice_number="INV-2026-778",
         challan_date="28th July 2026",
         consignor=ConsignorView("Tech Gifsy Solutions Limited", "Howrah warehouse",
@@ -62,15 +63,31 @@ def test_invoice_number_prints_above_challan_number() -> None:
     assert "Invoice No.:" not in build_challan_html(view)
 
 
-def test_project_id_prints_under_challan_number() -> None:
+def test_po_number_prints_under_challan_number() -> None:
     html = build_challan_html(_view())
-    assert "Project ID: BRI-001" in html
+    assert "PO No.: PO-2026-778" in html
     # positioned just below the delivery challan number
-    assert html.index("Delivery Challan No.:") < html.index("Project ID:")
+    assert html.index("Delivery Challan No.:") < html.index("PO No.:")
     # omitted entirely (label and all) when blank
     view = _view()
-    view.project_id = ""
-    assert "Project ID:" not in build_challan_html(view)
+    view.po_number = ""
+    assert "PO No.:" not in build_challan_html(view)
+
+
+def test_project_id_is_never_printed() -> None:
+    # Project ID is an internal reference and must NOT appear on the document,
+    # whether present or blank.
+    html = build_challan_html(_view())
+    assert "Project ID" not in html
+    assert "BRI-001" not in html
+
+
+def test_page_is_a5_landscape() -> None:
+    # The template designs for the half-A4 canvas so merge_2up stacks two per A4
+    # sheet at 100% (no shrink-to-fit). The @page rule must target A5 landscape.
+    html = build_challan_html(_view())
+    assert "size: A5 landscape" in html
+    assert "size: A4" not in html
 
 
 def test_html_escapes_untrusted_values() -> None:
@@ -78,7 +95,7 @@ def test_html_escapes_untrusted_values() -> None:
     view.lines[0].description = "<script>alert(1)</script>"
     view.ship_to.name = "</td><td>x"
     view.consignee.address = "<b>inject</b>"
-    view.project_id = "<img src=x onerror=alert(1)>"
+    view.po_number = "<img src=x onerror=alert(1)>"
     html = build_challan_html(view)
     assert "&lt;script&gt;" in html
     assert "<script>alert(1)</script>" not in html

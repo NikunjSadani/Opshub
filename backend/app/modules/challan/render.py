@@ -1,8 +1,10 @@
 """Render + packaging layer for delivery challans.
 
 Turns a fully-resolved, ORM-free `ChallanView` (see `schema.py`) into a faithful
-A4 business-document HTML, then into PDF bytes, and packages many of those into a
-single ZIP or a merged PDF for a batch download.
+half-A4 (A5-landscape) business-document HTML, then into PDF bytes, and packages
+many of those into a single ZIP or a merged PDF for a batch download. Designing on
+the half-A4 canvas lets `merge_2up` stack two challans per A4 sheet at 100% (no
+shrink-to-fit), so the printed text stays full size.
 
 SECURITY — every string in a `ChallanView` originates from an untrusted Excel
 upload. `build_challan_html` binds each value through `markupsafe.escape`, so a
@@ -82,9 +84,10 @@ def _line_row(line: LineView, show_amount: bool) -> Markup:
 
 
 def build_challan_html(view: ChallanView) -> str:
-    """Build a complete standalone A4 HTML document for one challan (faithful to
-    the `L/433` layout). Pure function, no I/O; every interpolated value is
-    HTML-escaped, so untrusted Excel cell text renders as inert data."""
+    """Build a complete standalone half-A4 (A5-landscape) HTML document for one
+    challan (faithful to the `L/433` layout, re-fitted to the half-page canvas).
+    Pure function, no I/O; every interpolated value is HTML-escaped, so untrusted
+    Excel cell text renders as inert data."""
     rows = Markup("").join(_line_row(line, view.show_amount) for line in view.lines)
     total_amount = escape(view.total_amount) if view.show_amount else Markup("")
     invoice = (
@@ -92,9 +95,9 @@ def build_challan_html(view: ChallanView) -> str:
         if view.invoice_number
         else Markup("")
     )
-    project = (
-        Markup(f"<div>Project ID: {escape(view.project_id)}</div>")
-        if view.project_id
+    po = (
+        Markup(f"<div>PO No.: {escape(view.po_number)}</div>")
+        if view.po_number
         else Markup("")
     )
 
@@ -105,28 +108,28 @@ def build_challan_html(view: ChallanView) -> str:
 <meta charset="utf-8">
 <title>Delivery Challan {number}</title>
 <style>
-  @page {{ size: A4; margin: 12mm; }}
+  @page {{ size: A5 landscape; margin: 8mm; }}
   * {{ box-sizing: border-box; }}
-  body {{ font-family: Arial, "Helvetica Neue", sans-serif; font-size: 11px;
+  body {{ font-family: Arial, "Helvetica Neue", sans-serif; font-size: 9px;
          color: #111; margin: 0; }}
-  .title {{ text-align: center; font-size: 16px; font-weight: bold; margin-bottom: 6px; }}
+  .title {{ text-align: center; font-size: 13px; font-weight: bold; margin-bottom: 4px; }}
   table.frame {{ width: 100%; border-collapse: collapse; }}
-  table.frame > tbody > tr > td {{ border: 1px solid #333; padding: 6px 8px;
+  table.frame > tbody > tr > td {{ border: 1px solid #333; padding: 3px 5px;
                                    vertical-align: top; }}
   .label {{ font-weight: bold; text-transform: none; }}
   .party-name {{ font-weight: bold; }}
   .k {{ color: #333; }}
-  .meta div {{ margin-bottom: 2px; }}
+  .meta div {{ margin-bottom: 1px; }}
   .meta .num {{ font-weight: bold; }}
-  table.lines {{ width: 100%; border-collapse: collapse; margin-top: 8px; }}
-  table.lines th, table.lines td {{ border: 1px solid #333; padding: 4px 6px;
+  table.lines {{ width: 100%; border-collapse: collapse; margin-top: 5px; }}
+  table.lines th, table.lines td {{ border: 1px solid #333; padding: 2px 4px;
                                     text-align: left; vertical-align: top; }}
   table.lines th {{ background: #f0f0f0; }}
   table.lines td:nth-child(4), table.lines td:nth-child(5),
   table.lines td:nth-child(6) {{ text-align: right; }}
   .total-row td {{ font-weight: bold; background: #f6f6f6; }}
   .notsale {{ font-style: italic; }}
-  .sign {{ margin-top: 40px; text-align: right; padding-right: 6px; }}
+  .sign {{ margin-top: 14px; text-align: right; padding-right: 6px; }}
 </style>
 </head>
 <body>
@@ -138,7 +141,7 @@ def build_challan_html(view: ChallanView) -> str:
           <div class="meta">
             {invoice}
             <div>Delivery Challan No.: <span class="num">{number}</span></div>
-            {project}
+            {po}
             <div>Date of Challan: {date}</div>
           </div>
         </td>
@@ -183,7 +186,7 @@ def build_challan_html(view: ChallanView) -> str:
     ).format(
         number=escape(view.number),
         invoice=invoice,
-        project=project,
+        po=po,
         date=escape(view.challan_date),
         consignor=_consignor_block(view.consignor),
         consignee=_consignee_block(view.consignee),
@@ -240,7 +243,7 @@ class StubRenderer:
         from pypdf import PdfWriter  # lazy, but always installed (used by merge_pdfs)
 
         writer = PdfWriter()
-        writer.add_blank_page(width=595, height=842)  # A4 points
+        writer.add_blank_page(width=595, height=421)  # A5 landscape (half-A4) points
         buf = io.BytesIO()
         writer.write(buf)
         return buf.getvalue()
@@ -288,7 +291,9 @@ def merge_pdfs(pdfs: list[bytes]) -> bytes:
     return out.getvalue()
 
 
-# A4 in PDF points (matches the StubRenderer + WeasyPrint's @page A4).
+# A4 portrait in PDF points — the OUTPUT sheet size for two-up compositing. Each
+# source challan is half this height (A5 landscape 595x421, per @page + StubRenderer),
+# so it drops into a slot at scale 1.0 (no shrink).
 _A4_W_PT = 595.0
 _A4_H_PT = 842.0
 
