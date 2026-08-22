@@ -155,14 +155,19 @@ def submit_password(
     stored = db.execute(
         select(StoredFile).where(StoredFile.id == invoice.source_file_id)
     ).scalar_one_or_none()
-    if stored is None:
-        # Confirmed invoice with a dangling blob ref: the visitor is already
+    # Defense-in-depth (DUAL audit LOW): only ever stream a BILLING-module blob. source_file_id
+    # is a server-set FK (an internal invariant), but this guard means a future mis-set ref can
+    # never publicly serve some other module's upload as an "invoice".
+    if stored is None or stored.module_key != "billing":
+        # Confirmed invoice with a dangling/foreign blob ref: the visitor is already
         # authenticated, so surfacing "not available yet" is not an enumeration risk.
         return HTMLResponse(_NOT_AVAILABLE_YET_HTML)
 
     try:
         handle = get_storage().open(stored.storage_ref)
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, ValueError, NotImplementedError):
+        # NotImplementedError guards a not-yet-wired backend (e.g. GcsStorage) -> degrade to
+        # "not available" instead of a 500 that would leak a stack trace.
         return HTMLResponse(_NOT_AVAILABLE_YET_HTML)
 
     def _stream() -> Iterator[bytes]:

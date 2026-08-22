@@ -133,7 +133,8 @@ def test_access_pin_set_clear_and_detail(client: TestClient) -> None:
 
 def test_access_pin_min_length_rejected(client: TestClient) -> None:
     cid = _new_client(client)
-    r = client.patch(f"/api/v1/projects/clients/{cid}", json={"access_pin": "ab"})
+    # 7 chars is below the 8-char floor (raised from 4 after the DUAL security audit) -> 422.
+    r = client.patch(f"/api/v1/projects/clients/{cid}", json={"access_pin": "short12"})
     assert r.status_code == 422, r.text
     # rejected pin never persisted
     assert client.get(f"/api/v1/projects/clients/{cid}").json()["access_pin"] is None

@@ -155,9 +155,9 @@ function ClientEditModal({
 
   const trimmedName = name.trim();
   const termsValid = creditTerms === '' || /^\d{1,5}$/.test(creditTerms);
-  // Blank clears the PIN; a set value must be 4-32 chars (mirrors the backend).
+  // Blank clears the PIN; a set value must be 8-32 chars (mirrors the backend).
   const trimmedPin = accessPin.trim();
-  const pinValid = trimmedPin === '' || (trimmedPin.length >= 4 && trimmedPin.length <= 32);
+  const pinValid = trimmedPin === '' || (trimmedPin.length >= 8 && trimmedPin.length <= 32);
   const canSubmit = trimmedName.length > 0 && termsValid && pinValid && !update.isPending;
 
   function close() {
@@ -233,7 +233,7 @@ function ClientEditModal({
         <TextField
           label="Access PIN (challan QR)"
           value={accessPin}
-          error={!pinValid ? '4-32 characters.' : undefined}
+          error={!pinValid ? '8-32 characters.' : undefined}
           hint="Used as the password for the QR on this client's delivery challans, together with the challan number. Share it with the client directly; it's never printed. Leave blank to clear."
           onChange={(e) => setAccessPin(e.target.value.slice(0, 32))}
           maxLength={32}

@@ -42,9 +42,12 @@ logger = logging.getLogger(__name__)
 
 _CODE_RE = re.compile(r"^[A-Z]{3}$")
 _MAX_NAME_LEN = 200
-# Access PIN is a readable shared secret (the challan-QR password): short enough to
-# share out-of-band, long enough not to be trivially blank. Column is String(32).
-_MIN_PIN_LEN = 4
+# Access PIN is the readable shared secret behind the challan-QR password. Because the
+# challan number (the other half of the password) is PUBLIC — printed on the challan and
+# echoed on the viewer form — the PIN is effectively the ONLY secret, so a short/numeric PIN
+# is brute-forceable by anyone who holds a challan (DUAL security audit HIGH). Floor is 8 (was
+# 4); prefer a system-generated alphanumeric PIN. Column is String(32).
+_MIN_PIN_LEN = 8
 _MAX_PIN_LEN = 32
 # The parent-client row-lock is the real serializer for per-client seq allocation;
 # this retry is only a thin backstop for a rare lost race. Correctness assumes the
