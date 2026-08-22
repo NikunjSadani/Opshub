@@ -67,6 +67,10 @@ class ProjectClient(Base):
     # existing clients (incl. the GEN overhead client) are unaffected.
     pan: Mapped[str | None] = mapped_column(String(10))
     credit_terms_days: Mapped[int | None] = mapped_column(Integer)
+    # Per-client secret for the challan-QR public invoice viewer (owner-gated feature). The
+    # QR password is this PIN + the delivery challan number; NULL until staff set one. Not
+    # printed on any document. Readable (staff share it out-of-band), so keep it access-controlled.
+    access_pin: Mapped[str | None] = mapped_column(String(32))
     active: Mapped[bool] = mapped_column(default=True)
     created_by: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

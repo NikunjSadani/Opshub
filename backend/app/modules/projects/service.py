@@ -42,6 +42,10 @@ logger = logging.getLogger(__name__)
 
 _CODE_RE = re.compile(r"^[A-Z]{3}$")
 _MAX_NAME_LEN = 200
+# Access PIN is a readable shared secret (the challan-QR password): short enough to
+# share out-of-band, long enough not to be trivially blank. Column is String(32).
+_MIN_PIN_LEN = 4
+_MAX_PIN_LEN = 32
 # The parent-client row-lock is the real serializer for per-client seq allocation;
 # this retry is only a thin backstop for a rare lost race. Correctness assumes the
 # DB runs at READ COMMITTED (Postgres default): each retry issues a FRESH SELECT for
@@ -331,11 +335,16 @@ def update_client(
     pan: str | None | _Unset = _UNSET,
     credit_terms_days: int | None | _Unset = _UNSET,
     active: bool | _Unset = _UNSET,
+    access_pin: str | None | _Unset = _UNSET,
     actor_uid: str | None = None,
 ) -> ProjectClient:
     """Patch a client's editable master fields. Only supplied args change; a
     nullable field can be explicitly cleared by passing `None` (distinct from the
     `_UNSET` "leave unchanged" default). PAN is normalized (strip+upper). Audited.
+
+    `access_pin` is the challan-QR shared secret: an empty/blank/`None` value CLEARS
+    it; a set value must be 4-32 chars. The audit trail records that the pin was
+    set/cleared — never the value itself (it is a readable shared secret).
     """
     changed: dict[str, object | None] = {}
     if not isinstance(name, _Unset):
@@ -355,6 +364,19 @@ def update_client(
     if not isinstance(active, _Unset):
         client.active = active
         changed["active"] = active
+    if not isinstance(access_pin, _Unset):
+        pin = access_pin.strip() if access_pin else ""
+        if not pin:  # empty/blank/None -> clear the shared secret
+            client.access_pin = None
+            changed["access_pin"] = "cleared"
+        else:
+            if not (_MIN_PIN_LEN <= len(pin) <= _MAX_PIN_LEN):
+                raise ProjectError(
+                    f"access_pin must be {_MIN_PIN_LEN}-{_MAX_PIN_LEN} characters"
+                )
+            client.access_pin = pin
+            # Never audit the value itself — it's a readable shared secret.
+            changed["access_pin"] = "set"
 
     db.flush()
     audit.log(

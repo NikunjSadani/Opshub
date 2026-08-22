@@ -33,6 +33,11 @@ export interface Client {
   /** Payment/credit terms in days, or null when not set. */
   credit_terms_days: number | null;
   active: boolean;
+  /**
+   * Challan-QR access PIN, or null when not set. A readable shared secret (staff
+   * share it out-of-band); exposed only so the UI can show whether one is set.
+   */
+  access_pin: string | null;
 }
 
 export interface ClientInput {
@@ -214,6 +219,8 @@ export interface ClientDetail {
   pan: string | null;
   credit_terms_days: number | null;
   active: boolean;
+  /** Challan-QR access PIN, or null when not set (readable shared secret). */
+  access_pin: string | null;
   gstins: Gstin[];
   addresses: Address[];
   contacts: Contact[];
@@ -225,6 +232,11 @@ export interface ClientPatch {
   pan?: string | null;
   credit_terms_days?: number | null;
   active?: boolean;
+  /**
+   * Challan-QR access PIN. Send "" (or null) to CLEAR it; a set value must be
+   * 4-32 chars (the backend rejects a shorter one). Omit to leave unchanged.
+   */
+  access_pin?: string | null;
 }
 
 export interface GstinInput {

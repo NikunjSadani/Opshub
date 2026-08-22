@@ -24,6 +24,7 @@ from app.modules.masterdata.routes import router as masterdata_router
 from app.modules.me.routes import router as me_router
 from app.modules.numbering.routes import router as numbering_router
 from app.modules.projects.routes import router as projects_router
+from app.modules.public_docs.routes import router as public_docs_router
 from app.modules.roles.routes import router as roles_router
 from app.modules.sales_orders.routes import router as sales_orders_router
 from app.modules.settings.routes import router as settings_router
@@ -124,6 +125,11 @@ def create_app() -> FastAPI:
     app.include_router(roles_router, prefix="/api/v1", tags=["roles"])
     # The current user's identity + effective permissions (any authenticated user).
     app.include_router(me_router, prefix="/api/v1", tags=["me"])
+    # Public challan-QR invoice viewer — mounted at /d/{token} with NO auth and NO
+    # /api prefix (the QR encodes {public_base_url}/d/{token}). Inert (404) unless
+    # settings.qr_invoice_access_enabled. Registered before the SPA catch-all so its
+    # routes win. NOT a nav ModuleSpec (public surface, not a dashboard module).
+    app.include_router(public_docs_router, tags=["public_docs"])
     _mount_spa(app, settings.static_dir)
     return app
 

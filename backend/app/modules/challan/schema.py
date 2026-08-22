@@ -325,3 +325,4 @@ class ChallanView:
     total_qty: str
     total_amount: str  # "" when value-free
     show_amount: bool  # False -> Rate/Amt columns + total are blank
+    access_token: str = ""  # opaque QR token; "" -> no QR (feature dormant)

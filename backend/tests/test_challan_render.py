@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import io
 import zipfile
+from types import SimpleNamespace
 
+import pytest
+import segno
 from pypdf import PdfReader, PdfWriter
 
 from app.modules.challan.render import build_challan_html, merge_pdfs, zip_files
@@ -111,6 +114,45 @@ def test_value_free_hides_amounts() -> None:
     assert "19,470" not in html
     # ...but the goods still list.
     assert "Titan Couple Watch" in html
+
+
+def _patch_base_url(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    """Point `get_settings().public_base_url` at `url` for the render under test
+    (render.py imports get_settings lazily from app.config, so patch it there)."""
+    monkeypatch.setattr("app.config.get_settings",
+                        lambda: SimpleNamespace(public_base_url=url))
+
+
+def test_qr_embedded_when_base_url_and_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    # public_base_url set + a minted token -> the challan carries the QR for the
+    # exact `/d/{token}` viewer URL (rstrip'd trailing slash), inline in the SVG.
+    _patch_base_url(monkeypatch, "https://ops.example.com/")
+    view = _view()
+    view.access_token = "tok_ABC123"
+    html = build_challan_html(view)
+    assert "class='qr'" in html
+    # The precise URL is proven by reproducing the very SVG the renderer embeds.
+    expected = segno.make("https://ops.example.com/d/tok_ABC123", error="m").svg_inline(
+        border=2, omitsize=True, svgclass="qrimg")
+    assert expected in html
+
+
+def test_qr_omitted_when_base_url_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Dormant: base URL unconfigured -> NO QR even though a token exists.
+    _patch_base_url(monkeypatch, "")
+    view = _view()
+    view.access_token = "tok_ABC123"
+    html = build_challan_html(view)
+    assert "class='qr'" not in html
+    assert "<svg" not in html
+
+
+def test_qr_omitted_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Dormant: base URL set but no token on the view -> NO QR.
+    _patch_base_url(monkeypatch, "https://ops.example.com")
+    html = build_challan_html(_view())  # default access_token == ""
+    assert "class='qr'" not in html
+    assert "<svg" not in html
 
 
 def test_zip_files_round_trips() -> None:

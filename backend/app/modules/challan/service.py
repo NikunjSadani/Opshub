@@ -23,6 +23,7 @@ by the renderer (bind-as-data).
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
@@ -962,6 +963,11 @@ def _persist_challan(
         invoice_number=pc.invoice_number,
         eway_required=total is not None and total > threshold_paise,
         total_paise=total,
+        # Mint the opaque QR token at issue. token_urlsafe(24) is 32 url-safe chars;
+        # collision against the DB unique index is negligible. Idempotent by design —
+        # this is a brand-new row (a resumed run reuses `_existing_challan` and never
+        # re-persists), so `access_token` is only ever set here while it is None.
+        access_token=secrets.token_urlsafe(24),
         status=ChallanStatus.ISSUED.value,
         created_by=actor_uid,
     )
@@ -1235,6 +1241,7 @@ def _build_view(ch: Challan) -> ChallanView:
         total_qty=_qty(sum((line.quantity for line in ch.lines), Decimal(0))),
         total_amount=_rupees(ch.total_paise) if show_amount else "",
         show_amount=show_amount,
+        access_token=ch.access_token or "",
     )
 
 

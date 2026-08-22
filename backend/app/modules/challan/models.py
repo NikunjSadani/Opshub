@@ -179,6 +179,10 @@ class Challan(Base):
 
     po_number: Mapped[str] = mapped_column(String(60), default="")
     invoice_number: Mapped[str] = mapped_column(String(60), default="")
+    # Opaque token the challan QR encodes (…/d/{access_token}); the public viewer resolves it
+    # back to this challan → its invoice_number + client → the uploaded invoice (late-bind).
+    # NULL until minted at generation; unique so it can't collide or be enumerated.
+    access_token: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     eway_required: Mapped[bool] = mapped_column(Boolean, default=False)
     total_paise: Mapped[int | None] = mapped_column(BigInteger)  # None = value-free challan
 

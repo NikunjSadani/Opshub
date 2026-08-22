@@ -73,6 +73,9 @@ class ClientOut(BaseModel):
     pan: str | None = None
     credit_terms_days: int | None = None
     active: bool
+    # Readable shared secret (the challan-QR password); exposed so the FE can show
+    # whether one is set. Staff share it out-of-band; it is never printed.
+    access_pin: str | None = None
 
 
 class ProjectIn(BaseModel):
@@ -263,6 +266,9 @@ class ClientUpdateIn(BaseModel):
     pan: str | None = Field(default=None, max_length=10)
     credit_terms_days: int | None = Field(default=None, ge=0)
     active: bool | None = None
+    # The challan-QR shared secret. Sending "" or null CLEARS it; a set value must
+    # be 4-32 chars (enforced in the service). Omit the key to leave it unchanged.
+    access_pin: str | None = Field(default=None, max_length=32)
 
 
 class GstinIn(BaseModel):
@@ -359,6 +365,9 @@ class ClientDetailOut(BaseModel):
     pan: str | None
     credit_terms_days: int | None
     active: bool
+    # Readable shared secret; present so the edit UI can show/prefill whether a PIN
+    # is set. Not printed on the challan — staff share it with the client directly.
+    access_pin: str | None
     gstins: list[GstinOut]
     addresses: list[AddressOut]
     contacts: list[ContactOut]
@@ -381,6 +390,7 @@ def _client_detail_out(client: ProjectClient) -> ClientDetailOut:
         pan=client.pan,
         credit_terms_days=client.credit_terms_days,
         active=client.active,
+        access_pin=client.access_pin,
         gstins=[GstinOut.model_validate(g) for g in _default_first(gstins)],
         addresses=[AddressOut.model_validate(a) for a in _default_first(addresses)],
         contacts=[ContactOut.model_validate(c) for c in _default_first(contacts)],

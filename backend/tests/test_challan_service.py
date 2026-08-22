@@ -209,6 +209,23 @@ def test_happy_path_reserves_before_render_and_issues(env: tuple[Session, str]) 
     assert batch.zip_file_id is not None and batch.merged_pdf_file_id is not None
 
 
+def test_generation_mints_unique_access_token(env: tuple[Session, str]) -> None:
+    # Every issued challan gets a non-null, non-empty, unique QR access token, minted
+    # at generation (feeds the public /d/{token} invoice viewer).
+    db, db_url = env
+    data = _workbook([
+        _row("G1", "Store A", "Olive Oil 1L", "10", "100.00", "1050.00"),
+        _row("G2", "Store B", "Olive Oil 1L", "2", "100.00", "210.00"),
+    ])
+    batch = _upload(db, data)
+    assert service.validate_batch(db, batch, actor_uid="tester").ok
+    service.generate(db, batch, FakeRenderer(db_url), series="L", actor_uid="tester")
+    tokens = [c.access_token for c in db.execute(select(Challan)).scalars()]
+    assert len(tokens) == 2
+    assert all(t for t in tokens)      # non-null and non-empty
+    assert len(set(tokens)) == 2       # unique per challan
+
+
 def test_value_free_challan(env: tuple[Session, str]) -> None:
     db, db_url = env
     data = _workbook([_row("G1", "Store A", "Sample unit", "1", "", "")])  # no rate/amount

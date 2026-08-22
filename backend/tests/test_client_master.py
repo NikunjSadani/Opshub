@@ -111,6 +111,50 @@ def test_client_out_exposes_pan_and_terms_after_patch(client: TestClient) -> Non
     assert rows[0]["credit_terms_days"] == 30
 
 
+# --------------------------------------------------- access PIN (challan QR)
+
+def test_access_pin_set_clear_and_detail(client: TestClient) -> None:
+    cid = _new_client(client)
+    # freshly-created client: no pin
+    assert client.get(f"/api/v1/projects/clients/{cid}").json()["access_pin"] is None
+
+    # set a pin -> exposed on the update response AND the detail read
+    r = client.patch(f"/api/v1/projects/clients/{cid}", json={"access_pin": "secret12"})
+    assert r.status_code == 200, r.text
+    assert r.json()["access_pin"] == "secret12"
+    assert client.get(f"/api/v1/projects/clients/{cid}").json()["access_pin"] == "secret12"
+
+    # clear it with an empty string -> back to null
+    r = client.patch(f"/api/v1/projects/clients/{cid}", json={"access_pin": ""})
+    assert r.status_code == 200, r.text
+    assert r.json()["access_pin"] is None
+    assert client.get(f"/api/v1/projects/clients/{cid}").json()["access_pin"] is None
+
+
+def test_access_pin_min_length_rejected(client: TestClient) -> None:
+    cid = _new_client(client)
+    r = client.patch(f"/api/v1/projects/clients/{cid}", json={"access_pin": "ab"})
+    assert r.status_code == 422, r.text
+    # rejected pin never persisted
+    assert client.get(f"/api/v1/projects/clients/{cid}").json()["access_pin"] is None
+
+
+def test_access_pin_audited_without_value(client: TestClient) -> None:
+    cid = _new_client(client)
+    secret = "topsecret99"
+    client.patch(f"/api/v1/projects/clients/{cid}", json={"access_pin": secret})
+
+    db = client.app.state.TestSession()
+    rows = list(db.execute(select(AuditLog).where(AuditLog.action == "client.updated")).scalars())
+    db.close()
+    assert rows, "expected a client.updated audit row"
+    # the pin value must NEVER appear in the audit trail
+    for a in rows:
+        assert secret not in str(a.detail)
+    # but the fact that it changed is recorded as "set"
+    assert any((a.detail or {}).get("changed", {}).get("access_pin") == "set" for a in rows)
+
+
 # --------------------------------------------------- add + list children
 
 def test_add_and_list_gstin_address_contact(client: TestClient) -> None:

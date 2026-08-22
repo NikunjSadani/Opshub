@@ -37,6 +37,7 @@ const CLIENT_DETAIL = {
   pan: 'AAACB1234C',
   credit_terms_days: 30,
   active: true,
+  access_pin: null,
   gstins: [
     {
       id: 1,
@@ -256,6 +257,38 @@ describe('ClientDetail', () => {
 
     await waitFor(() => expect(postedBody).not.toBeNull());
     expect((postedBody as { gstin: string }).gstin).toBe('29AAACB1234C1Z8');
+  });
+
+  it('sends access_pin in the client update payload (challan QR PIN)', async () => {
+    let patchedBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.match(/\/projects\/clients\/7$/) && method === 'PATCH') {
+          patchedBody = JSON.parse(String(init?.body));
+          return json({ ...CLIENT_DETAIL, access_pin: 'secret12' });
+        }
+        if (url.match(/\/projects\/clients\/7$/)) return json(CLIENT_DETAIL);
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderDetail(<ClientDetail />);
+    await screen.findByText('Britannia Industries');
+
+    // Open the client edit modal.
+    fireEvent.click(screen.getByRole('button', { name: /edit client/i }));
+    const dialog = await screen.findByRole('dialog');
+    // The Access PIN field renders with its hint.
+    const pinField = within(dialog).getByLabelText(/Access PIN/i);
+    fireEvent.change(pinField, { target: { value: 'secret12' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(patchedBody).not.toBeNull());
+    expect((patchedBody as { access_pin: string }).access_pin).toBe('secret12');
   });
 
   it('is fully read-only for a VIEW-only user (no add / edit / deactivate)', async () => {

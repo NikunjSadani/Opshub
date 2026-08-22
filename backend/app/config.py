@@ -50,6 +50,15 @@ class Settings(BaseSettings):
     # points at the built React app, which FastAPI serves same-origin.
     static_dir: str = ""
 
+    # --- public challan-QR invoice access (owner-gated feature) ---
+    # Base URL the challan QR encodes (e.g. "https://ops.example.com"). Empty -> no QR is
+    # stamped on the challan (the feature is inert until a deploy sets this).
+    public_base_url: str = ""
+    # MASTER SWITCH for the public, no-login invoice-viewer endpoint. Default OFF: even once
+    # deployed the endpoint stays disabled (404) until the owner deliberately flips this on
+    # (after setting per-client PINs). A kill-switch for all public invoice access.
+    qr_invoice_access_enabled: bool = False
+
     # --- reconcile sweep (scheduler) ---
     # Shared secret gating POST /numbering/sweep. Unset/empty -> the endpoint is
     # disabled (fail-closed 503); set via Secret Manager so only the scheduler calls it.

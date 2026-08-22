@@ -83,12 +83,38 @@ def _line_row(line: LineView, show_amount: bool) -> Markup:
     return Markup(f"<tr>{tds}</tr>")
 
 
+def _qr_markup(access_token: str) -> Markup:
+    """Inline-SVG QR encoding the public invoice-viewer URL, or empty Markup when the
+    feature is DORMANT — no token minted OR no `public_base_url` configured. Emitted as
+    INLINE SVG (not an <img src>), so WeasyPrint's data-URL-only fetcher never sees an
+    external resource request. `get_settings` is imported locally (mirrors `get_renderer`)
+    and any config-access failure degrades to no-QR rather than hard-failing the render."""
+    if not access_token:
+        return Markup("")
+    try:
+        from app.config import get_settings
+
+        base = get_settings().public_base_url
+    except Exception:  # noqa: BLE001 - a config hiccup must never break document render
+        return Markup("")
+    if not base:
+        return Markup("")
+    import segno
+
+    url = f"{base.rstrip('/')}/d/{access_token}"
+    # omitsize -> the SVG carries a viewBox (no fixed px width/height), so CSS scales it
+    # to the ~15mm corner box; border=2 keeps the statutory quiet zone for scannability.
+    svg = segno.make(url, error="m").svg_inline(border=2, omitsize=True, svgclass="qrimg")
+    return Markup(f"<div class='qr'>{svg}</div>")
+
+
 def build_challan_html(view: ChallanView) -> str:
     """Build a complete standalone half-A4 (A5-landscape) HTML document for one
     challan (faithful to the `L/433` layout, re-fitted to the half-page canvas).
     Pure function, no I/O; every interpolated value is HTML-escaped, so untrusted
     Excel cell text renders as inert data."""
     rows = Markup("").join(_line_row(line, view.show_amount) for line in view.lines)
+    qr = _qr_markup(view.access_token)
     total_amount = escape(view.total_amount) if view.show_amount else Markup("")
     invoice = (
         Markup(f"<div>Invoice No.: {escape(view.invoice_number)}</div>")
@@ -121,6 +147,8 @@ def build_challan_html(view: ChallanView) -> str:
   .k {{ color: #333; }}
   .meta div {{ margin-bottom: 1px; }}
   .meta .num {{ font-weight: bold; }}
+  .qr {{ float: right; width: 15mm; margin: 0 0 2px 4px; }}
+  .qr svg {{ display: block; width: 15mm; height: 15mm; }}
   table.lines {{ width: 100%; border-collapse: collapse; margin-top: 5px; }}
   table.lines th, table.lines td {{ border: 1px solid #333; padding: 2px 4px;
                                     text-align: left; vertical-align: top; }}
@@ -138,6 +166,7 @@ def build_challan_html(view: ChallanView) -> str:
     <tbody>
       <tr>
         <td style="width:45%;">
+          {qr}
           <div class="meta">
             {invoice}
             <div>Delivery Challan No.: <span class="num">{number}</span></div>
@@ -185,6 +214,7 @@ def build_challan_html(view: ChallanView) -> str:
 </html>"""
     ).format(
         number=escape(view.number),
+        qr=qr,
         invoice=invoice,
         po=po,
         date=escape(view.challan_date),

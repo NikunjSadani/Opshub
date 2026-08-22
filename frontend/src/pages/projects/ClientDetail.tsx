@@ -121,7 +121,13 @@ function ClientEditModal({
 }: {
   clientId: string;
   open: boolean;
-  initial: { name: string; pan: string | null; credit_terms_days: number | null; active: boolean };
+  initial: {
+    name: string;
+    pan: string | null;
+    credit_terms_days: number | null;
+    active: boolean;
+    access_pin: string | null;
+  };
   onClose: () => void;
 }) {
   const toast = useToast();
@@ -133,6 +139,7 @@ function ClientEditModal({
     initial.credit_terms_days == null ? '' : String(initial.credit_terms_days),
   );
   const [active, setActive] = useState(initial.active);
+  const [accessPin, setAccessPin] = useState(initial.access_pin ?? '');
 
   useEffect(() => {
     if (!open) return;
@@ -140,6 +147,7 @@ function ClientEditModal({
     setPan(initial.pan ?? '');
     setCreditTerms(initial.credit_terms_days == null ? '' : String(initial.credit_terms_days));
     setActive(initial.active);
+    setAccessPin(initial.access_pin ?? '');
     update.reset();
     // Re-seed only on open transitions.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -147,7 +155,10 @@ function ClientEditModal({
 
   const trimmedName = name.trim();
   const termsValid = creditTerms === '' || /^\d{1,5}$/.test(creditTerms);
-  const canSubmit = trimmedName.length > 0 && termsValid && !update.isPending;
+  // Blank clears the PIN; a set value must be 4-32 chars (mirrors the backend).
+  const trimmedPin = accessPin.trim();
+  const pinValid = trimmedPin === '' || (trimmedPin.length >= 4 && trimmedPin.length <= 32);
+  const canSubmit = trimmedName.length > 0 && termsValid && pinValid && !update.isPending;
 
   function close() {
     if (update.isPending) return;
@@ -162,6 +173,8 @@ function ClientEditModal({
         pan: pan.trim() ? pan.trim().toUpperCase() : null,
         credit_terms_days: creditTerms === '' ? null : Number(creditTerms),
         active,
+        // "" clears the PIN on the backend; a set value is sent verbatim.
+        access_pin: trimmedPin === '' ? '' : trimmedPin,
       },
       {
         onSuccess: () => {
@@ -216,6 +229,14 @@ function ClientEditModal({
           error={creditTerms !== '' && !termsValid ? 'Whole number of days.' : undefined}
           hint="Payment terms in days (optional)."
           onChange={(e) => setCreditTerms(e.target.value.replace(/[^0-9]/g, '').slice(0, 5))}
+        />
+        <TextField
+          label="Access PIN (challan QR)"
+          value={accessPin}
+          error={!pinValid ? '4-32 characters.' : undefined}
+          hint="Used as the password for the QR on this client's delivery challans, together with the challan number. Share it with the client directly; it's never printed. Leave blank to clear."
+          onChange={(e) => setAccessPin(e.target.value.slice(0, 32))}
+          maxLength={32}
         />
         <CheckboxRow label="Active" checked={active} onChange={setActive} disabled={update.isPending} />
       </div>
@@ -1017,6 +1038,11 @@ export function ClientDetail() {
               {client.active ? 'Active' : 'Inactive'}
             </Badge>
           </Detail>
+          <Detail label="Challan QR PIN">
+            <Badge tone={client.access_pin ? 'green' : 'slate'}>
+              {client.access_pin ? 'Set' : 'Not set'}
+            </Badge>
+          </Detail>
         </dl>
       </Card>
 
@@ -1038,6 +1064,7 @@ export function ClientDetail() {
             pan: client.pan,
             credit_terms_days: client.credit_terms_days,
             active: client.active,
+            access_pin: client.access_pin,
           }}
           onClose={() => setEditOpen(false)}
         />
