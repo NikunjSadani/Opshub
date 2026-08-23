@@ -181,3 +181,47 @@ def test_merge_pdfs_empty_raises() -> None:
     except ValueError:
         return
     raise AssertionError("expected ValueError on empty merge")
+
+
+def _blank_pdf() -> bytes:
+    w = PdfWriter()
+    w.add_blank_page(width=595, height=421)  # A5-landscape half-A4
+    buf = io.BytesIO()
+    w.write(buf)
+    return buf.getvalue()
+
+
+def test_zip_stream_matches_zip_files() -> None:
+    # The memory-bounded streaming ZIP must yield the same entries/content as the byte-based one.
+    import tempfile
+
+    from app.modules.challan.render import zip_stream
+
+    named = [("a.pdf", b"hello world"), ("b.pdf", b"second file")]
+    with tempfile.NamedTemporaryFile() as out:
+        zip_stream([(n, io.BytesIO(d)) for n, d in named], out)
+        out.seek(0)
+        streamed = out.read()
+
+    def entries(blob: bytes) -> dict[str, bytes]:
+        z = zipfile.ZipFile(io.BytesIO(blob))
+        return {n: z.read(n) for n in z.namelist()}
+
+    assert entries(streamed) == entries(zip_files(named)) == {
+        "a.pdf": b"hello world", "b.pdf": b"second file",
+    }
+
+
+def test_merge_2up_stream_matches_merge_2up() -> None:
+    # Streaming 2-up merge from file handles == the byte-based merge_2up (same page count).
+    import tempfile
+
+    from app.modules.challan.render import merge_2up, merge_2up_stream
+
+    pdfs = [_blank_pdf(), _blank_pdf(), _blank_pdf()]  # 3 half-A4 pages -> 2 A4 sheets
+    ref_pages = len(PdfReader(io.BytesIO(merge_2up(pdfs))).pages)
+    with tempfile.NamedTemporaryFile() as out:
+        merge_2up_stream([io.BytesIO(p) for p in pdfs], out)
+        out.seek(0)
+        streamed = out.read()
+    assert len(PdfReader(io.BytesIO(streamed)).pages) == ref_pages == 2

@@ -20,8 +20,10 @@ installed.
 from __future__ import annotations
 
 import io
+import shutil
 import zipfile
-from typing import Protocol
+from collections.abc import Sequence
+from typing import IO, Protocol
 
 from markupsafe import Markup, escape
 
@@ -298,6 +300,52 @@ def zip_files(named: list[tuple[str, bytes]]) -> bytes:
         for name, data in named:
             archive.writestr(name, data)
     return buffer.getvalue()
+
+
+_COPY_CHUNK = 256 * 1024
+
+
+def zip_stream(named: Sequence[tuple[str, IO[bytes]]], out: IO[bytes]) -> None:
+    """Stream `(filename, readable)` sources into a ZIP written to `out`, copying each source
+    in chunks (never the whole file in RAM) so peak memory stays flat at ~one chunk regardless
+    of selection size. The byte-for-byte equivalent of ``zip_files`` but memory-bounded — used
+    by the bulk download to avoid holding every source + the whole archive in RAM at once."""
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, handle in named:
+            with archive.open(name, "w") as dest:
+                shutil.copyfileobj(handle, dest, _COPY_CHUNK)
+
+
+def merge_2up_stream(sources: Sequence[IO[bytes]], out: IO[bytes]) -> None:
+    """``merge_2up`` reading from file handles and writing to `out` instead of round-tripping
+    bytes. pypdf reads each source lazily from its handle (which must stay open until this
+    returns) and the composed sheet is written straight to `out`, so neither the full source
+    set nor the full output is held as an extra in-RAM bytes copy. Same 2-up layout as
+    ``merge_2up``. Raises on an empty list."""
+    if not sources:
+        raise ValueError("merge_2up_stream requires at least one PDF")
+
+    from pypdf import PageObject, PdfReader, PdfWriter, Transformation  # lazy
+
+    src_pages = []
+    for handle in sources:
+        for page in PdfReader(handle).pages:
+            src_pages.append(page)
+
+    slot_h = _A4_H_PT / 2
+    writer = PdfWriter()
+    for i in range(0, len(src_pages), 2):
+        sheet = PageObject.create_blank_page(width=_A4_W_PT, height=_A4_H_PT)
+        for j, src in enumerate(src_pages[i:i + 2]):
+            sw = float(src.mediabox.width) or _A4_W_PT
+            sh = float(src.mediabox.height) or _A4_H_PT
+            scale = min(_A4_W_PT / sw, slot_h / sh)
+            slot_bottom = _A4_H_PT - slot_h * (j + 1)
+            tx = (_A4_W_PT - sw * scale) / 2
+            ty = slot_bottom + (slot_h - sh * scale) / 2
+            sheet.merge_transformed_page(src, Transformation().scale(scale).translate(tx, ty))
+        writer.add_page(sheet)
+    writer.write(out)
 
 
 def merge_pdfs(pdfs: list[bytes]) -> bytes:

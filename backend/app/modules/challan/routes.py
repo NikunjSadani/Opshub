@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import hmac
 import re
+import shutil
+import tempfile
+from collections.abc import Iterator
+from contextlib import ExitStack
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal, cast
+from typing import IO, Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import (
@@ -32,7 +36,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Select, case, func, select, update
 from sqlalchemy.engine import CursorResult
@@ -580,38 +584,66 @@ def download_challans(
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail)
 
     storage = get_storage()
-    named: list[tuple[str, bytes]] = []
     # ISSUED-without-a-PDF is already split out by resolve() into no_pdf; here we also guard
     # the download-time races: the StoredFile row vanished, or the blob is gone on disk. Such
     # a challan is reported (unavailable), never silently omitted and never fatal to the batch.
     unavailable: list[int] = list(result.no_pdf)
-    for c in result.resolved:
-        sf = db.get(StoredFile, c.pdf_file_id) if c.pdf_file_id is not None else None
-        if sf is None:
-            unavailable.append(c.number_int)
-            continue
-        try:
-            data = storage.open(sf.storage_ref).read()
-        except FileNotFoundError:
-            unavailable.append(c.number_int)
-            continue
-        named.append((f"{service._safe(c.number)}.pdf", data))
-    if not named:
-        raise HTTPException(status.HTTP_404_NOT_FOUND,
-                            "the selected challans have no downloadable stored PDF")
+    stamp = f"{series}-{fy}"
+    # Memory-bounded: each source blob is spooled to its OWN on-disk temp file (one chunk in RAM
+    # at a time), the archive/merge is built into another temp file, and only THAT is streamed
+    # back — so peak memory stays ~flat regardless of how many (up to 2000) challans are pulled,
+    # instead of holding every source PLUS the whole output in RAM. The output temp file outlives
+    # the ExitStack and is closed (deleted) by the streaming generator.
+    out = tempfile.NamedTemporaryFile(suffix=".pdf" if mode == "merged" else ".zip")  # noqa: SIM115
+    try:
+        with ExitStack() as stack:
+            sources: list[tuple[str, IO[bytes]]] = []
+            for c in result.resolved:
+                sf = db.get(StoredFile, c.pdf_file_id) if c.pdf_file_id is not None else None
+                if sf is None:
+                    unavailable.append(c.number_int)
+                    continue
+                try:
+                    blob = storage.open(sf.storage_ref)
+                except FileNotFoundError:
+                    unavailable.append(c.number_int)
+                    continue
+                tf = stack.enter_context(tempfile.NamedTemporaryFile(suffix=".pdf"))
+                with blob:
+                    shutil.copyfileobj(blob, tf, _UPLOAD_CHUNK)  # blob -> disk, ~chunk RAM
+                tf.seek(0)
+                sources.append((f"{service._safe(c.number)}.pdf", tf))
+            if not sources:
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    "the selected challans have no downloadable stored PDF")
+            if mode == "merged":
+                media = "application/pdf"
+                filename = f"challans-{stamp}-2up.pdf"
+                render.merge_2up_stream([tf for _, tf in sources], out)
+            else:
+                media = "application/zip"
+                filename = f"challans-{stamp}.zip"
+                render.zip_stream(sources, out)
+            # sources (their temp files) are closed by the ExitStack now the output is built.
+    except BaseException:
+        out.close()
+        raise
+    out.seek(0)
 
     headers = {
         "X-Skipped-Void": ",".join(str(n) for n in result.skipped_void),
         "X-Skipped-Unavailable": ",".join(str(n) for n in sorted(unavailable)),
+        "Content-Disposition": f'attachment; filename="{filename}"',
     }
-    stamp = f"{series}-{fy}"
-    if mode == "merged":
-        headers["Content-Disposition"] = f'attachment; filename="challans-{stamp}-2up.pdf"'
-        return Response(content=render.merge_2up([data for _, data in named]),
-                        media_type="application/pdf", headers=headers)
-    headers["Content-Disposition"] = f'attachment; filename="challans-{stamp}.zip"'
-    return Response(content=render.zip_files(named), media_type="application/zip",
-                    headers=headers)
+
+    def _stream() -> Iterator[bytes]:
+        try:
+            while chunk := out.read(_UPLOAD_CHUNK):
+                yield chunk
+        finally:
+            out.close()  # deletes the temp file
+
+    return StreamingResponse(_stream(), media_type=media, headers=headers)
 
 
 @router.get("/challan/summary", response_model=ChallanSummaryOut)
