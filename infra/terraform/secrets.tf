@@ -1,7 +1,7 @@
 # DATABASE_URL for prod, in Secret Manager. NOTE the `@localhost/...?host=/cloudsql/...`
 # form — an EMPTY host breaks the Alembic/psycopg migrate engine (a Loyaltybase scar).
 resource "google_secret_manager_secret" "db_url_prod" {
-  project   = google_project.opshub.project_id
+  project   = data.google_project.opshub.project_id
   secret_id = "opshub-database-url-prod"
   replication {
     auto {}
@@ -23,7 +23,7 @@ resource "google_secret_manager_secret_version" "db_url_prod" {
 # as the SWEEP_SECRET env (mounted in cloudrun.tf); Cloud Scheduler sends the same value in the
 # X-Sweep-Secret header (scheduler.tf). Value comes from the sensitive var.sweep_secret.
 resource "google_secret_manager_secret" "sweep_secret" {
-  project   = google_project.opshub.project_id
+  project   = data.google_project.opshub.project_id
   secret_id = "opshub-sweep-secret-prod"
   replication {
     auto {}

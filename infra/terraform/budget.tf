@@ -5,7 +5,7 @@ resource "google_billing_budget" "opshub" {
   display_name    = "OpsHub monthly budget"
 
   budget_filter {
-    projects = ["projects/${google_project.opshub.number}"]
+    projects = ["projects/${data.google_project.opshub.number}"]
   }
 
   amount {

@@ -1,10 +1,8 @@
-# Separate GCP project (isolated IAM/quota/billing blast radius), same billing account.
-resource "google_project" "opshub" {
-  name            = var.project_name
-  project_id      = var.project_id
-  billing_account = var.billing_account
-  org_id          = var.org_id != "" ? var.org_id : null
-  folder_id       = var.folder_id != "" ? var.folder_id : null
+# The OpsHub project is created + billing-linked by the owner in the console; Terraform
+# REFERENCES it (isolated IAM/quota/billing blast radius, same billing account). We only
+# manage the resources INSIDE it, never the project lifecycle.
+data "google_project" "opshub" {
+  project_id = var.project_id
 }
 
 locals {
@@ -24,7 +22,7 @@ locals {
 
 resource "google_project_service" "apis" {
   for_each           = toset(local.apis)
-  project            = google_project.opshub.project_id
+  project            = data.google_project.opshub.project_id
   service            = each.value
   disable_on_destroy = false
 }

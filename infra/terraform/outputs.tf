@@ -1,5 +1,5 @@
 output "project_id" {
-  value = google_project.opshub.project_id
+  value = data.google_project.opshub.project_id
 }
 
 output "sql_connection_name" {

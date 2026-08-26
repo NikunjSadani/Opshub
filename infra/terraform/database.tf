@@ -2,7 +2,7 @@
 # non-prod databases. Private IP only. Backups + PITR on. NEVER co-located with
 # Loyaltybase (this is its own project/instance).
 resource "google_sql_database_instance" "opshub" {
-  project             = google_project.opshub.project_id
+  project             = data.google_project.opshub.project_id
   name                = "opshub-db"
   region              = var.region
   database_version    = "POSTGRES_16"
@@ -11,7 +11,8 @@ resource "google_sql_database_instance" "opshub" {
 
   settings {
     tier              = var.db_tier
-    availability_type = "ZONAL" # single-zone, no HA (Option B)
+    edition           = "ENTERPRISE" # shared-core db-f1-micro is Enterprise-only (Plus needs db-perf-*)
+    availability_type = "ZONAL"      # single-zone, no HA (Option B)
     disk_size         = 10
     disk_autoresize   = true
 
@@ -28,13 +29,13 @@ resource "google_sql_database_instance" "opshub" {
 }
 
 resource "google_sql_database" "prod" {
-  project  = google_project.opshub.project_id
+  project  = data.google_project.opshub.project_id
   name     = "opshub_prod"
   instance = google_sql_database_instance.opshub.name
 }
 
 resource "google_sql_database" "nonprod" {
-  project  = google_project.opshub.project_id
+  project  = data.google_project.opshub.project_id
   name     = "opshub_nonprod"
   instance = google_sql_database_instance.opshub.name
 }
@@ -45,7 +46,7 @@ resource "random_password" "db" {
 }
 
 resource "google_sql_user" "app" {
-  project  = google_project.opshub.project_id
+  project  = data.google_project.opshub.project_id
   name     = var.db_user
   instance = google_sql_database_instance.opshub.name
   password = random_password.db.result

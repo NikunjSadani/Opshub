@@ -1,9 +1,14 @@
 # API service — scale-to-zero, Direct VPC egress (private ranges), Cloud SQL mounted.
 resource "google_cloud_run_v2_service" "api" {
-  project  = google_project.opshub.project_id
+  project  = data.google_project.opshub.project_id
   name     = "opshub-api"
   location = var.region
   ingress  = "INGRESS_TRAFFIC_ALL"
+
+  # Service-level scaling defaults Cloud Run sets server-side (declare to avoid a perpetual diff).
+  scaling {
+    min_instance_count = 0
+  }
 
   template {
     service_account = google_service_account.api.email
@@ -66,7 +71,7 @@ resource "google_cloud_run_v2_service" "api" {
 
 # Alembic migrate — runs IN-VPC (the prod DB is private-IP; unreachable from a laptop/CI).
 resource "google_cloud_run_v2_job" "migrate" {
-  project  = google_project.opshub.project_id
+  project  = data.google_project.opshub.project_id
   name     = "opshub-migrate"
   location = var.region
 

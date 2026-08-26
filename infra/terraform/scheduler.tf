@@ -8,7 +8,7 @@
 # plus a scheduler service account granted roles/run.invoker; the X-Sweep-Secret header still
 # provides the app-level gate on top of that.
 resource "google_cloud_scheduler_job" "numbering_sweep" {
-  project     = google_project.opshub.project_id
+  project     = data.google_project.opshub.project_id
   region      = var.region
   name        = "opshub-numbering-sweep"
   description = "Hourly: void orphaned RESERVED numbering allocations via the secret-gated sweep endpoint."

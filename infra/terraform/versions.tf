@@ -15,4 +15,7 @@ terraform {
 provider "google" {
   project = var.project_id
   region  = var.region
+  # User ADC needs a quota/billing project for APIs like billingbudgets — route calls through it.
+  billing_project       = var.project_id
+  user_project_override  = true
 }
