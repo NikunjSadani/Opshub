@@ -1,0 +1,28 @@
+# Controls what `gcloud builds submit` uploads. Explicit so SECRETS never leave the machine.
+.git/
+.github/
+
+# secrets / state — MUST NOT be uploaded
+infra/
+**/*.tfstate
+**/*.tfstate.*
+**/terraform.tfvars
+**/*.env
+**/.env
+
+# heavy / rebuilt-in-image
+**/node_modules/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+frontend/dist/
+backend/**/*.db
+*.db
+
+# not needed in the image (ANCHORED to repo root — an unanchored `platform/` would also
+# wrongly exclude backend/app/platform/, the app.platform package the app needs).
+/docs/
+/platform/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
