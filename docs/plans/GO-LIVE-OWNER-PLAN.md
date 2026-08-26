@@ -52,9 +52,9 @@ Auth: owner ADC (`nikunj.sadani28@gmail.com`), quota project set. Remaining Phas
    creates the database, the file-storage bucket, Cloud Run, service accounts, and secrets.
    Needs your GCP org/billing access — you run the apply (I guide you step by step) or grant me
    scoped access.
-5. 🤖 **`GcsStorage` + deploy config** — I implement durable file storage (so uploaded invoices
-   and challan PDFs survive restarts) and finish the deploy wiring — now *verifiable* against
-   your real bucket.
+5. ✅ **`GcsStorage` — DONE (`7be3475`, 2026-08-24):** durable file storage live (`GCS_BUCKET`
+   env on Cloud Run selects it; api SA has objectAdmin). Round-trip-verified against the real
+   `opshub-506704-files` bucket. Terraform now `ignore_changes` the image (config vs image split).
 6. 🤖 **Real login (`FirebaseAuthProvider`)** — I wire the app's login to your Firebase project.
 7. 🤝 **GitHub deploy wiring** — a few GitHub secrets/vars (`WIF_PROVIDER`, `DEPLOY_SA`,
    `GCP_PROJECT_ID`), an Artifact Registry repo, and a "production" approval gate with a
