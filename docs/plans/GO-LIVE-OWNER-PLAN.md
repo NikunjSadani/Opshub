@@ -41,6 +41,13 @@ work (also your off-machine backup) and lets the automated checks run.
 
 ## PHASE 2 — Stand up the infrastructure (mostly me, needs your GCP access)
 
+**✅ INFRASTRUCTURE LIVE (2026-08-24, `opshub-506704`, asia-south1):** Terraform applied — all 37
+resources up. Cloud SQL `opshub-db` (private, Enterprise/db-f1-micro) + `opshub_prod`/`opshub_nonprod`;
+Cloud Run `opshub-api` (URL `https://opshub-api-2aadkzwkua-el.a.run.app`, currently the placeholder
+image); GCS bucket `opshub-506704-files`; private VPC; 2 service accounts + IAM; Secret Manager
+(DB URL + sweep secret); scheduler; **billing-budget alert** emailing on spend. `terraform plan` clean.
+Auth: owner ADC (`nikunj.sadani28@gmail.com`), quota project set. Remaining Phase-2 code below.
+
 4. 🤝 **Apply the infrastructure** — the Terraform is already written and validated; applying it
    creates the database, the file-storage bucket, Cloud Run, service accounts, and secrets.
    Needs your GCP org/billing access — you run the apply (I guide you step by step) or grant me
