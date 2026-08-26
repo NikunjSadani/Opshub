@@ -22,12 +22,12 @@ work (also your off-machine backup) and lets the automated checks run.
 1. 🧑 **GitHub repository** — create a private repo (e.g. `gifsy-opshub`). Send me the URL and
    give push access (or add me as a collaborator). → *Unblocks: pushing all the built code +
    CI running.*  Today there is **no git remote** — the code is local-only.
-2. 🧑 **Google Cloud (GCP) — a BILLING ACCOUNT** (not the project). The Terraform *creates the
-   project itself* (`google_project.opshub`), attached to a billing account — so the thing you
-   set up by hand is a **Cloud Billing account** (a payment method). You send me the billing
-   account ID; Terraform makes the project in Phase 2. (You *can* pre-create the project
-   manually if you prefer — then I point Terraform at it instead.) → *The home for the app
-   (Cloud Run), the database, and file storage.*
+2. ✅ **Google Cloud project — DONE (owner created 2026-08-24):** dedicated project **`opshub-506704`**
+   (name "OpsHub", project number 310561620535), fresh/empty, separate from the loyalty platform.
+   → **Terraform adjustment (my Phase-2 task):** the code currently *creates* the project
+   (`google_project.opshub`); since the owner made it by hand, I switch that to *reference the
+   existing* `opshub-506704` and drop the project-create + billing-link resources. ▶ Owner to
+   confirm **billing is enabled** on it (Terraform + all resources need an active billing account).
    - **DB decision (owner, 2026-08-24):** OpsHub gets its **own dedicated Postgres instance**,
      NOT merged with the loyalty database. That instance also becomes the future home for other
      small internal apps. (Already how `infra/terraform/database.tf` is written — one dedicated
