@@ -65,6 +65,8 @@ Auth: owner ADC (`nikunj.sadani28@gmail.com`), quota project set. Remaining Phas
 
 ## PHASE 3 — First deploy + first admin (together)
 
+**✅ FIRST DEPLOY DONE (2026-08-24):** built via Cloud Build → AR (`asia-south1-docker.pkg.dev/opshub-506704/opshub/api:64c1c0e`); migrated `opshub_prod` (`alembic upgrade head` via the `opshub-migrate` job — succeeded, schema created); deployed to Cloud Run `opshub-api`. **Health = 200 `{"status":"ok","env":"prod"}`** at https://opshub-api-2aadkzwkua-el.a.run.app. AR repo + Cloud Build API created during this pass. ⚠️ Fixed a self-inflicted `.gcloudignore` bug (unanchored `platform/` dropped `backend/app/platform` → migrate crash) — now anchored. **NOT yet usable by staff:** login needs Firebase wired (dev-auth is off in prod) + file uploads need `GcsStorage` (both below).
+
 8. 🤝 **Deploy to staging** — pushing `develop` auto-deploys; the database migration runs
    automatically first, and we **verify it on Postgres** (some issues only show on the real DB).
 9. 🤝 **Bootstrap the first admin** — create the very first Administrator user (the system starts
