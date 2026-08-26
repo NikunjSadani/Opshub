@@ -32,6 +32,11 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "ENV"
         value = "prod"
       }
+      # Selects the GcsStorage backend (durable blobs) — the api SA has objectAdmin on this bucket.
+      env {
+        name  = "GCS_BUCKET"
+        value = google_storage_bucket.files.name
+      }
       env {
         name = "DATABASE_URL"
         value_source {
@@ -67,6 +72,13 @@ resource "google_cloud_run_v2_service" "api" {
   }
 
   depends_on = [google_project_service.apis]
+
+  # The running image is deployed by CI / `gcloud run deploy` (build → push → deploy), NOT
+  # Terraform — var.image is only the initial placeholder. Ignore image drift so `terraform
+  # apply` manages config (env, scaling, VPC, secrets) without reverting the deployed build.
+  lifecycle {
+    ignore_changes = [template[0].containers[0].image]
+  }
 }
 
 # Alembic migrate — runs IN-VPC (the prod DB is private-IP; unreachable from a laptop/CI).
@@ -115,4 +127,9 @@ resource "google_cloud_run_v2_job" "migrate" {
   }
 
   depends_on = [google_project_service.apis]
+
+  # Image deployed by CI (job update → execute), not Terraform — ignore image drift.
+  lifecycle {
+    ignore_changes = [template[0].template[0].containers[0].image]
+  }
 }

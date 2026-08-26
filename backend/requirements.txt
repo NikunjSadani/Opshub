@@ -20,3 +20,4 @@ mypy==1.14.0
 pytest==8.3.4
 httpx==0.28.1                    # TestClient
 reportlab==4.2.5                 # TEST-ONLY: generate synthetic text-layer invoice PDFs for the extractor + eval fixtures (not imported by runtime code)
+google-cloud-storage==2.19.0

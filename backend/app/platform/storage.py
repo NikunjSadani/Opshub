@@ -10,6 +10,7 @@ then resolve and assert the final path stays inside the base.
 """
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Protocol, runtime_checkable
@@ -77,22 +78,63 @@ class LocalStorage:
         target.unlink(missing_ok=True)
 
 
+def _gcs_key(key: str) -> str:
+    """Sanitise an object key: no drive letter, no absolute path, no `..` segment, non-empty.
+    GCS object names are flat, but we keep the same defensive rules as LocalStorage so a bad
+    key can never behave surprisingly. The (sanitised) key IS the ref."""
+    candidate = (key or "").replace("\\", "/").strip().strip("/")
+    if not candidate:
+        raise ValueError("empty storage key")
+    if len(candidate) >= 2 and candidate[1] == ":":
+        raise ValueError(f"drive-qualified path rejected: {key!r}")
+    if any(part == ".." for part in PurePosixPath(candidate).parts):
+        raise ValueError(f"parent-traversal rejected: {key!r}")
+    return candidate
+
+
 class GcsStorage:
-    """Future Google Cloud Storage backend. Not yet implemented."""
+    """Google Cloud Storage backend. The object name is the ref. Credentials come from the
+    ambient environment (the Cloud Run service account's ADC) — no key files. The heavy client
+    library is imported lazily so importing this module stays cheap and native-free elsewhere."""
 
     def __init__(self, bucket: str | None = None) -> None:
-        self.bucket = bucket
+        name = (bucket or os.environ.get("GCS_BUCKET", "") or "").strip()
+        if not name:
+            raise ValueError("GcsStorage requires a bucket name (GCS_BUCKET)")
+        self.bucket_name = name
+        from google.cloud import storage as gcs  # type: ignore[attr-defined]  # lazy heavy import
+
+        self._bucket = gcs.Client().bucket(name)
 
     def save(self, key: str, data: bytes) -> str:
-        raise NotImplementedError("GcsStorage is not implemented yet")
+        k = _gcs_key(key)
+        self._bucket.blob(k).upload_from_string(data)
+        return k
 
     def open(self, ref: str) -> BinaryIO:
-        raise NotImplementedError("GcsStorage is not implemented yet")
+        k = _gcs_key(ref)
+        from google.cloud.exceptions import NotFound  # lazy
+
+        try:
+            data = self._bucket.blob(k).download_as_bytes()
+        except NotFound as exc:  # match LocalStorage: a missing blob is FileNotFoundError
+            raise FileNotFoundError(ref) from exc
+        return io.BytesIO(data)
 
     def delete(self, ref: str) -> None:
-        raise NotImplementedError("GcsStorage is not implemented yet")
+        k = _gcs_key(ref)
+        from google.cloud.exceptions import NotFound  # lazy
+
+        try:
+            self._bucket.blob(k).delete()
+        except NotFound:
+            pass  # already gone — LocalStorage.delete is likewise missing-ok
 
 
 def get_storage() -> Storage:
-    """Return the active storage backend (LocalStorage for now)."""
+    """Return the active storage backend: GCS when `GCS_BUCKET` is set (prod/staging on Cloud
+    Run), else LocalStorage (local dev / tests). Selection is env-driven so the same code runs
+    everywhere with no branching in callers."""
+    if os.environ.get("GCS_BUCKET", "").strip():
+        return GcsStorage()
     return LocalStorage()
