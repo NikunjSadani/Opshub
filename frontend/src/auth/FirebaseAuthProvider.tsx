@@ -3,6 +3,7 @@ import { getApps, initializeApp } from 'firebase/app';
 import {
   getAuth,
   onAuthStateChanged,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
   type Auth,
@@ -51,6 +52,10 @@ export function FirebaseAuthProvider({ children }: { children: ReactNode }) {
     await firebaseSignOut(firebaseAuth());
   }, []);
 
+  const sendPasswordReset = useCallback(async (resetEmail: string) => {
+    await sendPasswordResetEmail(firebaseAuth(), resetEmail.trim());
+  }, []);
+
   // Firebase caches + auto-refreshes the ID token; getIdToken() returns a fresh one each call.
   const getToken = useCallback(async () => {
     const current = firebaseAuth().currentUser;
@@ -66,9 +71,10 @@ export function FirebaseAuthProvider({ children }: { children: ReactNode }) {
       signIn,
       signOut,
       getToken,
+      sendPasswordReset,
       devUid: null,
     }),
-    [user, ready, signIn, signOut, getToken],
+    [user, ready, signIn, signOut, getToken, sendPasswordReset],
   );
 
   return <AuthAndPermissions value={value}>{children}</AuthAndPermissions>;

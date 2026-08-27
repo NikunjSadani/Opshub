@@ -62,6 +62,8 @@ export interface AuthContextValue {
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   getToken: () => Promise<string | null>;
+  /** Email a password-reset/setup link to `email` (Firebase). No-op under the mock. */
+  sendPasswordReset: (email: string) => Promise<void>;
   /** LOCAL dev only: the seeded user to act as (sent as `X-Dev-Uid`). Null under real auth. */
   devUid: string | null;
 }
@@ -171,6 +173,7 @@ export function MockAuthProvider({
       signIn,
       signOut,
       getToken,
+      sendPasswordReset: async () => {},
       devUid: signedIn ? actingUid : null,
     }),
     [signedIn, actingUid, signIn, signOut, getToken],

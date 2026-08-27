@@ -8,16 +8,19 @@ import { useAuth } from '../auth/AuthProvider';
  * with no changes to the call site.
  */
 export function Login() {
-  const { signIn } = useAuth();
+  const { signIn, sendPasswordReset } = useAuth();
   const navigate = useNavigate();
-  const [email, setEmail] = useState('ops.admin@gifsy.in');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setErr(null);
+    setNotice(null);
     setSubmitting(true);
     try {
       await signIn(email, password);
@@ -26,6 +29,25 @@ export function Login() {
       setErr(e2 instanceof Error ? e2.message : 'Sign in failed');
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function onForgotPassword() {
+    setErr(null);
+    setNotice(null);
+    if (!email.trim()) {
+      setErr('Enter your email above first, then tap “Forgot password?”.');
+      return;
+    }
+    setResetting(true);
+    try {
+      await sendPasswordReset(email);
+      setNotice(`If ${email.trim()} has an account, a password reset link is on its way. Check your inbox (and spam).`);
+    } catch (e2) {
+      // Firebase hides user-existence on reset; surface anything else plainly.
+      setErr(e2 instanceof Error ? e2.message : 'Could not send the reset email.');
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -66,6 +88,7 @@ export function Login() {
           </label>
 
           {err && <p className="text-sm text-rose-600">{err}</p>}
+          {notice && <p className="text-sm text-emerald-600">{notice}</p>}
 
           <button
             type="submit"
@@ -74,11 +97,22 @@ export function Login() {
           >
             {submitting ? 'Signing in…' : 'Sign in'}
           </button>
+
+          <button
+            type="button"
+            onClick={onForgotPassword}
+            disabled={resetting}
+            className="w-full text-center text-xs font-medium text-brand-600 hover:text-brand-700 disabled:opacity-60"
+          >
+            {resetting ? 'Sending reset link…' : 'Forgot password?'}
+          </button>
         </form>
 
-        <p className="mt-4 text-center text-[11px] text-slate-400">
-          Mock auth is active — any credentials sign you in as an admin.
-        </p>
+        {!import.meta.env.PROD && (
+          <p className="mt-4 text-center text-[11px] text-slate-400">
+            Mock auth is active — any credentials sign you in as an admin.
+          </p>
+        )}
       </div>
     </div>
   );
