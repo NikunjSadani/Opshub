@@ -111,6 +111,44 @@ def test_client_out_exposes_pan_and_terms_after_patch(client: TestClient) -> Non
     assert rows[0]["credit_terms_days"] == 30
 
 
+def test_create_client_captures_pan_and_terms(client: TestClient) -> None:
+    # PAN + credit terms can be supplied AT registration (not only via PATCH); PAN is
+    # normalized to upper-case, and both persist to the detail + list surfaces.
+    r = client.post(
+        "/api/v1/projects/clients",
+        json={"name": "Tata", "code": "tat", "pan": "aaapf1234c", "credit_terms_days": 45},
+    )
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["pan"] == "AAAPF1234C" and body["credit_terms_days"] == 45
+    detail = client.get(f"/api/v1/projects/clients/{body['id']}").json()
+    assert detail["pan"] == "AAAPF1234C" and detail["credit_terms_days"] == 45
+
+
+def test_create_client_without_pan_or_terms_stays_null(client: TestClient) -> None:
+    # Both fields are optional at registration — omitting them leaves them null.
+    cid = _new_client(client)
+    detail = client.get(f"/api/v1/projects/clients/{cid}").json()
+    assert detail["pan"] is None and detail["credit_terms_days"] is None
+
+
+def test_create_client_rejects_negative_terms(client: TestClient) -> None:
+    r = client.post(
+        "/api/v1/projects/clients",
+        json={"name": "Tata", "code": "tat", "credit_terms_days": -1},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_create_client_rejects_overlong_pan(client: TestClient) -> None:
+    # A normalized PAN longer than the 10-char column is a clean 422, never a DB 500.
+    r = client.post(
+        "/api/v1/projects/clients",
+        json={"name": "Tata", "code": "tat", "pan": "AAAPF1234CXXX"},
+    )
+    assert r.status_code == 422, r.text
+
+
 # --------------------------------------------------- access PIN (challan QR)
 
 def test_access_pin_set_clear_and_detail(client: TestClient) -> None:

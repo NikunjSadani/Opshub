@@ -39,6 +39,8 @@ export function ClientsScreen() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
+  const [pan, setPan] = useState('');
+  const [creditTerms, setCreditTerms] = useState('');
 
   const trimmedName = name.trim();
   const codeValid = CODE_RE.test(code);
@@ -49,6 +51,8 @@ export function ClientsScreen() {
   function openModal() {
     setName('');
     setCode('');
+    setPan('');
+    setCreditTerms('');
     createClient.reset();
     setOpen(true);
   }
@@ -61,7 +65,13 @@ export function ClientsScreen() {
   function submit() {
     if (!canSubmit) return;
     createClient.mutate(
-      { name: trimmedName, code },
+      {
+        name: trimmedName,
+        code,
+        // Optional at registration; send null (not "") so a blank field stays unset.
+        pan: pan.trim() ? pan.trim().toUpperCase() : null,
+        credit_terms_days: creditTerms === '' ? null : Number(creditTerms),
+      },
       {
         onSuccess: (client) => {
           toast.success(`Client ${client.code} registered.`);
@@ -165,6 +175,24 @@ export function ClientsScreen() {
               hint="Exactly 3 letters A–Z (e.g. BRI). Uppercased automatically."
               onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3))}
               maxLength={3}
+            />
+            <TextField
+              label="PAN"
+              className="font-mono uppercase"
+              value={pan}
+              hint="10-character PAN (optional). Can be added or changed later."
+              onChange={(e) =>
+                setPan(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 10))
+              }
+              maxLength={10}
+            />
+            <TextField
+              label="Credit terms (days)"
+              value={creditTerms}
+              inputMode="numeric"
+              hint="Payment terms in days (optional). Drives invoice due-dates later."
+              onChange={(e) => setCreditTerms(e.target.value.replace(/[^0-9]/g, '').slice(0, 5))}
+              maxLength={5}
             />
           </div>
         </Modal>

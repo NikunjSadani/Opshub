@@ -49,6 +49,9 @@ _MAX_NAME_LEN = 200
 # 4); prefer a system-generated alphanumeric PIN. Column is String(32).
 _MIN_PIN_LEN = 8
 _MAX_PIN_LEN = 32
+# PAN is a 10-char org identifier (column is String(10)). We normalize + cap here so
+# a too-long value raises a clean 422 instead of being truncated / 500ing at the DB.
+_MAX_PAN_LEN = 10
 # The parent-client row-lock is the real serializer for per-client seq allocation;
 # this retry is only a thin backstop for a rare lost race. Correctness assumes the
 # DB runs at READ COMMITTED (Postgres default): each retry issues a FRESH SELECT for
@@ -128,15 +131,45 @@ def _clean_name(name: str) -> str:
     return cleaned
 
 
+def _clean_pan(pan: str | None) -> str | None:
+    """Normalize an optional PAN: strip + upper, blank -> None. A value longer than the
+    column (10) raises `ProjectError` (route -> 422) rather than being silently
+    truncated or 500ing at the DB. Shared by create + update so both validate identically."""
+    if pan is None:
+        return None
+    cleaned = pan.strip().upper()
+    if not cleaned:
+        return None
+    if len(cleaned) > _MAX_PAN_LEN:
+        raise ProjectError(f"pan must be at most {_MAX_PAN_LEN} characters")
+    return cleaned
+
+
+def _validate_credit_terms(days: int | None) -> None:
+    """A credit-terms value, when supplied, must be a non-negative number of days."""
+    if days is not None and days < 0:
+        raise ProjectError("credit_terms_days must be >= 0")
+
+
 def create_client(
-    db: Session, *, name: str, code: str, actor_uid: str | None = None
+    db: Session,
+    *,
+    name: str,
+    code: str,
+    pan: str | None = None,
+    credit_terms_days: int | None = None,
+    actor_uid: str | None = None,
 ) -> ProjectClient:
     """Register a client with a unique 3-letter uppercase code.
 
     `code` is normalized (strip + upper) then validated `^[A-Z]{3}$`; a bad shape
     raises `ProjectError`. Because the code is upper-cased before insert, 'bri'
     and 'BRI' collapse to one key, so the UNIQUE index rejects case-variant dups —
-    surfaced as `DuplicateClientCode` (the route maps it to 409). Audited.
+    surfaced as `DuplicateClientCode` (the route maps it to 409).
+
+    Optional master fields `pan` (normalized strip+upper, capped at 10) and
+    `credit_terms_days` (>= 0) may be captured at registration; both are otherwise
+    editable later via `update_client`. Validated identically to the edit path. Audited.
     """
     code = code.strip().upper()
     name = _clean_name(name)
@@ -144,6 +177,8 @@ def create_client(
         raise ProjectError("code must be exactly 3 letters A-Z")
     if not name:
         raise ProjectError("name is required")
+    pan_clean = _clean_pan(pan)
+    _validate_credit_terms(credit_terms_days)
 
     if (
         db.execute(select(ProjectClient).where(ProjectClient.code == code)).scalar_one_or_none()
@@ -151,7 +186,13 @@ def create_client(
     ):
         raise DuplicateClientCode(f"client code {code} already exists")
 
-    client = ProjectClient(name=name, code=code, created_by=actor_uid)
+    client = ProjectClient(
+        name=name,
+        code=code,
+        pan=pan_clean,
+        credit_terms_days=credit_terms_days,
+        created_by=actor_uid,
+    )
     try:
         # `with` releases the savepoint on success (no leak); a concurrent create
         # of the same code trips the UNIQUE index at flush and lands here.
@@ -167,7 +208,12 @@ def create_client(
         actor_uid=actor_uid,
         entity="project_client",
         entity_id=str(client.id),
-        detail={"code": code, "name": name},
+        detail={
+            "code": code,
+            "name": name,
+            "pan": pan_clean,
+            "credit_terms_days": credit_terms_days,
+        },
     )
     return client
 
@@ -357,11 +403,10 @@ def update_client(
         client.name = cleaned
         changed["name"] = cleaned
     if not isinstance(pan, _Unset):
-        client.pan = pan.strip().upper() or None if pan else None
+        client.pan = _clean_pan(pan)
         changed["pan"] = client.pan
     if not isinstance(credit_terms_days, _Unset):
-        if credit_terms_days is not None and credit_terms_days < 0:
-            raise ProjectError("credit_terms_days must be >= 0")
+        _validate_credit_terms(credit_terms_days)
         client.credit_terms_days = credit_terms_days
         changed["credit_terms_days"] = credit_terms_days
     if not isinstance(active, _Unset):

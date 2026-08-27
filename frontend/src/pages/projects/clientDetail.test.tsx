@@ -374,4 +374,36 @@ describe('ClientsScreen (M3 — list readable at VIEW)', () => {
 
     expect(await screen.findByRole('button', { name: /new client/i })).toBeInTheDocument();
   });
+
+  it('captures PAN + credit terms at creation and POSTs them', async () => {
+    let postedBody: unknown = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.match(/\/projects\/clients$/) && method === 'POST') {
+          postedBody = JSON.parse(String(init?.body));
+          return json({ id: 8, name: 'Tata', code: 'TAT', pan: 'AAAPF1234C', credit_terms_days: 45, active: true, access_pin: null }, 201);
+        }
+        if (url.match(/\/projects\/clients$/)) return json(CLIENTS_LIST);
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderClients();
+
+    fireEvent.click(await screen.findByRole('button', { name: /new client/i }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/^Name/i), { target: { value: 'Tata' } });
+    fireEvent.change(within(dialog).getByLabelText(/^Code/i), { target: { value: 'tat' } });
+    // PAN lower-cases as typed -> uppercased by the field; credit terms are digits only.
+    fireEvent.change(within(dialog).getByLabelText(/^PAN/i), { target: { value: 'aaapf1234c' } });
+    fireEvent.change(within(dialog).getByLabelText(/Credit terms/i), { target: { value: '45' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Register' }));
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    expect(postedBody).toMatchObject({ name: 'Tata', code: 'TAT', pan: 'AAAPF1234C', credit_terms_days: 45 });
+  });
 });

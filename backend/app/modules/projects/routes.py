@@ -63,6 +63,12 @@ class ClientIn(BaseModel):
     # Case-insensitive at the edge so 'bri' normalizes (and dedupes) to 'BRI' in
     # the service; a wrong LENGTH/charset (e.g. "BR", "BRIX", "12A") 422s here.
     code: str = Field(pattern=r"^[A-Za-z]{3}$")
+    # Optional master fields, captured at registration (same fields editable later via
+    # PATCH). Normalized + length-checked in the service; `ge=0` gives a clean 422 on a
+    # negative term. `pan` accepts up to 15 raw chars here (pre-strip); the service caps
+    # the normalized value at 10.
+    pan: str | None = Field(default=None, max_length=15)
+    credit_terms_days: int | None = Field(default=None, ge=0)
 
 
 class ClientOut(BaseModel):
@@ -129,7 +135,12 @@ def create_client(
     _require_admin(user)
     try:
         client = service.create_client(
-            db, name=body.name, code=body.code, actor_uid=user.firebase_uid
+            db,
+            name=body.name,
+            code=body.code,
+            pan=body.pan,
+            credit_terms_days=body.credit_terms_days,
+            actor_uid=user.firebase_uid,
         )
     except service.DuplicateClientCode as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc

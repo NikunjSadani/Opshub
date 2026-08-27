@@ -43,6 +43,10 @@ export interface Client {
 export interface ClientInput {
   name: string;
   code: string;
+  /** Optional 10-char PAN captured at registration (also editable later). */
+  pan?: string | null;
+  /** Optional payment/credit terms in days (also editable later). */
+  credit_terms_days?: number | null;
 }
 
 export interface Project {
