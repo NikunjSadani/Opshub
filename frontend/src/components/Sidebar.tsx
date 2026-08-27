@@ -91,6 +91,19 @@ export function Sidebar() {
             </div>
           ))}
 
+        {/* Help & Guides — available to every signed-in staff member, any role. No
+            permission gate (unlike the admin block below). */}
+        <NavLink
+          to="/help"
+          className={({ isActive }) =>
+            `flex items-center rounded-md px-3 py-2 text-sm font-medium ${
+              isActive ? 'bg-brand-50 text-brand-700' : 'text-slate-700 hover:bg-slate-100'
+            }`
+          }
+        >
+          Help &amp; Guides
+        </NavLink>
+
         {/* Admin-only surfaces. Hidden without the `iam` permission (the backend
             enforces the real gate); showing a tile they can't use would be a
             dead-end. */}

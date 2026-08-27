@@ -21,6 +21,7 @@ import { BillingModule } from './pages/billing/BillingModule';
 import { FinanceModule } from './pages/finance/FinanceModule';
 import { LogisticsModule } from './pages/logistics/LogisticsModule';
 import { ActionCenterModule } from './pages/action_center/ActionCenterModule';
+import { HelpModule } from './pages/help/HelpModule';
 import { RolesModule } from './pages/roles/RolesModule';
 import { UsersModule } from './pages/users/UsersModule';
 import { RequirePlatform } from './auth/RequireRole';
@@ -60,6 +61,9 @@ export function AppRoutes() {
         }
       >
         <Route path="/" element={<Dashboard />} />
+        {/* Help & Guides — visible to every signed-in staff member (auth is already
+            enforced by the parent RequireAuth), so no permission gate is applied. */}
+        <Route path="/help" element={<HelpModule />} />
         {/*
           Access to a module is governed by the backend's PER-USER module-access
           list (surfaced via GET /modules and used to build the nav), NOT by role
