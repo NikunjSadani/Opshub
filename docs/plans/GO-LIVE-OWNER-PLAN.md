@@ -36,10 +36,16 @@ Live + verified:
 - **In-app Help & Guides** (`/help`, ungated for all staff) with the "How to create a Delivery
   Challan" walkthrough (prerequisites → bulk Excel template → validate → number & generate → print).
 
+- **Auto-emailed invites — LIVE (2026-08-27).** Staff invite + re-issue setup-link now email the
+  link over the **MSG91 SMTP relay** from `opshub@notify.gifsy.in` (reuses loyalty's verified
+  `notify.gifsy.in` domain — zero new DNS). Secret `opshub-msg91-smtp-pass-prod` (copied from
+  loyalty's `MSG91_SMTP_PASS`) bound on Cloud Run; fail-closed no-op if unset. Independent audit
+  clean. ⚠️ the send is synchronous in the request (≤20s under a hung relay; admin-only/rare) — a
+  known accepted limitation, not a bug.
+- **Client PAN + credit terms — LIVE.** Capturable at client registration (New-client modal +
+  `POST /projects/clients`) as well as editable on the client detail page.
+
 ▶ Remaining (not blocking use):
-- **Email polish** — auto-emailed staff invites (currently link-based/manual) + a no-spam sender on
-  gifsy.in. Needs an owner decision on mail provider (MSG91 SMTP like loyalty, or other) + SPF/DKIM
-  DNS. NOT started.
 - **Challan-QR activation** — built + dormant; owner-gated flip later (`public_base_url`,
   per-client Access PINs, `qr_invoice_access_enabled`, per-IP protection).
 
