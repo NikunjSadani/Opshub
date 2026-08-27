@@ -25,6 +25,7 @@ from app.db import get_db
 from app.modules.users import service
 from app.modules.users.provisioner import ProvisionError, get_provisioner
 from app.platform.auth import current_user
+from app.platform.email import get_email_sender
 from app.platform.models import User
 from app.platform.rbac import can
 
@@ -113,7 +114,8 @@ def create_user(
     db: Annotated[Session, Depends(get_db)],
 ) -> CreateResult:
     _require_admin(user)
-    provisioner = get_provisioner(get_settings())
+    settings = get_settings()
+    provisioner = get_provisioner(settings)
     try:
         new_user, link = service.create_user(
             db,
@@ -122,6 +124,9 @@ def create_user(
             role_id=body.role_id,
             actor_uid=user.firebase_uid,
             provisioner=provisioner,
+            # FAIL-CLOSED: get_email_sender returns a no-op until MSG91_SMTP_PASS is set,
+            # so this is inert (returns the link only) until the owner activates email.
+            email_sender=get_email_sender(settings),
         )
     except service.ValidationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
@@ -167,8 +172,16 @@ def issue_setup_link(
     db: Annotated[Session, Depends(get_db)],
 ) -> SetupLinkOut:
     _require_admin(user)
+    settings = get_settings()
     target = _load(db, user_id)
     link = service.setup_link(
-        db, target, provisioner=get_provisioner(get_settings()), actor_uid=user.firebase_uid)
+        db, target, provisioner=get_provisioner(settings), actor_uid=user.firebase_uid)
     db.commit()
+    # Best-effort invite email AFTER commit (parity with create): re-issuing a setup link
+    # also emails it, so the staffer gets the link by mail — not just the admin's screen.
+    # Inert until MSG91_SMTP_PASS is set (get_email_sender -> no-op); never raises.
+    if link is not None:
+        service.send_invite_email(
+            get_email_sender(settings), to=target.email, name=target.name, link=link
+        )
     return SetupLinkOut(setup_link=link)

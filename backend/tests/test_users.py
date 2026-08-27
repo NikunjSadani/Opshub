@@ -290,6 +290,93 @@ def test_create_compensates_orphan_on_persist_failure(
     db2.close()
 
 
+class _StubSender:
+    """Records send() calls; can be told to raise (to prove best-effort delivery)."""
+
+    def __init__(self, *, raises: bool = False) -> None:
+        self.sent: list[dict[str, str | None]] = []
+        self._raises = raises
+
+    def send(
+        self, to: str, subject: str, html_body: str, text_body: str | None = None
+    ) -> None:
+        if self._raises:
+            raise RuntimeError("smtp boom")
+        self.sent.append(
+            {"to": to, "subject": subject, "html": html_body, "text": text_body}
+        )
+
+
+def test_invite_emails_setup_link_once(client: TestClient) -> None:
+    # When a setup link is produced and a sender is supplied, the invite is emailed
+    # EXACTLY once and the email carries the setup link.
+    fin = client.app.state.roles["Finance"]
+    db = client.app.state.TestSession()
+    spy = _SpyProvisioner(link="https://setup.example/abc123")
+    sender = _StubSender()
+    user, link = service.create_user(
+        db, email="inv@x.com", name="Invitee", role_id=fin, actor_uid="adm",
+        provisioner=spy, email_sender=sender,
+    )
+    assert link == "https://setup.example/abc123"
+    assert len(sender.sent) == 1
+    assert "https://setup.example/abc123" in str(sender.sent[0]["html"])
+    assert db.get(User, user.id) is not None
+    db.close()
+
+
+def test_invite_survives_email_send_failure(client: TestClient) -> None:
+    # A raising sender must NOT break create: the user is durable and the link is
+    # STILL returned for manual copy (email is best-effort, not a hard dependency).
+    fin = client.app.state.roles["Finance"]
+    db = client.app.state.TestSession()
+    spy = _SpyProvisioner(link="https://setup.example/xyz789")
+    sender = _StubSender(raises=True)
+    user, link = service.create_user(
+        db, email="inv2@x.com", name="Invitee2", role_id=fin, actor_uid="adm",
+        provisioner=spy, email_sender=sender,
+    )
+    assert link == "https://setup.example/xyz789"       # link still returned
+    assert db.get(User, user.id) is not None             # user still durable
+    db.close()
+
+
+def test_invite_no_email_when_no_link(client: TestClient) -> None:
+    # No setup link (LocalProvisioner-style) -> nothing to email; sender untouched.
+    fin = client.app.state.roles["Finance"]
+    db = client.app.state.TestSession()
+    spy = _SpyProvisioner(link=None)
+    sender = _StubSender()
+    _user, link = service.create_user(
+        db, email="inv3@x.com", name="Invitee3", role_id=fin, actor_uid="adm",
+        provisioner=spy, email_sender=sender,
+    )
+    assert link is None
+    assert sender.sent == []
+    db.close()
+
+
+def test_reissue_setup_link_emails_when_configured(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Re-issuing a setup link ALSO emails it (parity with create) — the staffer gets the
+    # link by mail, not just on the admin's screen. Best-effort + inert until configured.
+    from app.modules.users import routes as user_routes
+
+    uid = _create(client, email="re@x.com", name="Reissue").json()["user"]["id"]
+    spy = _SpyProvisioner(link="https://setup.example/reissue1")
+    stub = _StubSender()
+    monkeypatch.setattr(user_routes, "get_provisioner", lambda _s: spy)
+    monkeypatch.setattr(user_routes, "get_email_sender", lambda _s: stub)
+
+    r = client.post(f"/api/v1/users/{uid}/setup-link")
+    assert r.status_code == 200, r.text
+    assert r.json()["setup_link"] == "https://setup.example/reissue1"
+    assert len(stub.sent) == 1
+    assert stub.sent[0]["to"] == "re@x.com"
+    assert "https://setup.example/reissue1" in str(stub.sent[0]["html"])
+
+
 def test_setup_link_issuance_is_audited(client: TestClient) -> None:
     # (Re)issuing a set-password link is account-takeover-capable → it must be audited,
     # and the link itself must never be written to the trail.

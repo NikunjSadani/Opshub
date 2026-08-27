@@ -16,6 +16,7 @@ Every mutation is audited inside the caller's transaction.
 """
 from __future__ import annotations
 
+import html
 import logging
 import re
 
@@ -25,6 +26,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.modules.users.provisioner import UserProvisioner
 from app.platform import audit
+from app.platform.email import EmailSender
 from app.platform.models import Role, User
 
 logger = logging.getLogger(__name__)
@@ -112,12 +114,19 @@ def create_user(
     role_id: int,
     actor_uid: str | None,
     provisioner: UserProvisioner,
+    email_sender: EmailSender | None = None,
 ) -> tuple[User, str | None]:
     """Provision a Firebase account and create the app user with the given role.
 
     Validates email/name and that the role exists, rejects a duplicate email (409),
     provisions a PASSWORD-LESS auth account via the seam, inserts the `User` (active),
     audits `user.created`, and returns `(user, password_setup_link | None)`.
+
+    If `email_sender` is provided AND a setup link is produced, the invite (with the
+    setup link) is emailed BEST-EFFORT: a send failure or a no-op sender never affects
+    the result — the user is already durable and the link is still returned for manual
+    copy. Email is an enhancement, not a hard dependency. When `email_sender` is None
+    (existing callers / tests) no email is attempted.
     """
     email = _clean_email(email)
     name = _clean_name(name)
@@ -159,7 +168,40 @@ def create_user(
             raise DuplicateEmail(f"email {email} is already registered") from exc
         raise
     # The setup link is best-effort AFTER commit: the user is already durable.
-    return user, _safe_setup_link(provisioner, email)
+    link = _safe_setup_link(provisioner, email)
+    # Email the invite BEST-EFFORT: only when a link exists and a sender was supplied.
+    # A no-op (unconfigured) sender or a raising sender must NEVER change the outcome.
+    if link is not None and email_sender is not None:
+        send_invite_email(email_sender, to=email, name=name, link=link)
+    return user, link
+
+
+def send_invite_email(sender: EmailSender, *, to: str, name: str, link: str) -> None:
+    """Deliver the staff-invite email (setup link + short message), BEST-EFFORT.
+
+    Never raises: a delivery failure is logged and swallowed so it can never roll back
+    an already-committed user or hide the returned link. HTML-escapes the name + link
+    so a crafted value can't inject markup into the email body.
+    """
+    subject = "Set up your Gifsy OpsHub account"
+    safe_name = html.escape(name)
+    safe_link = html.escape(link, quote=True)
+    text_body = (
+        f"Hi {name},\n\n"
+        "You've been added to Gifsy OpsHub. Click the link below to set your "
+        f"password and sign in:\n\n{link}\n\n"
+        "If you didn't expect this, you can ignore this email."
+    )
+    html_body = (
+        f"<p>Hi {safe_name},</p>"
+        "<p>You've been added to Gifsy OpsHub. Click to set your password and sign in.</p>"
+        f'<p><a href="{safe_link}">Set your password</a></p>'
+        f"<p>Or paste this link into your browser:<br>{safe_link}</p>"
+    )
+    try:
+        sender.send(to, subject, html_body, text_body)
+    except Exception:  # noqa: BLE001 - email is best-effort; the user is already durable
+        logger.warning("invite email delivery failed for %s", to, exc_info=True)
 
 
 def _compensate_provisioning(provisioner: UserProvisioner, uid: str, email: str) -> None:

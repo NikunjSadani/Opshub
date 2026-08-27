@@ -64,6 +64,20 @@ class Settings(BaseSettings):
     # disabled (fail-closed 503); set via Secret Manager so only the scheduler calls it.
     sweep_secret: str | None = None
 
+    # --- email (MSG91 SMTP relay — FAIL-CLOSED) ---
+    # Transactional email (staff invite / password-setup) sends via MSG91's SMTP relay
+    # (Domain Settings -> SMTP Integration) over STARTTLS, reusing loyalty's ALREADY-
+    # verified sending domain notify.gifsy.in (SPF/DKIM/DMARC). FAIL-CLOSED: with
+    # `msg91_smtp_pass` unset the sender is a no-op (see app/platform/email.py
+    # get_email_sender), so deploying changes nothing until the owner adds the secret.
+    # Host/port/user default to the verified relay and are env-overridable; the
+    # from-address MUST be on the verified domain.
+    msg91_smtp_pass: str | None = None
+    email_from: str = "opshub@notify.gifsy.in"
+    msg91_smtp_host: str = "smtp.mailer91.com"
+    msg91_smtp_port: int = 587
+    msg91_smtp_user: str = "emailer@notify.gifsy.in"
+
     # --- misc ---
     cors_allow_origins: list[str] = []  # SPA is served same-origin; empty by design
 
