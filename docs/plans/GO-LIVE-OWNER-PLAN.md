@@ -13,6 +13,38 @@ Legend: 🧑 = only you can do it · 🤝 = we do together (I write, you provide
 
 ---
 
+## ✅ LIVE STATUS (updated 2026-08-27)
+
+**OpsHub is LIVE in production.** Access it at **https://opshub.gifsy.in** (custom domain, verified
+end-to-end) — or the direct Cloud Run URL `https://opshub-api-2aadkzwkua-el.a.run.app`.
+
+Live + verified:
+- **App on Cloud Run** (`opshub-api`, asia-south1), Cloud SQL Postgres 16 (`opshub-db`, db-f1-micro,
+  ~$11–13/mo), GCS file storage, real **Firebase** email/password login, first Administrator
+  bootstrapped.
+- **Auth polish (deployed):** invite links now work (accounts are created WITH a password provider —
+  the password-less bug that caused "link expired/used" is fixed); in-app **Change password** (user
+  menu); **Forgot password?** on the login screen.
+- **Custom domain `opshub.gifsy.in`:** Cloud Run domain-mapping is unavailable in asia-south1, and
+  the gifsy.in zone runs a loyalty **wildcard** worker (`*.gifsy.in/*`). Solved with a dedicated
+  Cloudflare Worker `opshub-proxy` on the more-specific route `opshub.gifsy.in/*` (in
+  `cloudflare-worker/`) → forwards to the single `opshub-api` origin (SPA + API on one service).
+  Verified: `/` + assets + `/api/v1/*` all proxy correctly and auth still returns 401 JSON.
+  Deploy is owner-run (`npx wrangler login` then `npx wrangler deploy` from `cloudflare-worker/`,
+  under the gifsy.in Cloudflare account) — git-bash and cmd.exe do NOT share the wrangler token, so
+  the deploy must run in the same shell as the login.
+- **In-app Help & Guides** (`/help`, ungated for all staff) with the "How to create a Delivery
+  Challan" walkthrough (prerequisites → bulk Excel template → validate → number & generate → print).
+
+▶ Remaining (not blocking use):
+- **Email polish** — auto-emailed staff invites (currently link-based/manual) + a no-spam sender on
+  gifsy.in. Needs an owner decision on mail provider (MSG91 SMTP like loyalty, or other) + SPF/DKIM
+  DNS. NOT started.
+- **Challan-QR activation** — built + dormant; owner-gated flip later (`public_base_url`,
+  per-client Access PINs, `qr_invoice_access_enabled`, per-IP protection).
+
+---
+
 ## ▶ PHASE 1 — Set up three accounts (do this FIRST; only you can)
 
 These three are the true prerequisites. Until they exist, nothing can deploy. They can be
