@@ -301,3 +301,61 @@ def test_setup_link_issuance_is_audited(client: TestClient) -> None:
             if a.action == "user.setup_link_issued"]
     db.close()
     assert rows and all("http" not in str(a.detail).lower() for a in rows)  # no link in trail
+
+
+# ------------------------------------------ FirebaseProvisioner (SDK mocked out)
+
+def test_firebase_create_auth_user_passes_a_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The account MUST be created with a (throwaway, random) password so it gains a
+    # `password` provider — otherwise generate_password_reset_link produces a link
+    # that fails as "expired or already used" and every invited staff member is
+    # locked out. The user still sets their own password via that link.
+    import firebase_admin.auth as fb_auth
+
+    from app.modules.users import provisioner as prov
+    from app.platform import auth as platform_auth
+
+    monkeypatch.setattr(platform_auth, "_ensure_firebase", lambda: None)
+
+    calls: dict[str, object] = {}
+
+    class _Record:
+        uid = "fb-uid-abc"
+
+    def _fake_create_user(**kwargs: object) -> _Record:
+        calls.update(kwargs)
+        return _Record()
+
+    monkeypatch.setattr(fb_auth, "create_user", _fake_create_user)
+
+    uid = prov.FirebaseProvisioner().create_auth_user("new@example.com")
+
+    assert uid == "fb-uid-abc"
+    assert calls["email"] == "new@example.com"
+    password = calls.get("password")
+    assert isinstance(password, str) and len(password) >= 16  # non-empty, high-entropy
+
+
+def test_firebase_create_auth_user_maps_duplicate_to_provision_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Existing already-exists handling must survive the password change.
+    import firebase_admin.auth as fb_auth
+
+    from app.modules.users import provisioner as prov
+    from app.platform import auth as platform_auth
+
+    monkeypatch.setattr(platform_auth, "_ensure_firebase", lambda: None)
+
+    class EmailAlreadyExistsError(Exception):
+        pass
+
+    def _boom(**_kwargs: object) -> object:
+        raise EmailAlreadyExistsError("dup")
+
+    monkeypatch.setattr(fb_auth, "create_user", _boom)
+
+    with pytest.raises(prov.ProvisionError):
+        prov.FirebaseProvisioner().create_auth_user("dup@example.com")

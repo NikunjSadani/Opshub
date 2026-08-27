@@ -122,13 +122,14 @@ class GcsStorage:
         return io.BytesIO(data)
 
     def delete(self, ref: str) -> None:
-        k = _gcs_key(ref)
+        import contextlib
+
         from google.cloud.exceptions import NotFound  # lazy
 
-        try:
+        k = _gcs_key(ref)
+        # already gone -> missing-ok, like LocalStorage.delete(missing_ok=True)
+        with contextlib.suppress(NotFound):
             self._bucket.blob(k).delete()
-        except NotFound:
-            pass  # already gone — LocalStorage.delete is likewise missing-ok
 
 
 def get_storage() -> Storage:

@@ -64,6 +64,12 @@ export interface AuthContextValue {
   getToken: () => Promise<string | null>;
   /** Email a password-reset/setup link to `email` (Firebase). No-op under the mock. */
   sendPasswordReset: (email: string) => Promise<void>;
+  /**
+   * Change the SIGNED-IN user's own password in place (Firebase), without email or
+   * re-login. Firebase requires a recent login, so the provider re-authenticates with
+   * `currentPassword` if needed, then sets `newPassword`. No-op under the mock.
+   */
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   /** LOCAL dev only: the seeded user to act as (sent as `X-Dev-Uid`). Null under real auth. */
   devUid: string | null;
 }
@@ -174,6 +180,9 @@ export function MockAuthProvider({
       signOut,
       getToken,
       sendPasswordReset: async () => {},
+      // Dev/tests don't have Firebase: keep this a no-op so the shape matches
+      // AuthContextValue without touching any real credential flow.
+      changePassword: async () => {},
       devUid: signedIn ? actingUid : null,
     }),
     [signedIn, actingUid, signIn, signOut, getToken],

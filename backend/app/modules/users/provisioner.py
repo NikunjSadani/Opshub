@@ -1,9 +1,15 @@
 """User provisioner seam — isolates the Firebase Admin create-user call.
 
 Creating an OpsHub user MUST create a backing Firebase Auth account (Firebase is
-the sole auth authority), but we **NEVER** accept or store a password: the account
-is created password-less and the user sets their own via a Firebase
-password-setup (reset) link.
+the sole auth authority). We NEVER accept a password from the caller and NEVER
+surface one: the invited user always sets their OWN password via a Firebase
+password-setup (reset) link. But the account is created WITH a throwaway random
+password so it gains a `password` auth provider — Firebase's
+`generate_password_reset_link` only acts on an account that already has a password
+credential, so a truly password-less account makes every setup link fail with
+"expired or already used". The random password is discarded immediately (never
+stored, returned, or logged); from the user's view onboarding is still fully
+password-less.
 
 `FirebaseProvisioner` wraps the real SDK (credentials init the same way as
 `app.platform.auth`); `LocalProvisioner` is a no-network stub used in local
@@ -12,6 +18,7 @@ behaviour matches — so the suite and the local SPA run without credentials.
 """
 from __future__ import annotations
 
+import secrets
 from typing import Protocol
 from uuid import uuid4
 
@@ -59,7 +66,11 @@ class LocalProvisioner:
 
 
 class FirebaseProvisioner:
-    """Real provisioner — creates a PASSWORD-LESS Firebase account and returns its uid."""
+    """Real provisioner — creates the Firebase account and returns its uid.
+
+    The account is created with a discarded random password so it carries a
+    `password` provider; the invited user still sets their own via the setup link.
+    """
 
     def create_auth_user(self, email: str) -> str:
         from app.platform import auth as platform_auth
@@ -67,8 +78,14 @@ class FirebaseProvisioner:
         platform_auth._ensure_firebase()  # same credential init as request auth
         from firebase_admin import auth as fb_auth
 
+        # A throwaway high-entropy password: never stored/returned/logged. Its only
+        # purpose is to give the account a `password` provider so the setup link
+        # (generate_password_reset_link) actually works — a password-less account
+        # makes every reset link fail as "expired or already used". The user still
+        # chooses their own password via that link.
+        initial_password = secrets.token_urlsafe(24)
         try:
-            record = fb_auth.create_user(email=email)  # NEVER a password
+            record = fb_auth.create_user(email=email, password=initial_password)
         except Exception as exc:  # noqa: BLE001 - narrowed by name below
             # firebase_admin has no type stubs; match the already-exists error by
             # class name so this stays mypy-clean and robust across SDK versions.

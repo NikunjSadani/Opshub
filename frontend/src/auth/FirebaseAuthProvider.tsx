@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { getApps, initializeApp } from 'firebase/app';
 import {
+  EmailAuthProvider,
   getAuth,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut as firebaseSignOut,
+  updatePassword,
   type Auth,
   type User as FirebaseUser,
 } from 'firebase/auth';
@@ -56,6 +59,27 @@ export function FirebaseAuthProvider({ children }: { children: ReactNode }) {
     await sendPasswordResetEmail(firebaseAuth(), resetEmail.trim());
   }, []);
 
+  // Change the signed-in user's own password in place. updatePassword requires a RECENT
+  // login; on `auth/requires-recent-login` we reauthenticate with the current password
+  // (proving the user knows it) and retry. Firebase surfaces a wrong current password as
+  // `auth/wrong-password` / `auth/invalid-credential` from the reauth step — the caller
+  // shows that message plainly.
+  const changePassword = useCallback(async (currentPassword: string, newPassword: string) => {
+    const current = firebaseAuth().currentUser;
+    if (!current || !current.email) {
+      throw new Error('You must be signed in to change your password.');
+    }
+    try {
+      await updatePassword(current, newPassword);
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code !== 'auth/requires-recent-login') throw err;
+      const credential = EmailAuthProvider.credential(current.email, currentPassword);
+      await reauthenticateWithCredential(current, credential);
+      await updatePassword(current, newPassword);
+    }
+  }, []);
+
   // Firebase caches + auto-refreshes the ID token; getIdToken() returns a fresh one each call.
   const getToken = useCallback(async () => {
     const current = firebaseAuth().currentUser;
@@ -72,9 +96,10 @@ export function FirebaseAuthProvider({ children }: { children: ReactNode }) {
       signOut,
       getToken,
       sendPasswordReset,
+      changePassword,
       devUid: null,
     }),
-    [user, ready, signIn, signOut, getToken, sendPasswordReset],
+    [user, ready, signIn, signOut, getToken, sendPasswordReset, changePassword],
   );
 
   return <AuthAndPermissions value={value}>{children}</AuthAndPermissions>;

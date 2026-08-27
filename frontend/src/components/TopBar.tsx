@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth, usePermissions } from '../auth/AuthProvider';
+import { ChangePasswordModal } from './ChangePasswordModal';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -13,6 +14,7 @@ export function TopBar() {
   const perms = usePermissions();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const [pwOpen, setPwOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -92,6 +94,17 @@ export function TopBar() {
               <button
                 type="button"
                 role="menuitem"
+                onClick={() => {
+                  setOpen(false);
+                  setPwOpen(true);
+                }}
+                className="block w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+              >
+                Change password
+              </button>
+              <button
+                type="button"
+                role="menuitem"
                 onClick={handleSignOut}
                 className="block w-full px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
               >
@@ -99,6 +112,8 @@ export function TopBar() {
               </button>
             </div>
           )}
+
+          <ChangePasswordModal open={pwOpen} onClose={() => setPwOpen(false)} />
         </div>
       ) : null}
     </header>
