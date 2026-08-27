@@ -62,6 +62,26 @@ resource "google_cloud_run_v2_service" "api" {
           }
         }
       }
+      # From-address for staff invite / setup-link emails (MSG91 SMTP relay). Must be on the
+      # MSG91-verified sending domain notify.gifsy.in.
+      env {
+        name  = "EMAIL_FROM"
+        value = "opshub@notify.gifsy.in"
+      }
+      # MSG91_SMTP_PASS — the SMTP relay credential. Its presence SELECTS the real email sender
+      # (app/platform/email.py get_email_sender); unset => fail-closed no-op. The secret
+      # `opshub-msg91-smtp-pass-prod` + the api SA's secretAccessor binding are provisioned via
+      # gcloud in the go-live email-activation step (copied from loyalty's MSG91_SMTP_PASS), so
+      # they are referenced by name here rather than declared as Terraform resources.
+      env {
+        name = "MSG91_SMTP_PASS"
+        value_source {
+          secret_key_ref {
+            secret  = "opshub-msg91-smtp-pass-prod"
+            version = "latest"
+          }
+        }
+      }
       volume_mounts {
         name       = "cloudsql"
         mount_path = "/cloudsql"
