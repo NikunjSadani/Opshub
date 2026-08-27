@@ -1,5 +1,7 @@
 import {
   createContext,
+  lazy,
+  Suspense,
   useCallback,
   useContext,
   useEffect,
@@ -8,6 +10,12 @@ import {
   type ReactNode,
 } from 'react';
 import { apiFetch } from '../api/client';
+
+// Firebase auth is code-split so its (large) SDK loads ONLY in a production build — never in
+// dev/tests, which use the mock. Lazy import keeps firebase out of the dev/test module graph.
+const FirebaseAuthProvider = lazy(() =>
+  import('./FirebaseAuthProvider').then((m) => ({ default: m.FirebaseAuthProvider })),
+);
 
 /**
  * Auth + permissions for the whole app (RBAC v2).
@@ -185,7 +193,7 @@ export function MockAuthProvider({
  * Both the mock and the future Firebase provider render through this, so the
  * permission wiring is identical regardless of how identity is obtained.
  */
-function AuthAndPermissions({
+export function AuthAndPermissions({
   value,
   children,
 }: {
@@ -259,32 +267,22 @@ function AuthAndPermissions({
   );
 }
 
-/** Fail-closed screen shown when a PRODUCTION build has no real auth wired. */
-function AuthNotConfigured() {
-  return (
-    <div className="grid h-screen place-items-center bg-slate-50 p-6 text-center">
-      <div className="max-w-md">
-        <h1 className="text-lg font-semibold text-slate-900">Authentication not configured</h1>
-        <p className="mt-2 text-sm text-slate-600">
-          This build has no authentication provider wired up. Mock auth (which signs everyone
-          in) is disabled outside development. Wire up FirebaseAuthProvider before deploying —
-          see the TODO in AuthProvider.tsx.
-        </p>
-      </div>
-    </div>
-  );
-}
+const AuthLoading = (
+  <div className="grid h-screen place-items-center text-sm text-slate-400">Loading…</div>
+);
 
 /**
- * Default provider. Development uses the mock; a PRODUCTION build FAILS CLOSED.
- *
- * TODO(auth): implement FirebaseAuthProvider that renders through <AuthAndPermissions>
- * with the SAME AuthContextValue (devUid: null), obtaining identity + token from
- * firebase/auth; /me then supplies permissions exactly as it does for the mock.
+ * Default provider. A PRODUCTION build uses REAL Firebase auth (email/password); dev + tests use
+ * the mock (with the dev role-switcher). Both render through <AuthAndPermissions>, so /me supplies
+ * permissions identically regardless of how identity is obtained.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   if (import.meta.env.PROD) {
-    return <AuthNotConfigured />;
+    return (
+      <Suspense fallback={AuthLoading}>
+        <FirebaseAuthProvider>{children}</FirebaseAuthProvider>
+      </Suspense>
+    );
   }
   return <MockAuthProvider>{children}</MockAuthProvider>;
 }

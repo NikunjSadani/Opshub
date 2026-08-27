@@ -37,6 +37,11 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "GCS_BUCKET"
         value = google_storage_bucket.files.name
       }
+      # Firebase project for ID-token verification + user provisioning (ADC = this SA; no key file).
+      env {
+        name  = "FIREBASE_PROJECT_ID"
+        value = data.google_project.opshub.project_id
+      }
       env {
         name = "DATABASE_URL"
         value_source {
