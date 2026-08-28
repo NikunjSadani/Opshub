@@ -34,10 +34,11 @@ const CLIENTS = [
   { id: '2', name: 'ITC', code: 'ITC', pan: null, credit_terms_days: null, active: true },
 ];
 
-/** Consolidated rollup: grand totals + a general-overhead bucket (shown separately). */
+/** Consolidated rollup: grand totals + a general-overhead bucket + an unattributed bucket. */
 const CONSOLIDATED = {
   totals: { revenue_paise: 22200000, cost_paise: 8800000, margin_paise: 13400000 },
   general_bucket: { revenue_paise: 0, cost_paise: 2500000, margin_paise: -2500000 },
+  unattributed: { revenue_paise: 1500000, cost_paise: 300000, margin_paise: 1200000 },
   projects: [],
 };
 
@@ -136,6 +137,17 @@ describe('FinanceModule (P&L dashboard)', () => {
     expect(await screen.findByText(/general \/ overhead/i)).toBeInTheDocument();
     const generalMargin = screen.getByText(/-₹25,000\.00/);
     expect(generalMargin.closest('table')).toBeNull();
+  });
+
+  it('shows the unattributed bucket separately when it carries money', async () => {
+    stubFetch();
+    renderWithProviders(<FinanceModule />);
+
+    // The unattributed callout has its own heading + its revenue (₹15,000.00), rendered
+    // OUTSIDE the project table (so a PO-less unattributed invoice never leaks in as a row).
+    expect(await screen.findByText(/^Unattributed$/i)).toBeInTheDocument();
+    const unattrRevenue = screen.getByText(/₹15,000\.00/);
+    expect(unattrRevenue.closest('table')).toBeNull();
   });
 
   it('renders a negative-margin project in red with the correct sign', async () => {

@@ -23,8 +23,8 @@ from sqlalchemy.pool import StaticPool
 from starlette.testclient import TestClient
 
 from app.db import Base, get_db
+from app.modules.billing import ar_service, matcher
 from app.modules.billing import invoice_service as service
-from app.modules.billing import matcher
 from app.modules.billing.invoice_routes import router
 from app.modules.billing.matcher import _Candidate
 from app.modules.billing.models import (
@@ -44,6 +44,7 @@ from app.modules.expense.canonical import (
     InvoiceTotals,
 )
 from app.modules.projects import service as projects_service
+from app.modules.projects.models import Project
 from app.modules.sales_orders.models import (
     LineStatus,
     POLineItem,
@@ -205,6 +206,7 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     seed.add_all([widget_line, gadget_line])
     seed.commit()
     client_id, po_id = seed_client.id, po.id
+    project_id = project.id
     widget_line_id, gadget_line_id = widget_line.id, gadget_line.id
     seed.close()
 
@@ -222,6 +224,7 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
     app.state.TestSession = TestSession
     app.state.client_id = client_id
     app.state.po_id = po_id
+    app.state.project_id = project_id
     app.state.widget_line_id = widget_line_id
     app.state.gadget_line_id = gadget_line_id
     yield TestClient(app)
@@ -242,6 +245,7 @@ def _set_company_gstin(client: TestClient, value: Any) -> None:
 def _upload(
     client: TestClient, *specs: dict[str, Any],
     client_id: int | None = None, po_id: int | None | str = "default",
+    project_id: int | None = None,
 ) -> Any:
     files = [("files", (f"cinv{i}.pdf", _pdf(s), "application/pdf"))
              for i, s in enumerate(specs)]
@@ -251,6 +255,8 @@ def _upload(
     resolved_po = client.app.state.po_id if po_id == "default" else po_id
     if resolved_po is not None:
         data["po_id"] = str(resolved_po)
+    if project_id is not None:
+        data["project_id"] = str(project_id)
     return client.post("/api/v1/billing/invoices", files=files, data=data)
 
 
@@ -605,3 +611,198 @@ def test_required_field_corrected_to_blank_blocks_confirm(client: TestClient) ->
     blocked = _confirm(client, inv_id)
     assert blocked.status_code == 409, blocked.text
     assert "buyer_gstin" in blocked.json()["detail"]
+
+
+# ------------------------------------------- PO-less invoice: confirm without a PO
+
+def test_po_less_invoice_confirms_with_unmatched_lines(client: TestClient) -> None:
+    # Some clients never issue a PO. A PO-less invoice (po_id NULL) has no PO lines to match,
+    # so it reads as MATCHED on upload (lines stay UNMATCHED) and confirms as-is.
+    r = _upload(client, _spec(invoice_number="CINV-NOPO"), po_id=None)
+    assert r.status_code == 201, r.text
+    outcome = r.json()["outcomes"][0]
+    inv_id = outcome["invoice_id"]
+    assert outcome["status"] == "MATCHED"
+
+    detail = client.get(f"/api/v1/billing/invoices/{inv_id}").json()
+    assert detail["po_id"] is None
+    # the line never bound to a PO line (nothing to match against)
+    assert detail["lines"][0]["match_status"] == "UNMATCHED"
+    assert detail["lines"][0]["po_line_item_id"] is None
+
+    r = _confirm(client, inv_id)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "CONFIRMED"
+    assert r.json()["confirmed_by"] == "ops" and r.json()["confirmed_at"] is not None
+    # immutable after confirm
+    again = client.patch(f"/api/v1/billing/invoices/{inv_id}/review",
+                         json={"corrections": [{"field_path": "header.buyer_gstin",
+                                                "value": OUR_GSTIN}]})
+    assert again.status_code == 409, again.text
+
+
+def test_po_linked_unmatched_line_still_blocks_confirm(client: TestClient) -> None:
+    # A PO-linked invoice keeps the full line-matching requirement (unchanged behavior).
+    inv_id = _upload(client, _spec(invoice_number="CINV-PO", lines=[
+        {"description": "Widget WID-1", "hsn": "847130", "unit_rate_paise": 100000, "qty": 2},
+        {"description": "Unknownium ZZZ", "hsn": "000000", "unit_rate_paise": 777, "qty": 1},
+    ])).json()["outcomes"][0]["invoice_id"]
+    blocked = _confirm(client, inv_id)
+    assert blocked.status_code == 409, blocked.text
+    assert "match every line" in blocked.json()["detail"].lower()
+    assert "unmatched" in blocked.json()["detail"].lower()
+
+
+def test_po_less_invoice_weak_required_field_still_blocks(client: TestClient) -> None:
+    # A PO-less invoice STILL needs its required header fields (a weak grand total blocks).
+    inv_id = _upload(client, _spec(invoice_number="CINV-NOPO-REV", review=True),
+                     po_id=None).json()["outcomes"][0]["invoice_id"]
+    detail = client.get(f"/api/v1/billing/invoices/{inv_id}").json()
+    assert detail["po_id"] is None
+    assert detail["status"] == "NEEDS_REVIEW"
+    blocked = _confirm(client, inv_id)
+    assert blocked.status_code == 409, blocked.text
+    assert "required" in blocked.json()["detail"].lower()
+    # correcting the weak field unblocks confirm
+    r = client.patch(f"/api/v1/billing/invoices/{inv_id}/review",
+                     json={"corrections": [{"field_path": "totals.grand_total_paise",
+                                            "value": "236000"}], "confirm": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "CONFIRMED"
+
+
+def test_derive_status_matched_for_po_less_needs_match_for_po_linked(client: TestClient) -> None:
+    # PO-less + lines + no weak required field -> MATCHED (ready to confirm).
+    po_less = _upload(client, _spec(invoice_number="CINV-DS-NOPO"), po_id=None
+                      ).json()["outcomes"][0]
+    assert po_less["status"] == "MATCHED"
+    # PO-linked with an unmatched line -> NEEDS_MATCH (unchanged).
+    po_linked = _upload(client, _spec(invoice_number="CINV-DS-PO", lines=[
+        {"description": "Widget WID-1", "hsn": "847130", "unit_rate_paise": 100000, "qty": 2},
+        {"description": "Unknownium ZZZ", "hsn": "000000", "unit_rate_paise": 777, "qty": 1},
+    ])).json()["outcomes"][0]
+    assert po_linked["status"] == "NEEDS_MATCH"
+
+
+# ------------------------------------------- project attribution (PO-less P&L)
+
+def _second_client_project(client: TestClient) -> tuple[int, int]:
+    """Create a SEPARATE client + ACTIVE project via the projects service; return their ids."""
+    db = client.app.state.TestSession()
+    other = projects_service.create_client(db, name="Other Co", code="OTH", actor_uid="adm")
+    db.flush()
+    proj = projects_service.create_project(
+        db, client_id=other.id, name="Other Project", actor_uid="adm")
+    db.commit()
+    ids = (other.id, proj.id)
+    db.close()
+    return ids
+
+
+def test_upload_with_valid_project_stamps_it(client: TestClient) -> None:
+    # A PO-less upload with a valid same-client ACTIVE project stamps project_id on the invoice.
+    project_id = client.app.state.project_id
+    r = _upload(client, _spec(invoice_number="CINV-PRJ"), po_id=None, project_id=project_id)
+    assert r.status_code == 201, r.text
+    inv_id = r.json()["outcomes"][0]["invoice_id"]
+    detail = client.get(f"/api/v1/billing/invoices/{inv_id}").json()
+    assert detail["po_id"] is None
+    assert detail["project_id"] == project_id
+
+
+def test_upload_project_of_different_client_rejected(client: TestClient) -> None:
+    # A project belonging to ANOTHER client is a 400 (and nothing persists).
+    _other_client_id, other_project_id = _second_client_project(client)
+    r = _upload(client, _spec(invoice_number="CINV-XCLIENT"), po_id=None,
+                project_id=other_project_id)
+    assert r.status_code == 400, r.text
+    assert "does not belong" in r.json()["detail"]
+    assert client.get("/api/v1/billing/invoices").json() == []
+
+
+def test_upload_inactive_project_rejected(client: TestClient) -> None:
+    # An ON_HOLD (non-ACTIVE) project is a 400.
+    project_id = client.app.state.project_id
+    db = client.app.state.TestSession()
+    proj = db.get(Project, project_id)
+    assert proj is not None
+    proj.status = "ON_HOLD"
+    db.commit()
+    db.close()
+    r = _upload(client, _spec(invoice_number="CINV-HOLD"), po_id=None, project_id=project_id)
+    assert r.status_code == 400, r.text
+    assert "not found or is not ACTIVE" in r.json()["detail"]
+
+
+def test_upload_unknown_project_rejected(client: TestClient) -> None:
+    r = _upload(client, _spec(invoice_number="CINV-NOPRJ"), po_id=None, project_id=999999)
+    assert r.status_code == 400, r.text
+    assert "not found or is not ACTIVE" in r.json()["detail"]
+
+
+def test_set_project_editable_then_immutable_after_confirm(client: TestClient) -> None:
+    project_id = client.app.state.project_id
+    # PO-less invoice, initially unattributed.
+    inv_id = _upload(client, _spec(invoice_number="CINV-SETPRJ"), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    assert client.get(f"/api/v1/billing/invoices/{inv_id}").json()["project_id"] is None
+
+    # Assign a project on the in-review invoice.
+    r = client.patch(f"/api/v1/billing/invoices/{inv_id}/project",
+                     json={"project_id": project_id})
+    assert r.status_code == 200, r.text
+    assert r.json()["project_id"] == project_id
+
+    # Clear it (None falls back to unattributed).
+    r = client.patch(f"/api/v1/billing/invoices/{inv_id}/project", json={"project_id": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["project_id"] is None
+
+    # Re-assign, then confirm.
+    assert client.patch(f"/api/v1/billing/invoices/{inv_id}/project",
+                        json={"project_id": project_id}).status_code == 200
+    assert _confirm(client, inv_id).status_code == 200
+
+    # Immutable after CONFIRMED -> 409, and project_id is unchanged.
+    blocked = client.patch(f"/api/v1/billing/invoices/{inv_id}/project", json={"project_id": None})
+    assert blocked.status_code == 409, blocked.text
+    assert client.get(f"/api/v1/billing/invoices/{inv_id}").json()["project_id"] == project_id
+
+
+def test_set_project_wrong_client_rejected(client: TestClient) -> None:
+    _other_client_id, other_project_id = _second_client_project(client)
+    inv_id = _upload(client, _spec(invoice_number="CINV-SETX"), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    r = client.patch(f"/api/v1/billing/invoices/{inv_id}/project",
+                     json={"project_id": other_project_id})
+    assert r.status_code == 400, r.text
+    assert "does not belong" in r.json()["detail"]
+
+
+def test_set_project_rbac_viewer_forbidden(client: TestClient) -> None:
+    project_id = client.app.state.project_id
+    inv_id = _upload(client, _spec(invoice_number="CINV-SETRBAC"), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    _as(client, VIEWER)
+    r = client.patch(f"/api/v1/billing/invoices/{inv_id}/project",
+                     json={"project_id": project_id})
+    assert r.status_code == 403, r.text
+
+
+def test_po_less_confirmed_appears_in_ar_and_zero_invoiced_qty(client: TestClient) -> None:
+    widget_line_id = client.app.state.widget_line_id
+    inv_id = _upload(client, _spec(invoice_number="CINV-NOPO-AR"), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    assert _confirm(client, inv_id).status_code == 200
+
+    db = client.app.state.TestSession()
+    # AR register: a PO-less CONFIRMED invoice is a receivable (owed = its header total).
+    rows = ar_service.ar_register(db, client_id=client.app.state.client_id)
+    ar = next((r for r in rows if r.invoice_id == inv_id), None)
+    assert ar is not None, "PO-less confirmed invoice must appear in the AR register"
+    assert ar.grand_total_paise == 236000
+    assert ar.outstanding_paise == 236000
+    assert ar.status == ar_service.STATUS_UNPAID
+    # §6 rollup: its lines carry po_line_item_id NULL, so they add 0 to any PO line's qty.
+    assert service.invoiced_qty_for_po_line(db, widget_line_id) == Decimal("0")
+    db.close()

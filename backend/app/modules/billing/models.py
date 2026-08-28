@@ -119,6 +119,12 @@ class SalesInvoice(Base):
     # Cross-module FKs (no ORM relationship): the client + the PO this invoice bills.
     client_id: Mapped[int] = mapped_column(ForeignKey("project_client.id"), index=True)
     po_id: Mapped[int | None] = mapped_column(ForeignKey("purchase_order.id"), index=True)
+    # Optional DIRECT project attribution for a PO-less invoice (inc: PO-less P&L). When set,
+    # finance resolves this invoice's revenue to this project as a FALLBACK behind the PO
+    # (COALESCE(PurchaseOrder.project_id, SalesInvoice.project_id)) — a PO, when present, still
+    # carries the project. Nullable + a plain FK (no cascade; projects are soft-managed): a
+    # PO-less invoice with neither a PO nor a project is "unattributed" in the consolidated P&L.
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("project.id"), index=True)
     source_file_id: Mapped[int] = mapped_column(ForeignKey("files_stored_file.id"), index=True)
 
     invoice_number: Mapped[str] = mapped_column(String(120), index=True)  # accounting software's

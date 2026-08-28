@@ -71,6 +71,9 @@ class ProjectPnlDetailOut(BaseModel):
 class ConsolidatedOut(BaseModel):
     projects: list[ProjectPnlOut]
     general_bucket: PnlLineOut
+    # PO-less confirmed invoices/CNs with no direct project. Distinct from general_bucket
+    # (GEN overhead). Excluded from the project rows, folded into totals so they reconcile.
+    unattributed: PnlLineOut
     totals: PnlLineOut
 
 
@@ -142,13 +145,15 @@ def pnl_consolidated(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ConsolidatedOut:
-    """Consolidated P&L: per-project rows, the general-bucket line, and the totals over
-    every project (totals == Σ(project rows) + general bucket)."""
+    """Consolidated P&L: per-project rows, the general-bucket line, the unattributed line
+    (PO-less confirmed invoices with no project), and the totals over every bucket
+    (totals == Σ(project rows) + general bucket + unattributed)."""
     _require_view(user)
     data = service.consolidated_pnl(db)
     return ConsolidatedOut(
         projects=[_project_out(r) for r in data.projects],
         general_bucket=_line_out(data.general_bucket),
+        unattributed=_line_out(data.unattributed),
         totals=_line_out(data.totals),
     )
 

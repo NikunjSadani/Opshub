@@ -69,6 +69,14 @@ export interface BillingInvoiceRow {
   needs_ocr: boolean;
   client_id: string;
   po_id: string | null;
+  /**
+   * The direct project attribution for a PO-less invoice (backend serialises the
+   * project's integer id, or null). Unlike the string ids above, this stays a raw
+   * number to mirror the backend `int | None` exactly; the UI compares it against a
+   * project's string id via `String(project_id)`. When a PO is linked the invoice's
+   * project comes from the PO — this direct attribution is for the standalone case.
+   */
+  project_id: number | null;
   supplier_gstin: string | null;
   buyer_gstin: string | null;
   invoice_number: string | null;
@@ -130,6 +138,12 @@ export interface BillingInvoiceDetail {
   review_reasons: string[];
   client_id: string;
   po_id: string | null;
+  /**
+   * Direct project attribution for a PO-less invoice (backend `int | None`). Kept as a
+   * raw number (see {@link BillingInvoiceRow.project_id}); null when unattributed. When a
+   * PO is linked the project comes from the PO and this control isn't shown.
+   */
+  project_id: number | null;
   source_file_id: string | null;
   supplier_gstin: string | null;
   buyer_gstin: string | null;
@@ -313,6 +327,13 @@ export interface BillingUploadArgs {
   files: File[];
   clientId: string;
   poId?: string;
+  /**
+   * Optional direct project attribution for a PO-less batch. Sent only when NO PO is
+   * chosen (a PO already carries the project); must be an ACTIVE project of the same
+   * client (backend validates before storing any bytes). A string because it rides the
+   * multipart form as text; omit/blank to leave the invoice unattributed.
+   */
+  projectId?: string;
 }
 
 /**
@@ -329,11 +350,13 @@ export function useUploadBillingInvoices(): UseMutationResult<
   const { postForm } = useApi();
   const qc = useQueryClient();
   return useMutation<BillingUploadBatch, ApiError, BillingUploadArgs>({
-    mutationFn: ({ files, clientId, poId }) => {
+    mutationFn: ({ files, clientId, poId, projectId }) => {
       const form = new FormData();
       for (const f of files) form.append('files', f);
       form.append('client_id', clientId);
       if (poId) form.append('po_id', poId);
+      // A PO already carries the project; only a PO-less batch sends a direct attribution.
+      if (!poId && projectId) form.append('project_id', projectId);
       return postForm<BillingUploadBatch>('/billing/invoices', form);
     },
     onSuccess: () => {
@@ -415,6 +438,32 @@ export function useManualMatch(): UseMutationResult<
       ),
     onSuccess: (invoice) => {
       qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}
+
+/**
+ * Assign / change / clear the direct project attribution on a PO-less, still-editable
+ * invoice (OPERATE, PATCH /billing/invoices/{id}/project). The argument is the project's
+ * numeric id, or null to clear (fall back to unattributed); the backend 400s unless it is
+ * an ACTIVE project of the invoice's client, and 409s once the invoice is CONFIRMED. Seeds
+ * the response detail into the cache (so the control reflects the new value) and refreshes
+ * the register (whose row carries project_id).
+ */
+export function useSetInvoiceProject(
+  invoiceId: string,
+): UseMutationResult<BillingInvoiceDetail, ApiError, number | null> {
+  const { patch } = useApi();
+  const qc = useQueryClient();
+  return useMutation<BillingInvoiceDetail, ApiError, number | null>({
+    mutationFn: (projectId) =>
+      patch<BillingInvoiceDetail>(`/billing/invoices/${invoiceId}/project`, {
+        project_id: projectId,
+      }),
+    onSuccess: (invoice) => {
+      qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.detail(invoice.id) });
       void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
     },
   });

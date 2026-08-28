@@ -189,6 +189,52 @@ export function FinanceModule() {
               </div>
             </div>
           </div>
+
+          {/* --- Unattributed callout: PO-less confirmed invoices with no project. Shown
+               only when it actually carries money, so it stays out of the way otherwise.
+               Distinct from the GEN overhead bucket; already folded into the totals. --- */}
+          {consolidated.data.unattributed &&
+            (consolidated.data.unattributed.revenue_paise !== 0 ||
+              consolidated.data.unattributed.cost_paise !== 0) && (
+              <div className="mb-6 rounded-xl border border-slate-300 bg-slate-50 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wide text-slate-600">
+                      Unattributed
+                    </p>
+                    <p className="mt-0.5 text-sm text-slate-500">
+                      Confirmed invoices with no PO and no project — assign a project on the
+                      invoice to move this into that project&apos;s P&amp;L. Already included in
+                      the totals above.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-x-6 text-right tabular-nums">
+                    <div>
+                      <p className="text-xs text-slate-500">Revenue</p>
+                      <p className="text-sm font-semibold text-slate-900">
+                        {rupees(consolidated.data.unattributed.revenue_paise)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500">Cost</p>
+                      <p className="text-sm font-semibold text-slate-900">
+                        {rupees(consolidated.data.unattributed.cost_paise)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500">Margin</p>
+                      <p
+                        className={`text-sm font-semibold ${signClass(
+                          consolidated.data.unattributed.margin_paise,
+                        )}`}
+                      >
+                        {rupees(consolidated.data.unattributed.margin_paise)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
         </>
       )}
 

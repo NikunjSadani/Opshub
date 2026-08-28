@@ -64,6 +64,34 @@ const PURCHASE_ORDERS = [
   },
 ];
 
+/** ACTIVE projects for the selected client (backend `ProjectOut`; ids are ints on the wire). */
+const PROJECTS = [
+  {
+    id: 10,
+    code: 'BRI-001',
+    client_id: '1',
+    client_code: 'BRI',
+    client_name: 'Britannia',
+    name: 'Q2 Activation',
+    start_date: null,
+    status: 'ACTIVE',
+    description: null,
+    created_at: '2026-04-01T00:00:00Z',
+  },
+  {
+    id: 11,
+    code: 'BRI-002',
+    client_id: '1',
+    client_code: 'BRI',
+    client_name: 'Britannia',
+    name: 'Diwali Campaign',
+    start_date: null,
+    status: 'ACTIVE',
+    description: null,
+    created_at: '2026-04-02T00:00:00Z',
+  },
+];
+
 /** A register row (backend list `InvoiceOut` projection). */
 const INVOICE_ROW = {
   id: 5,
@@ -71,6 +99,7 @@ const INVOICE_ROW = {
   needs_ocr: false,
   client_id: 1,
   po_id: 50,
+  project_id: null,
   supplier_gstin: '27ZZZZZ0000Z1Z5',
   buyer_gstin: '29AAAAA0000A1Z5',
   invoice_number: 'CINV-2026-005',
@@ -144,6 +173,7 @@ function detail(overrides: Record<string, unknown> = {}) {
     review_reasons: ['line 1 is not matched to a PO line'],
     client_id: 1,
     po_id: 50,
+    project_id: null,
     source_file_id: 9,
     supplier_gstin: '27ZZZZZ0000Z1Z5',
     buyer_gstin: '29AAAAA0000A1Z5',
@@ -254,6 +284,7 @@ describe('InvoiceUpload', () => {
         }
         if (url.includes('/purchase-orders')) return json(PURCHASE_ORDERS);
         if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.includes('/projects')) return json(PROJECTS);
         if (url.endsWith('/me')) return meResponse('OPERATE');
         throw new Error(`Unexpected fetch: ${method} ${url}`);
       }),
@@ -289,6 +320,86 @@ describe('InvoiceUpload', () => {
     expect(postedForm).not.toBeNull();
     expect((postedForm as unknown as FormData).get('client_id')).toBe('1');
   });
+
+  it('with a client and no PO, shows the ACTIVE-project picker and sends the chosen project_id', async () => {
+    let postedForm: FormData | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.includes('/billing/invoices') && method === 'POST') {
+          postedForm = init?.body as FormData;
+          return json({
+            batch_id: 8,
+            invoice_count: 1,
+            outcomes: [
+              { file_id: 1, filename: 'standalone.pdf', invoice_id: 21, status: 'NEEDS_REVIEW', duplicate_of: null, buyer_gstin: null, invoice_number: 'CINV-21', grand_total_paise: 300000, review_reasons: [], message: null },
+            ],
+          });
+        }
+        if (url.includes('/purchase-orders')) return json([]); // no POs → the PO-less path
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.includes('/projects')) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<InvoiceUpload />);
+    await screen.findByRole('option', { name: /BRI — Britannia/i });
+
+    // Before a client is chosen, there is no Project picker.
+    expect(screen.queryByLabelText(/^Project/i)).not.toBeInTheDocument();
+
+    // Choosing the client reveals the Project picker with that client's ACTIVE projects.
+    fireEvent.change(screen.getByLabelText(/Client/i), { target: { value: '1' } });
+    const projectSelect = await screen.findByLabelText(/^Project/i);
+    await screen.findByRole('option', { name: /BRI-001 — Q2 Activation/i });
+    fireEvent.change(projectSelect, { target: { value: '10' } });
+
+    // Choose a file and upload.
+    const input = document.getElementById('billing-files') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(['x'], 'standalone.pdf', { type: 'application/pdf' })] },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /upload 1 file/i }));
+
+    await screen.findByText('standalone.pdf');
+    expect(postedForm).not.toBeNull();
+    expect((postedForm as unknown as FormData).get('client_id')).toBe('1');
+    // The chosen project rides the multipart form.
+    expect((postedForm as unknown as FormData).get('project_id')).toBe('10');
+  });
+
+  it('hides the Project picker once a PO is selected (the PO carries the project)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/purchase-orders')) return json(PURCHASE_ORDERS);
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.includes('/projects')) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(<InvoiceUpload />);
+    await screen.findByRole('option', { name: /BRI — Britannia/i });
+
+    fireEvent.change(screen.getByLabelText(/Client/i), { target: { value: '1' } });
+    // No PO chosen yet → the Project picker is present.
+    expect(await screen.findByLabelText(/^Project/i)).toBeInTheDocument();
+
+    // Wait for the client's PO options to load, then select one; its project wins, so the
+    // Project picker hides.
+    await screen.findByRole('option', { name: /PO-2026-050/i });
+    fireEvent.change(screen.getByLabelText(/Purchase order/i), { target: { value: '50' } });
+    await waitFor(() =>
+      expect(screen.queryByLabelText(/^Project/i)).not.toBeInTheDocument(),
+    );
+  });
 });
 
 describe('InvoiceReview — detail + match', () => {
@@ -296,8 +407,13 @@ describe('InvoiceReview — detail + match', () => {
     onDetail?: () => Response;
     onManualMatch?: (body: unknown) => Response;
     onConfirm?: (body: unknown) => Response;
+    onSetProject?: (body: { project_id: number | null }) => Response;
     level?: 'VIEW' | 'OPERATE' | 'MANAGE';
-    capture?: { manual?: (b: unknown) => void; confirm?: (b: unknown) => void };
+    capture?: {
+      manual?: (b: unknown) => void;
+      confirm?: (b: unknown) => void;
+      project?: (b: unknown) => void;
+    };
   }) {
     vi.stubGlobal(
       'fetch',
@@ -314,8 +430,17 @@ describe('InvoiceReview — detail + match', () => {
           handlers.capture?.confirm?.(body);
           return (handlers.onConfirm ?? (() => json({ ...detail(), status: 'CONFIRMED' })))(body);
         }
+        if (url.match(/\/billing\/invoices\/5\/project$/) && method === 'PATCH') {
+          const body = JSON.parse(String(init?.body)) as { project_id: number | null };
+          handlers.capture?.project?.(body);
+          return (
+            handlers.onSetProject ??
+            (() => json(detail({ po_id: null, project_id: body.project_id })))
+          )(body);
+        }
         if (url.match(/\/billing\/invoices\/5$/)) return (handlers.onDetail ?? (() => json(detail())))();
         if (url.match(/\/purchase-orders\/50$/)) return json(PO_DETAIL);
+        if (url.match(/\/projects(\?|$)/)) return json(PROJECTS);
         if (url.endsWith('/me')) return meResponse(handlers.level ?? 'MANAGE');
         throw new Error(`Unexpected fetch: ${method} ${url}`);
       }),
@@ -376,6 +501,56 @@ describe('InvoiceReview — detail + match', () => {
     await waitFor(() => expect(confirm).toBeEnabled());
   });
 
+  it('a PO-less invoice shows the standalone note + an ENABLED Confirm, and confirms', async () => {
+    // No PO linked: the backend derives status MATCHED once the required fields are in
+    // order, and confirm must not be gated on line-matching (there is nothing to match).
+    const captured: unknown[] = [];
+    stub({
+      level: 'OPERATE',
+      onDetail: () =>
+        json(
+          detail({
+            po_id: null,
+            status: 'MATCHED',
+            review_reasons: [],
+            lines: [{ ...detail().lines[0], po_line_item_id: null, match_status: 'UNMATCHED' }],
+          }),
+        ),
+      capture: { confirm: (b) => captured.push(b) },
+    });
+
+    renderReview();
+
+    // The honest standalone-AR note replaces the match controls…
+    expect(await screen.findByText(/No PO linked/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/This invoice will be confirmed as a standalone AR record/i),
+    ).toBeInTheDocument();
+    // …and there is no per-line "Match line … to a PO line" control.
+    expect(screen.queryByLabelText(/Match line 1 to a PO line/i)).not.toBeInTheDocument();
+
+    // Confirm is enabled despite the unmatched line, and PATCHes with confirm:true.
+    const confirm = screen.getByRole('button', { name: /confirm invoice/i });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    await waitFor(() => expect(captured.length).toBe(1));
+    expect(captured[0]).toEqual({ corrections: [], confirm: true });
+  });
+
+  it('a PO-linked invoice with an unmatched line still shows the match UI and blocks confirm', async () => {
+    stub({ level: 'OPERATE' });
+    renderReview();
+
+    // The match control is present (PO-linked flow unchanged)…
+    expect(await screen.findByLabelText(/Match line 1 to a PO line/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No PO linked/i)).not.toBeInTheDocument();
+
+    // …and Confirm stays blocked with the honest reason.
+    const confirm = screen.getByRole('button', { name: /confirm invoice/i });
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText(/Match every line to a PO line to confirm/i)).toBeInTheDocument();
+  });
+
   it('a VIEW-only user gets no Confirm/Cancel/Delete actions', async () => {
     stub({ level: 'VIEW' });
     renderReview();
@@ -412,5 +587,68 @@ describe('InvoiceReview — detail + match', () => {
     fireEvent.click(confirm);
     await waitFor(() => expect(captured.length).toBe(1));
     expect(captured[0]).toEqual({ corrections: [], confirm: true });
+  });
+
+  it('a PO-less editable invoice shows the Project control and PATCHes the chosen project', async () => {
+    const captured: unknown[] = [];
+    stub({
+      level: 'OPERATE',
+      onDetail: () =>
+        json(
+          detail({
+            po_id: null,
+            project_id: null,
+            status: 'MATCHED',
+            review_reasons: [],
+            lines: [{ ...detail().lines[0], po_line_item_id: null, match_status: 'UNMATCHED' }],
+          }),
+        ),
+      capture: { project: (b) => captured.push(b) },
+    });
+
+    renderReview();
+
+    // The standalone note renders, and (on the no-PO path) the editable Project control.
+    expect(await screen.findByText(/No PO linked/i)).toBeInTheDocument();
+    const select = await screen.findByLabelText('Project attribution');
+    await screen.findByRole('option', { name: /BRI-001 — Q2 Activation/i });
+
+    // Choosing a project PATCHes /billing/invoices/5/project with the numeric { project_id }.
+    fireEvent.change(select, { target: { value: '10' } });
+    await waitFor(() => expect(captured.length).toBe(1));
+    expect(captured[0]).toEqual({ project_id: 10 });
+  });
+
+  it('a CONFIRMED PO-less invoice shows its assigned project read-only (no select)', async () => {
+    stub({
+      level: 'OPERATE',
+      onDetail: () =>
+        json(
+          detail({
+            po_id: null,
+            project_id: 10,
+            status: 'CONFIRMED',
+            confirmed_at: '2026-05-11T00:00:00Z',
+            review_reasons: [],
+          }),
+        ),
+    });
+
+    renderReview();
+
+    expect(await screen.findByText(/No PO linked/i)).toBeInTheDocument();
+    // The resolved project name shows read-only; there is no editable Project select.
+    expect(await screen.findByText(/BRI-001 — Q2 Activation/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Project attribution')).not.toBeInTheDocument();
+  });
+
+  it('a PO-linked invoice does not show the Project attribution control', async () => {
+    stub({ level: 'OPERATE' }); // default detail is PO-linked (po_id 50)
+    renderReview();
+
+    // The PO match UI is present; the standalone note + project control are not.
+    expect(await screen.findByLabelText(/Match line 1 to a PO line/i)).toBeInTheDocument();
+    expect(screen.queryByText(/No PO linked/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Project attribution')).not.toBeInTheDocument();
   });
 });

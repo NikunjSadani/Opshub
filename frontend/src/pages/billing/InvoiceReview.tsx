@@ -18,12 +18,14 @@ import {
 } from '../../ui';
 import { usePermissions } from '../../auth/AuthProvider';
 import { usePurchaseOrderQuery, type POLine } from '../../api/purchaseOrders';
+import { useProjectsQuery } from '../../api/projects';
 import {
   useBillingInvoiceQuery,
   useCancelInvoice,
   useDeleteInvoice,
   useManualMatch,
   useRematch,
+  useSetInvoiceProject,
   useSubmitReview,
   type BillingCorrection,
   type BillingFieldOut,
@@ -207,7 +209,8 @@ function LinesMatchTable({
           <Th className="text-right">Rate</Th>
           <Th className="text-right">Taxable</Th>
           <Th className="text-right">Line total</Th>
-          <Th>Match</Th>
+          {/* No PO to match against on a standalone invoice — drop the Match column. */}
+          {!noPo && <Th>Match</Th>}
         </Tr>
       </THead>
       <tbody>
@@ -225,22 +228,18 @@ function LinesMatchTable({
               <Td className="text-right tabular-nums">{money(l.unit_rate_paise)}</Td>
               <Td className="text-right tabular-nums">{money(l.taxable_paise)}</Td>
               <Td className="text-right tabular-nums">{money(l.line_total_paise)}</Td>
-              <Td>
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-2">
-                    <Badge tone={MATCH_STATUS_TONE[l.match_status]}>
-                      {MATCH_STATUS_LABEL[l.match_status]}
-                    </Badge>
-                    {busy && <span className="text-xs text-slate-400">Saving…</span>}
-                  </div>
-                  {matched && (
-                    <span className="text-xs text-slate-500">→ {poLineLabel(matched)}</span>
-                  )}
-                  {noPo ? (
-                    <span className="text-xs text-amber-700">
-                      No PO linked — lines cannot be matched.
-                    </span>
-                  ) : (
+              {!noPo && (
+                <Td>
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center gap-2">
+                      <Badge tone={MATCH_STATUS_TONE[l.match_status]}>
+                        {MATCH_STATUS_LABEL[l.match_status]}
+                      </Badge>
+                      {busy && <span className="text-xs text-slate-400">Saving…</span>}
+                    </div>
+                    {matched && (
+                      <span className="text-xs text-slate-500">→ {poLineLabel(matched)}</span>
+                    )}
                     <select
                       aria-label={`Match line ${l.line_no} to a PO line`}
                       value={l.po_line_item_id ?? ''}
@@ -264,9 +263,9 @@ function LinesMatchTable({
                         </option>
                       ))}
                     </select>
-                  )}
-                </div>
-              </Td>
+                  </div>
+                </Td>
+              )}
             </Tr>
           );
         })}
@@ -295,6 +294,13 @@ export function InvoiceReview() {
   const manualMatch = useManualMatch();
   const cancel = useCancelInvoice();
   const del = useDeleteInvoice();
+  // A PO-less invoice can be attributed directly to one of its client's ACTIVE projects.
+  // Scoped to the invoice's client; only used/rendered on the standalone (no-PO) path.
+  const projectsQuery = useProjectsQuery({
+    client_id: invoice ? String(invoice.client_id) : '',
+    status: 'ACTIVE',
+  });
+  const setProject = useSetInvoiceProject(invoice?.id ?? '');
 
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [mappingLineId, setMappingLineId] = useState<string | null>(null);
@@ -337,6 +343,18 @@ export function InvoiceReview() {
     isResolved(fieldByPath.get(path), edits[path]),
   );
   const hasLines = invoice.lines.length > 0;
+  // A PO-less invoice (po_id null) is a standalone AR record: there is no purchase order
+  // to match lines against, so line-matching is neither shown nor required. The backend
+  // confirms it once the required fields are in order (derived status MATCHED/ready).
+  const noPo = invoice.po_id == null;
+  // Direct project attribution is a PO-less concern (a PO carries its own project). Resolve
+  // the assigned project's display name from the client's ACTIVE projects (falling back to
+  // its id if it is no longer active / not in the list).
+  const activeProjects = projectsQuery.data ?? [];
+  const assignedProject =
+    invoice.project_id != null
+      ? activeProjects.find((p) => String(p.id) === String(invoice.project_id))
+      : undefined;
   const allLinesMatched =
     hasLines && invoice.lines.every((l) => l.match_status === 'MATCHED' || l.match_status === 'MANUAL');
   const isEditableStatus = EDITABLE_STATUSES.has(invoice.status);
@@ -356,7 +374,7 @@ export function InvoiceReview() {
     isEditableStatus &&
     hasLines &&
     requiredResolved &&
-    allLinesMatched &&
+    (noPo || allLinesMatched) &&
     !hasMoneyError;
 
   const headerFields = invoice.fields.filter((f) => sectionOf(f.field_path) === 'header');
@@ -436,6 +454,15 @@ export function InvoiceReview() {
     );
   }
 
+  function onSetProject(value: string) {
+    const projectId = value ? Number(value) : null;
+    setProject.mutate(projectId, {
+      onSuccess: () =>
+        toast.success(projectId == null ? 'Project attribution cleared.' : 'Project updated.'),
+      onError: (err) => toast.error(errorMessage(err)),
+    });
+  }
+
   function onCancelInvoice() {
     cancel.mutate(invoice!.id, {
       onSuccess: () => {
@@ -469,7 +496,7 @@ export function InvoiceReview() {
       ? 'At least one line item is required to confirm.'
       : !requiredResolved
         ? 'Resolve every required field (buyer GSTIN, invoice number, date, taxable, grand total) to confirm.'
-        : !allLinesMatched
+        : !noPo && !allLinesMatched
           ? 'Match every line to a PO line to confirm.'
           : !canOperate
             ? 'You need Operate access to confirm this invoice.'
@@ -567,8 +594,10 @@ export function InvoiceReview() {
 
       <div className="mb-6">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-slate-900">Line items &amp; PO matching</h2>
-          {invoice.po_id != null && isEditableStatus && (
+          <h2 className="text-sm font-semibold text-slate-900">
+            {noPo ? 'Line items' : 'Line items & PO matching'}
+          </h2>
+          {!noPo && isEditableStatus && (
             <Button
               variant="secondary"
               size="sm"
@@ -580,10 +609,62 @@ export function InvoiceReview() {
             </Button>
           )}
         </div>
-        {poQuery.isError && invoice.po_id != null && (
-          <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            Could not load the purchase order's lines — manual matching is unavailable until it loads.
+        {noPo ? (
+          <div className="mb-2 space-y-2">
+            <div
+              role="status"
+              className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600"
+            >
+              No PO linked — lines aren't matched to a purchase order. This invoice will be
+              confirmed as a standalone AR record.
+            </div>
+            <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+              <label
+                htmlFor="invoice-project"
+                className="mb-1 block text-xs font-medium text-slate-600"
+              >
+                Project attribution
+              </label>
+              {alreadyConfirmed || !canOperate ? (
+                <p className="text-sm text-slate-900">
+                  {assignedProject ? (
+                    `${assignedProject.code} — ${assignedProject.name}`
+                  ) : invoice.project_id != null ? (
+                    `Project #${invoice.project_id}`
+                  ) : (
+                    <span className="text-slate-400">No project</span>
+                  )}
+                </p>
+              ) : (
+                <select
+                  id="invoice-project"
+                  aria-label="Project attribution"
+                  value={invoice.project_id != null ? String(invoice.project_id) : ''}
+                  disabled={setProject.isPending || projectsQuery.isPending}
+                  onChange={(e) => onSetProject(e.target.value)}
+                  className="w-full max-w-sm rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/40 disabled:bg-slate-50 disabled:text-slate-400"
+                >
+                  <option value="">
+                    {projectsQuery.isPending ? 'Loading projects…' : 'No project'}
+                  </option>
+                  {activeProjects.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.code} — {p.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <p className="mt-1 text-xs text-slate-400">
+                Attribute this invoice's revenue to a project (optional — used for P&L).
+              </p>
+            </div>
           </div>
+        ) : (
+          poQuery.isError && (
+            <div className="mb-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Could not load the purchase order's lines — manual matching is unavailable until it loads.
+            </div>
+          )
         )}
         <LinesMatchTable
           invoice={invoice}

@@ -409,3 +409,151 @@ def test_negative_revenue_margin_pct_is_none() -> None:
     db.close()
     assert line.revenue_paise == -20000  # 10000 − 30000
     assert line.margin_pct is None
+
+
+# ---------------------------------------- PO-less invoice project attribution (inc: fix)
+
+def _client_and_project(
+    db: Session, *, code: str, seq: int = 1,
+) -> tuple[int, int]:
+    """Seed one client + one ACTIVE project (no PO); return (client_id, project_id)."""
+    cli = ProjectClient(name=f"{code} Co", code=code, active=True)
+    db.add(cli)
+    db.flush()
+    proj = Project(client_id=cli.id, seq=seq, code=f"{code}-{seq:03d}", name="Direct",
+                   status="ACTIVE")
+    db.add(proj)
+    db.flush()
+    return cli.id, proj.id
+
+
+def test_po_less_invoice_with_project_attributes_to_that_project() -> None:
+    # A PO-less CONFIRMED invoice stamped with a direct project_id lands that project's P&L
+    # (project_pnl + the per-project list + the consolidated total), NOT the unattributed line.
+    TestSession = _fresh_session()
+    db = TestSession()
+    client_id, project_id = _client_and_project(db, code="DIR")
+    db.add(SalesInvoice(client_id=client_id, po_id=None, project_id=project_id,
+                        source_file_id=_stored_file(db).id, invoice_number="INV-DIR",
+                        invoice_date=date(2026, 3, 1), total_taxable_paise=70000,
+                        status="CONFIRMED"))
+    db.commit()
+
+    # project_pnl for THAT project now includes the PO-less invoice.
+    assert service.project_pnl(db, project_id).revenue_paise == 70000
+    # pnl_by_project surfaces it as a real client row.
+    rows = service.pnl_by_project(db)
+    by_id = {r.project_id: r for r in rows}
+    assert project_id in by_id and by_id[project_id].revenue_paise == 70000
+    # consolidated: it's a project row, the unattributed line is 0, and totals include it.
+    con = service.consolidated_pnl(db)
+    assert project_id in {r.project_id for r in con.projects}
+    assert con.unattributed.revenue_paise == 0
+    assert con.totals.revenue_paise == 70000
+    db.close()
+
+
+def test_po_less_invoice_no_project_lands_in_unattributed() -> None:
+    # A PO-less CONFIRMED invoice with NO project appears ONLY under the consolidated
+    # "Unattributed" line + total — never in any client project row, never in the GEN bucket.
+    TestSession = _fresh_session()
+    db = TestSession()
+    # A real client + project exist (with their own attributed invoice) to prove the
+    # unattributed invoice does NOT leak into them.
+    client_id, project_id = _client_and_project(db, code="ATT")
+    db.add(SalesInvoice(client_id=client_id, po_id=None, project_id=project_id,
+                        source_file_id=_stored_file(db).id, invoice_number="INV-ATT",
+                        invoice_date=date(2026, 3, 1), total_taxable_paise=40000,
+                        status="CONFIRMED"))
+    # The unattributed one: same client, but NO PO and NO project.
+    db.add(SalesInvoice(client_id=client_id, po_id=None, project_id=None,
+                        source_file_id=_stored_file(db).id, invoice_number="INV-UNATT",
+                        invoice_date=date(2026, 3, 2), total_taxable_paise=15000,
+                        status="CONFIRMED"))
+    db.commit()
+
+    con = service.consolidated_pnl(db)
+    # The attributed project row carries only its own 40000 — the 15000 did NOT leak in.
+    by_id = {r.project_id: r for r in con.projects}
+    assert by_id[project_id].revenue_paise == 40000
+    # The unattributed line carries exactly the orphan invoice; GEN bucket untouched.
+    assert con.unattributed.revenue_paise == 15000
+    assert con.general_bucket.revenue_paise == 0
+    # Total = 40000 (project) + 15000 (unattributed).
+    assert con.totals.revenue_paise == 55000
+    # pnl_by_project never lists the unattributed bucket as a row.
+    assert all(r.revenue_paise != 15000 for r in service.pnl_by_project(db))
+    db.close()
+
+
+def test_po_linked_invoice_attribution_unchanged() -> None:
+    # A PO-linked invoice still attributes via the PO's project — even when a (different)
+    # direct project_id is also stamped, the PO wins (COALESCE(PO.project_id, invoice.project_id)).
+    TestSession = _fresh_session()
+    db = TestSession()
+    project_id, po_id = _client_project_po(db)  # PO's project
+    client_id = db.execute(select(PurchaseOrder.client_id).where(
+        PurchaseOrder.id == po_id)).scalar_one()
+    # A decoy second project under the same client; stamping it must NOT redirect the money.
+    decoy = Project(client_id=client_id, seq=2, code="EDG-002", name="Decoy", status="ACTIVE")
+    db.add(decoy)
+    db.flush()
+    db.add(SalesInvoice(client_id=client_id, po_id=po_id, project_id=decoy.id,
+                        source_file_id=_stored_file(db).id, invoice_number="INV-PO",
+                        invoice_date=date(2026, 3, 1), total_taxable_paise=90000,
+                        status="CONFIRMED"))
+    db.commit()
+
+    assert service.project_pnl(db, project_id).revenue_paise == 90000  # PO's project
+    assert service.project_pnl(db, decoy.id).revenue_paise == 0        # decoy gets nothing
+    assert service.consolidated_pnl(db).unattributed.revenue_paise == 0
+    db.close()
+
+
+def test_reconciliation_mixed_bag_money_invariant() -> None:
+    # The money invariant: consolidated total_revenue == Σ(taxable of ALL confirmed invoices)
+    # − Σ(taxable of ALL confirmed CNs on confirmed invoices), across a mix of attribution
+    # kinds. If ANY confirmed invoice's revenue vanished, this would fail.
+    TestSession = _fresh_session()
+    db = TestSession()
+    project_id, po_id = _client_project_po(db)  # PO-linked project (client EDG)
+    client_id = db.execute(select(PurchaseOrder.client_id).where(
+        PurchaseOrder.id == po_id)).scalar_one()
+    _c2, direct_project = _client_and_project(db, code="DRC")  # a different client + project
+
+    # (a) PO-linked invoice; (b) PO-less WITH a direct project; (c) PO-less with NO project;
+    # (d) a confirmed CN against the PO-linked invoice.
+    inv_po = SalesInvoice(client_id=client_id, po_id=po_id, source_file_id=_stored_file(db).id,
+                          invoice_number="MIX-PO", invoice_date=date(2026, 4, 1),
+                          total_taxable_paise=100000, status="CONFIRMED")
+    inv_dir = SalesInvoice(client_id=_c2, po_id=None, project_id=direct_project,
+                           source_file_id=_stored_file(db).id, invoice_number="MIX-DIR",
+                           invoice_date=date(2026, 4, 2), total_taxable_paise=55000,
+                           status="CONFIRMED")
+    inv_un = SalesInvoice(client_id=client_id, po_id=None, project_id=None,
+                          source_file_id=_stored_file(db).id, invoice_number="MIX-UN",
+                          invoice_date=date(2026, 4, 3), total_taxable_paise=25000,
+                          status="CONFIRMED")
+    # A NON-confirmed invoice that must be excluded from BOTH sides of the invariant.
+    inv_draft = SalesInvoice(client_id=client_id, po_id=None, project_id=None,
+                             source_file_id=_stored_file(db).id, invoice_number="MIX-DRAFT",
+                             invoice_date=date(2026, 4, 4), total_taxable_paise=999999,
+                             status="UPLOADED")
+    db.add_all([inv_po, inv_dir, inv_un, inv_draft])
+    db.flush()
+    db.add(CreditNote(invoice_id=inv_po.id, client_id=client_id,
+                      source_file_id=_stored_file(db).id, cn_number="MIX-CN",
+                      cn_date=date(2026, 4, 5), total_taxable_paise=12000, status="CONFIRMED"))
+    db.commit()
+
+    con = service.consolidated_pnl(db)
+    # Σ all CONFIRMED invoice taxable − Σ all CONFIRMED CN taxable (the draft excluded).
+    expected = (100000 + 55000 + 25000) - 12000
+    assert con.totals.revenue_paise == expected
+    # And it also equals Σ(project rows) + general bucket + unattributed (structural reconcile).
+    row_rev = sum(r.revenue_paise for r in con.projects)
+    assert con.totals.revenue_paise == (
+        row_rev + con.general_bucket.revenue_paise + con.unattributed.revenue_paise)
+    # The unattributed line is exactly the orphan invoice (25000); the CN hit the PO project.
+    assert con.unattributed.revenue_paise == 25000
+    db.close()

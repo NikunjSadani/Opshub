@@ -52,6 +52,7 @@ from app.modules.expense.canonical import ExtractedInvoice, FieldStatus
 from app.modules.expense.canonical import Field as CField
 from app.modules.expense.extractor import Extractor, get_extractor
 from app.modules.files.models import StoredFile
+from app.modules.projects import service as projects_service
 from app.modules.sales_orders.models import LineStatus, POLineItem
 from app.platform import audit
 from app.platform.models import Setting
@@ -256,6 +257,30 @@ def _norm_gstin(gstin: str | None) -> str | None:
     return "".join(gstin.split()).upper() or None
 
 
+# --------------------------------------------------------------- project attribution
+
+def validate_attribution_project(
+    db: Session, project_id: int | None, client_id: int,
+) -> None:
+    """Guard an OPTIONAL direct project attribution: when supplied, ``project_id`` must be an
+    ACTIVE project belonging to THIS invoice's client. A missing/inactive project or a
+    cross-client project is a clean ``BillingBadRequest`` (route -> 400). ``None`` (no direct
+    attribution) is always valid — the invoice is then attributed via its PO, or unattributed.
+
+    Money seam: revenue is grouped by the RESOLVED project in finance, so a mis-attributed
+    invoice would land another client's project P&L — hence the same-client check here.
+    """
+    if project_id is None:
+        return
+    project = projects_service.get_active_project(db, project_id)
+    if project is None:
+        raise BillingBadRequest(
+            f"project {project_id} not found or is not ACTIVE")
+    if project.client_id != client_id:
+        raise BillingBadRequest(
+            f"project {project_id} does not belong to this invoice's client")
+
+
 # --------------------------------------------------------------- create_batch
 
 def upload_invoices(
@@ -265,6 +290,7 @@ def upload_invoices(
     client_id: int,
     po_id: int | None,
     actor_uid: str | None,
+    project_id: int | None = None,
     extractor: Extractor | None = None,
 ) -> BatchResult:
     """Extract + persist + auto-match every uploaded client-invoice PDF into one batch.
@@ -274,7 +300,14 @@ def upload_invoices(
     (never aborts the batch); a document whose identity collides a stored invoice yields a
     DUPLICATE outcome and is NOT persisted. The route has already validated ``client_id`` +
     ``po_id`` (exist + PO belongs to the client) and stored the blobs.
+
+    ``project_id`` is an OPTIONAL direct attribution stamped on EVERY invoice created in this
+    batch (finance resolves revenue via COALESCE(PO.project_id, invoice.project_id)). It is
+    re-validated here (active + same client) so a direct service caller can't smuggle a bad
+    attribution; the HTTP route validates it first, before any blob is stored. When a PO is
+    given the PO carries the project, but ``project_id`` is still stored if supplied.
     """
+    validate_attribution_project(db, project_id, client_id)
     extractor = extractor or get_extractor()
     storage = get_storage()
     company_gstin = _company_gstin(db)
@@ -282,14 +315,16 @@ def upload_invoices(
     db.add(batch)
     db.flush()
     _audit(db, "billing.batch_created", actor_uid, batch.id,
-           {"files": len(file_ids), "client_id": client_id, "po_id": po_id})
+           {"files": len(file_ids), "client_id": client_id, "po_id": po_id,
+            "project_id": project_id})
 
     outcomes: list[FileOutcome] = []
     persisted = 0
     for file_id in file_ids:
         outcome = _process_file(
             db, batch, file_id, storage, extractor, actor_uid,
-            client_id=client_id, po_id=po_id, company_gstin=company_gstin)
+            client_id=client_id, po_id=po_id, project_id=project_id,
+            company_gstin=company_gstin)
         outcomes.append(outcome)
         if outcome.invoice_id is not None and outcome.status != "DUPLICATE":
             persisted += 1
@@ -313,6 +348,7 @@ def _process_file(
     *,
     client_id: int,
     po_id: int | None,
+    project_id: int | None,
     company_gstin: str | None,
 ) -> FileOutcome:
     """Extract + persist + match a single file. Never raises for a bad document."""
@@ -320,14 +356,16 @@ def _process_file(
         pdf_bytes = _read_source(db, storage, file_id)
     except FileNotFoundError:
         logger.error("billing source bytes missing for file %s", file_id)
-        return _persist_rejected(db, batch, file_id, actor_uid, client_id, None)
+        return _persist_rejected(db, batch, file_id, actor_uid, client_id, None,
+                                 project_id=project_id)
 
     try:
         extracted = extractor.extract(pdf_bytes, doc_type="gst_invoice")
     except Exception as err:  # noqa: BLE001 - any engine failure -> a clean REJECTED
         logger.warning("billing extraction failed for file %s", file_id, exc_info=err)
         chash = dedup.content_hash(pdf_bytes)
-        return _persist_rejected(db, batch, file_id, actor_uid, client_id, chash)
+        return _persist_rejected(db, batch, file_id, actor_uid, client_id, chash,
+                                 project_id=project_id)
 
     scalars = _scalars_from(extracted)
     chash = dedup.content_hash(pdf_bytes)
@@ -345,7 +383,8 @@ def _process_file(
         with db.begin_nested():
             invoice = _persist_invoice(
                 db, batch, file_id, extracted, scalars, key, chash, number, actor_uid,
-                client_id=client_id, po_id=po_id, company_gstin=company_gstin)
+                client_id=client_id, po_id=po_id, project_id=project_id,
+                company_gstin=company_gstin)
     except IntegrityError:
         logger.info("billing dedup race for file %s; converting to DUPLICATE", file_id)
         existing = _find_duplicate(db, client_id, key, chash, number)
@@ -407,6 +446,7 @@ def _persist_invoice(
     *,
     client_id: int,
     po_id: int | None,
+    project_id: int | None,
     company_gstin: str | None,
 ) -> SalesInvoice:
     """Persist the SalesInvoice snapshot + line items + field envelope rows, run the self-GSTIN
@@ -423,6 +463,7 @@ def _persist_invoice(
         batch_id=batch.id,
         client_id=client_id,
         po_id=po_id,
+        project_id=project_id,
         source_file_id=file_id,
         source_engine=extracted.source_engine,
         needs_ocr=extracted.needs_ocr,
@@ -475,15 +516,18 @@ def _persist_invoice(
 
 def _persist_rejected(
     db: Session, batch: BillingBatch, file_id: int, actor_uid: str | None,
-    client_id: int, chash: str | None,
+    client_id: int, chash: str | None, *, project_id: int | None = None,
 ) -> FileOutcome:
     """A quality-gate failure: a terminal REJECTED invoice with a generic message (no
     identity key, no fields). ``invoice_number`` is non-null, so a per-document placeholder
-    keeps the ``(client, number)`` uniqueness from false-colliding two rejects."""
+    keeps the ``(client, number)`` uniqueness from false-colliding two rejects. The batch's
+    ``project_id`` is stamped too (a REJECTED invoice is never CONFIRMED, so it contributes no
+    revenue — the stamp is only carried for consistency / a later re-review)."""
     number = f"REJECTED-{chash[:12]}" if chash else f"REJECTED-F{file_id}"
     invoice = SalesInvoice(
         batch_id=batch.id,
         client_id=client_id,
+        project_id=project_id,
         source_file_id=file_id,
         invoice_number=number,
         content_hash=chash,
@@ -581,7 +625,10 @@ def _derive_status(invoice: SalesInvoice) -> str:
         return SalesInvoiceStatus.NEEDS_REVIEW.value
     if not invoice.lines:
         return SalesInvoiceStatus.EXTRACTED.value
-    if _all_lines_matched(invoice):
+    # A PO-less invoice has nothing to match against — its lines can never bind to a PO line,
+    # so once it has lines + all required fields it reads as MATCHED (ready to confirm). Only
+    # a PO-linked invoice still gates on every line being matched.
+    if invoice.po_id is None or _all_lines_matched(invoice):
         return SalesInvoiceStatus.MATCHED.value
     return SalesInvoiceStatus.NEEDS_MATCH.value
 
@@ -754,6 +801,30 @@ def _resync_identity(db: Session, invoice: SalesInvoice) -> None:
     invoice.dedup_key = key
 
 
+def set_project(
+    db: Session, invoice: SalesInvoice, project_id: int | None, *, actor_uid: str | None,
+) -> SalesInvoice:
+    """Assign / change / clear the DIRECT project attribution on an EDITABLE invoice.
+
+    Only an in-review invoice can be re-attributed — a CONFIRMED (immutable) record's
+    attribution is frozen (it already drives the P&L), so this is a 409 on a confirmed/
+    cancelled/rejected invoice. When ``project_id`` is not None it must be an ACTIVE project
+    belonging to this invoice's client (else 400). Passing ``None`` clears the direct
+    attribution (the invoice falls back to its PO, or becomes unattributed). Audited. Does NOT
+    touch the status (attribution is orthogonal to the review state machine)."""
+    if invoice.status not in _EDITABLE_STATUSES:
+        raise BillingConflict(
+            f"invoice is {invoice.status}; its project attribution is immutable")
+    validate_attribution_project(db, project_id, invoice.client_id)
+    old_project_id = invoice.project_id
+    invoice.project_id = project_id
+    _audit(db, "billing.invoice_project_set", actor_uid, invoice.id,
+           {"old_project_id": old_project_id, "project_id": project_id})
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
 # --------------------------------------------------------------- matching
 
 def run_match(db: Session, invoice: SalesInvoice, *, actor_uid: str | None) -> SalesInvoice:
@@ -924,15 +995,21 @@ def confirm_invoice(db: Session, invoice: SalesInvoice, *, actor_uid: str | None
         raise BillingConflict(
             "these required fields still need review before confirming: "
             + ", ".join(blocking))
-    unmatched = sorted(
-        ln.line_no for ln in invoice.lines
-        if ln.match_status not in (
-            LineMatchStatus.MATCHED.value, LineMatchStatus.MANUAL.value)
-    )
-    if unmatched:
-        raise BillingConflict(
-            "match every line to a PO line before confirming; still unmatched: line(s) "
-            + ", ".join(str(n) for n in unmatched))
+    # Line↔PO matching is required ONLY for a PO-linked invoice. Some clients never issue a
+    # PO, so a PO-less invoice (po_id NULL) has no PO lines to match against — it confirms with
+    # its lines UNMATCHED (they carry po_line_item_id NULL and so contribute 0 to any PO line's
+    # §6 invoiced_qty rollup, which keys on po_line_item_id). Every other guard above (required
+    # header fields, at-least-one-line, soft over-billing) still applies to a PO-less invoice.
+    if invoice.po_id is not None:
+        unmatched = sorted(
+            ln.line_no for ln in invoice.lines
+            if ln.match_status not in (
+                LineMatchStatus.MATCHED.value, LineMatchStatus.MANUAL.value)
+        )
+        if unmatched:
+            raise BillingConflict(
+                "match every line to a PO line before confirming; still unmatched: line(s) "
+                + ", ".join(str(n) for n in unmatched))
 
     # §6 SOFT over-billing flag (M1): compute BEFORE flipping status so the rollup still
     # excludes this invoice; record it as a review reason but do NOT block.

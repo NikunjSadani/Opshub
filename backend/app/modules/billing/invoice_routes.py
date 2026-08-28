@@ -4,6 +4,7 @@
   GET    /billing/invoices[?filters]             -> searchable register (VIEW)
   GET    /billing/invoices/{id}                   -> header + lines + fields + match state (VIEW)
   PATCH  /billing/invoices/{id}/review            -> apply corrections and/or confirm (OPERATE)
+  PATCH  /billing/invoices/{id}/project           -> set/change/clear project attribution (OPERATE)
   POST   /billing/invoices/{id}/match             -> re-run the auto-matcher (OPERATE)
   PATCH  /billing/invoices/{id}/lines/{lineId}/match -> manual map to a PO line (OPERATE)
   POST   /billing/invoices/{id}/cancel            -> soft-cancel (MANAGE)
@@ -112,6 +113,7 @@ class InvoiceOut(BaseModel):
     needs_ocr: bool
     client_id: int
     po_id: int | None
+    project_id: int | None
     supplier_gstin: str | None
     buyer_gstin: str | None
     invoice_number: str | None
@@ -159,6 +161,7 @@ class InvoiceDetailOut(BaseModel):
     review_reasons: list[str]
     client_id: int
     po_id: int | None
+    project_id: int | None
     source_file_id: int | None
     supplier_gstin: str | None
     buyer_gstin: str | None
@@ -191,6 +194,11 @@ class ManualMatchBody(BaseModel):
     po_line_item_id: int
 
 
+class SetProjectBody(BaseModel):
+    # ``None`` clears the direct attribution (falls back to the PO, or unattributed).
+    project_id: int | None = None
+
+
 class DeleteOut(BaseModel):
     id: int
     deleted: bool
@@ -206,10 +214,16 @@ def upload_invoices(
     files: Annotated[list[UploadFile], File()],
     client_id: Annotated[int, Form()],
     po_id: Annotated[int | None, Form()] = None,
+    project_id: Annotated[int | None, Form()] = None,
 ) -> UploadOut:
     """Bulk-upload N client-invoice PDFs: store each blob, then extract + match + persist
     into one batch. ``client_id`` is required; ``po_id`` is optional but, when given, must
     belong to the client (validated BEFORE any blob is stored — a bad ref persists nothing).
+
+    ``project_id`` is an OPTIONAL direct attribution for a PO-less invoice: when given it must
+    be an ACTIVE project of the same client. It is stamped on every invoice in the batch so
+    finance can resolve the invoice's revenue to that project (a PO, when present, still
+    carries the project). Validated BEFORE any blob is stored.
 
     Returns a per-file outcome list. A file whose identity collides a stored invoice comes
     back as DUPLICATE carrying the existing id. When the WHOLE request is duplicates the HTTP
@@ -218,7 +232,7 @@ def upload_invoices(
     rbac.require_level(user, rbac.BILLING, Level.OPERATE)
     if not files:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "no files uploaded")
-    # Validate the client + PO BEFORE storing any bytes (nothing persists on a bad ref).
+    # Validate the client + PO + project BEFORE storing any bytes (nothing persists on a bad ref).
     client = db.get(ProjectClient, client_id)
     if client is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "client not found")
@@ -228,6 +242,10 @@ def upload_invoices(
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
                 "purchase order not found or does not belong to this client")
+    try:
+        service.validate_attribution_project(db, project_id, client_id)
+    except service.BillingError as err:
+        raise _map_service_error(err) from err
     if len(files) > MAX_UPLOAD_FILES:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -262,7 +280,8 @@ def upload_invoices(
         filename_by_file[sf.id] = filename
 
     result = service.upload_invoices(
-        db, file_ids, client_id=client_id, po_id=po_id, actor_uid=user.firebase_uid)
+        db, file_ids, client_id=client_id, po_id=po_id, project_id=project_id,
+        actor_uid=user.firebase_uid)
     persisted = [o for o in result.outcomes
                  if o.invoice_id is not None and o.status != "DUPLICATE"]
     dups = [o for o in result.outcomes if o.status == "DUPLICATE"]
@@ -340,6 +359,28 @@ def submit_review(
             )
         if body.confirm:
             service.confirm_invoice(db, invoice, actor_uid=user.firebase_uid)
+    except service.BillingError as err:
+        raise _map_service_error(err) from err
+    db.refresh(invoice)
+    return invoice
+
+
+# ------------------------------------------------------------------- project attribution
+
+@router.patch("/billing/invoices/{invoice_id}/project", response_model=InvoiceDetailOut)
+def set_project(
+    invoice_id: int,
+    body: SetProjectBody,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SalesInvoice:
+    """Assign / change / clear the direct project attribution on an in-review invoice (OPERATE).
+    ``project_id`` must be an ACTIVE project of this invoice's client (or null to clear); a
+    CONFIRMED invoice's attribution is immutable (409)."""
+    rbac.require_level(user, rbac.BILLING, Level.OPERATE)
+    invoice = _get_invoice(db, invoice_id)
+    try:
+        service.set_project(db, invoice, body.project_id, actor_uid=user.firebase_uid)
     except service.BillingError as err:
         raise _map_service_error(err) from err
     db.refresh(invoice)

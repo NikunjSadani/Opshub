@@ -10,7 +10,7 @@ import {
   useToast,
 } from '../../ui';
 import { usePermissions } from '../../auth/AuthProvider';
-import { useClientsQuery } from '../../api/projects';
+import { useClientsQuery, useProjectsQuery } from '../../api/projects';
 import { usePurchaseOrdersQuery } from '../../api/purchaseOrders';
 import {
   useDeleteInvoice,
@@ -46,9 +46,13 @@ export function InvoiceUpload() {
   const clientsQuery = useClientsQuery();
   const [clientId, setClientId] = useState('');
   const [poId, setPoId] = useState('');
+  const [projectId, setProjectId] = useState('');
   // POs for the (optional) PO picker are scoped to the chosen client. The query only
   // matters once a client is picked; until then the select is disabled.
   const posQuery = usePurchaseOrdersQuery({ client_id: clientId });
+  // ACTIVE projects for the (optional) direct-attribution picker, scoped to the chosen
+  // client. Only shown for a PO-less batch (a PO already carries its project).
+  const projectsQuery = useProjectsQuery({ client_id: clientId, status: 'ACTIVE' });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
@@ -72,9 +76,14 @@ export function InvoiceUpload() {
 
   function onClientChange(value: string) {
     setClientId(value);
-    // A PO belongs to exactly one client, so switching client invalidates the PO choice.
+    // A PO / project belongs to exactly one client, so switching client invalidates both.
     setPoId('');
+    setProjectId('');
   }
+
+  // A PO already carries its project, so the direct attribution only applies to a PO-less
+  // batch. Compute it once here so both the initial upload and the re-upload path agree.
+  const attributionProjectId = !poId && projectId ? projectId : undefined;
 
   function summarize(outcomes: BillingUploadOutcome[]) {
     const dupes = outcomes.filter((r) => r.status === 'DUPLICATE').length;
@@ -97,7 +106,7 @@ export function InvoiceUpload() {
   function onUpload() {
     if (files.length === 0 || !clientId) return;
     upload.mutate(
-      { files, clientId, poId: poId || undefined },
+      { files, clientId, poId: poId || undefined, projectId: attributionProjectId },
       {
         onSuccess: (batch) => {
           setResults(batch.outcomes);
@@ -125,7 +134,12 @@ export function InvoiceUpload() {
     setResolvingId(target.result.file_id);
     try {
       await del.mutateAsync(target.result.duplicate_of);
-      const batch = await upload.mutateAsync({ files: [file], clientId, poId: poId || undefined });
+      const batch = await upload.mutateAsync({
+        files: [file],
+        clientId,
+        poId: poId || undefined,
+        projectId: attributionProjectId,
+      });
       const fresh = batch.outcomes[0];
       setResults((prev) => (prev ?? []).map((r, i) => (i === target.index ? fresh : r)));
       setDupTarget(null);
@@ -147,6 +161,7 @@ export function InvoiceUpload() {
   const busy = upload.isPending || del.isPending || resolvingId != null;
   const clients = clientsQuery.data ?? [];
   const pos = posQuery.data ?? [];
+  const activeProjects = projectsQuery.data ?? [];
   const noClients = clientsQuery.isSuccess && clients.length === 0;
   const canSubmit = files.length > 0 && !!clientId;
 
@@ -200,6 +215,34 @@ export function InvoiceUpload() {
             ))}
           </SelectField>
         </div>
+
+        {/* Direct project attribution — only for a PO-less batch. When a PO is chosen its
+            project wins, so the picker is hidden. Scoped to the selected client's ACTIVE
+            projects. */}
+        {clientId && !poId && (
+          <div className="mb-4">
+            <SelectField
+              label="Project (optional)"
+              value={projectId}
+              onChange={(e) => setProjectId(e.target.value)}
+              disabled={!clientId || projectsQuery.isPending}
+              hint="Attribute this invoice's revenue to a project (optional — used for P&L)."
+            >
+              <option value="">
+                {projectsQuery.isPending
+                  ? 'Loading projects…'
+                  : activeProjects.length === 0
+                    ? 'No active projects for this client'
+                    : 'No project'}
+              </option>
+              {activeProjects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.code} — {p.name}
+                </option>
+              ))}
+            </SelectField>
+          </div>
+        )}
 
         {noClients && (
           <p className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">

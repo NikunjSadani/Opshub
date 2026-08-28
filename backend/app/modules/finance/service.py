@@ -8,10 +8,16 @@ The three money aggregates (revenue, revenue-reduction, cost) are each computed 
 SEPARATE single-grain aggregate so no join ever fan-outs and double-counts money:
 
   * Revenue      = Σ CONFIRMED ``billing_invoice.total_taxable_paise`` grouped by the
-                   PROJECT reached through ``invoice.po_id → purchase_order.project_id``
-                   (a 1:1 PK join — each invoice has exactly one PO), MINUS
-                   Σ CONFIRMED ``billing_credit_note.total_taxable_paise`` reached through
-                   ``credit_note.invoice_id → billing_invoice → purchase_order`` (also 1:1).
+                   RESOLVED project COALESCE(``purchase_order.project_id`` [via a LEFT OUTER
+                   join on ``invoice.po_id``], ``billing_invoice.project_id``) — a PO carries
+                   the project, else the invoice's own direct attribution, else NULL (the
+                   "unattributed" bucket for a PO-less invoice nobody attributed). Still a 1:1
+                   join so money never multiplies. MINUS Σ CONFIRMED
+                   ``billing_credit_note.total_taxable_paise`` reached through
+                   ``credit_note.invoice_id → billing_invoice`` and resolved the SAME way, so a
+                   CN reduces the exact bucket its invoice added to. The consolidated total sums
+                   EVERY bucket (including the NULL/unattributed one), so it always reconciles
+                   to Σ(all confirmed invoices) − Σ(all confirmed CNs) regardless of PO/project.
   * Cost         = Σ CONFIRMED ``expense_invoice.total_taxable_paise`` grouped by
                    ``expense_invoice.project_id``, SIGN-AWARE on ``doc_type``: an INVOICE
                    adds, a vendor CREDIT_NOTE subtracts (no join at all).
@@ -87,10 +93,17 @@ class ProjectPnl:
 @dataclass(frozen=True)
 class ConsolidatedPnl:
     """The whole-company P&L: per-project rows (GEN excluded), the general-bucket line
-    (GEN only), and the totals over EVERY project (client projects + general bucket)."""
+    (GEN only), the UNATTRIBUTED line (confirmed invoices/CNs with no PO and no direct
+    project), and the totals over EVERY bucket (client projects + general + unattributed).
+
+    ``unattributed`` is distinct from ``general_bucket``: GEN is the deliberate overhead
+    project (a real client-coded project), whereas ``unattributed`` is the fallback for a
+    PO-less invoice nobody attributed — it never has a project identity. Both are kept out of
+    the per-project rows; both are folded into ``totals`` so the total always reconciles."""
 
     projects: list[ProjectPnl]
     general_bucket: PnlLine
+    unattributed: PnlLine
     totals: PnlLine
 
 
@@ -130,37 +143,53 @@ def _line(revenue_paise: int, cost_paise: int) -> PnlLine:
 
 # --------------------------------------------------------------- money aggregates
 
+# The resolved project for a billing invoice: the PO's project (reached by a LEFT OUTER join
+# on ``SalesInvoice.po_id``) when the invoice has a PO, ELSE the invoice's own direct
+# ``project_id`` attribution. NULL only when the invoice has neither — the "unattributed"
+# bucket. COALESCE preserves the money invariant: every confirmed invoice lands in exactly one
+# bucket (some real project, or the NULL bucket), so Σ over all buckets == Σ all invoices.
+_RESOLVED_INVOICE_PROJECT = func.coalesce(PurchaseOrder.project_id, SalesInvoice.project_id)
+
+
 def _billing_invoice_revenue(
     db: Session, *, date_from: date | None, date_to: date | None
-) -> dict[int, int]:
-    """{project_id -> Σ CONFIRMED billing-invoice taxable paise}, attributed via the
-    invoice's PO. A 1:1 PK join (invoice → one PO), so money is never multiplied."""
+) -> dict[int | None, int]:
+    """{resolved_project_id -> Σ CONFIRMED billing-invoice taxable paise}, attributed to
+    COALESCE(PO.project_id, invoice.project_id). The PO join is a LEFT OUTER PK join (invoice →
+    at most one PO), so money is never multiplied and a PO-less invoice is retained. The key is
+    ``None`` for a fully-unattributed invoice (no PO and no direct project) — the caller sums
+    that bucket into the consolidated total but excludes it from per-project rows."""
     amt = func.coalesce(SalesInvoice.total_taxable_paise, 0)
     stmt = (
-        select(PurchaseOrder.project_id, func.coalesce(func.sum(amt), 0))
-        .join(PurchaseOrder, PurchaseOrder.id == SalesInvoice.po_id)
+        select(_RESOLVED_INVOICE_PROJECT, func.coalesce(func.sum(amt), 0))
+        .select_from(SalesInvoice)
+        .join(PurchaseOrder, PurchaseOrder.id == SalesInvoice.po_id, isouter=True)
         .where(SalesInvoice.status == _CONFIRMED_INVOICE)
     )
     if date_from is not None:
         stmt = stmt.where(SalesInvoice.invoice_date >= date_from)
     if date_to is not None:
         stmt = stmt.where(SalesInvoice.invoice_date <= date_to)
-    stmt = stmt.group_by(PurchaseOrder.project_id)
-    return {pid: int(total) for pid, total in db.execute(stmt) if pid is not None}
+    stmt = stmt.group_by(_RESOLVED_INVOICE_PROJECT)
+    return {pid: int(total) for pid, total in db.execute(stmt)}
 
 
 def _billing_credit_note_reduction(
     db: Session, *, date_from: date | None, date_to: date | None
-) -> dict[int, int]:
-    """{project_id -> Σ CONFIRMED client credit-note taxable paise}, attributed via the
-    credited invoice's PO. 1:1 PK joins (CN → one invoice → one PO). The credited invoice must
-    itself be CONFIRMED — symmetric with ``_billing_invoice_revenue`` (whose invoices are all
-    CONFIRMED), so a CN can never reduce revenue an invoice never contributed."""
+) -> dict[int | None, int]:
+    """{resolved_project_id -> Σ CONFIRMED client credit-note taxable paise}, attributed to the
+    credited invoice's resolved project COALESCE(PO.project_id, invoice.project_id) — the SAME
+    resolution as the revenue side, so a CN always reduces the exact bucket its invoice added
+    to. 1:1 PK joins (CN → one invoice; invoice → at most one PO via LEFT OUTER). The credited
+    invoice must itself be CONFIRMED — symmetric with ``_billing_invoice_revenue`` — so a CN can
+    never reduce revenue an invoice never contributed. Key is ``None`` for the unattributed
+    bucket (an unattributed invoice's CN)."""
     amt = func.coalesce(CreditNote.total_taxable_paise, 0)
     stmt = (
-        select(PurchaseOrder.project_id, func.coalesce(func.sum(amt), 0))
+        select(_RESOLVED_INVOICE_PROJECT, func.coalesce(func.sum(amt), 0))
+        .select_from(CreditNote)
         .join(SalesInvoice, SalesInvoice.id == CreditNote.invoice_id)
-        .join(PurchaseOrder, PurchaseOrder.id == SalesInvoice.po_id)
+        .join(PurchaseOrder, PurchaseOrder.id == SalesInvoice.po_id, isouter=True)
         .where(
             CreditNote.status == _CONFIRMED_CN,
             SalesInvoice.status == _CONFIRMED_INVOICE,
@@ -170,8 +199,8 @@ def _billing_credit_note_reduction(
         stmt = stmt.where(CreditNote.cn_date >= date_from)
     if date_to is not None:
         stmt = stmt.where(CreditNote.cn_date <= date_to)
-    stmt = stmt.group_by(PurchaseOrder.project_id)
-    return {pid: int(total) for pid, total in db.execute(stmt) if pid is not None}
+    stmt = stmt.group_by(_RESOLVED_INVOICE_PROJECT)
+    return {pid: int(total) for pid, total in db.execute(stmt)}
 
 
 def _expense_cost(
@@ -200,11 +229,13 @@ def _expense_cost(
 
 def _revenue_map(
     db: Session, *, date_from: date | None, date_to: date | None
-) -> dict[int, int]:
-    """Net revenue per project = confirmed billing invoices − confirmed credit notes."""
+) -> dict[int | None, int]:
+    """Net revenue per resolved project = confirmed billing invoices − confirmed credit notes.
+    The ``None`` key is the unattributed bucket (invoices with no PO and no direct project);
+    the caller sums it into the consolidated total but excludes it from per-project rows."""
     invoices = _billing_invoice_revenue(db, date_from=date_from, date_to=date_to)
     credits = _billing_credit_note_reduction(db, date_from=date_from, date_to=date_to)
-    out: dict[int, int] = defaultdict(int)
+    out: dict[int | None, int] = defaultdict(int)
     for pid, amt in invoices.items():
         out[pid] += amt
     for pid, amt in credits.items():
@@ -277,7 +308,8 @@ def pnl_by_project(db: Session, filters: PnlFilters | None = None) -> list[Proje
     cost = _expense_cost(db, date_from=filters.date_from, date_to=filters.date_to)
     general = _general_bucket_project_ids(db)
 
-    active_ids = (set(revenue) | set(cost)) - general
+    # Drop the general bucket AND the unattributed (None) bucket — neither is a client row.
+    active_ids = {pid for pid in (set(revenue) | set(cost)) if pid is not None} - general
     identity = _project_identity(db, active_ids)
     rows: list[ProjectPnl] = []
     for pid in active_ids:
@@ -293,14 +325,16 @@ def pnl_by_project(db: Session, filters: PnlFilters | None = None) -> list[Proje
 
 
 def consolidated_pnl(db: Session) -> ConsolidatedPnl:
-    """The whole-company P&L: per-project rows (GEN excluded), the general-bucket line
-    (GEN only), and totals over EVERY project so totals == Σ(rows) + general bucket."""
+    """The whole-company P&L: per-project rows (GEN + unattributed excluded), the
+    general-bucket line (GEN only), the unattributed line (no-PO-no-project confirmed
+    invoices/CNs), and totals over EVERY bucket so
+    totals == Σ(rows) + general bucket + unattributed."""
     revenue = _revenue_map(db, date_from=None, date_to=None)
     cost = _expense_cost(db, date_from=None, date_to=None)
     general = _general_bucket_project_ids(db)
 
-    # Per-project rows (client projects with activity).
-    project_ids = (set(revenue) | set(cost)) - general
+    # Per-project rows (client projects with activity) — exclude GEN and the None bucket.
+    project_ids = {pid for pid in (set(revenue) | set(cost)) if pid is not None} - general
     identity = _project_identity(db, project_ids)
     projects = [
         _project_row(project, client, revenue.get(pid, 0), cost.get(pid, 0))
@@ -313,12 +347,21 @@ def consolidated_pnl(db: Session) -> ConsolidatedPnl:
     gen_cost = sum(cost.get(pid, 0) for pid in general)
     general_bucket = _line(gen_revenue, gen_cost)
 
-    # Totals over EVERY project (client + general) — reconciles to Σ(rows) + bucket.
+    # Unattributed = the None bucket: confirmed invoices/CNs with no PO and no direct project.
+    # No expense ever lands here (cost keys are always real project ids), so its cost is 0.
+    unattributed = _line(revenue.get(None, 0), 0)
+
+    # Totals over EVERY bucket (client projects + general + unattributed) — reconciles to
+    # Σ(rows) + general bucket + unattributed. Summing the full maps includes the None bucket
+    # on the revenue side, so the company total can never silently drop a PO-less invoice.
     total_revenue = sum(revenue.values())
     total_cost = sum(cost.values())
     totals = _line(total_revenue, total_cost)
 
-    return ConsolidatedPnl(projects=projects, general_bucket=general_bucket, totals=totals)
+    return ConsolidatedPnl(
+        projects=projects, general_bucket=general_bucket,
+        unattributed=unattributed, totals=totals,
+    )
 
 
 # --------------------------------------------------------------------- CSV export

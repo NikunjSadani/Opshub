@@ -39,12 +39,16 @@ export interface PnlBreakdown {
 
 /**
  * The consolidated P&L rollup (backend GET /finance/pnl/consolidated):
- * grand totals, the un-attributed general-overhead bucket (shown separately from
- * project rows), and the per-project rows.
+ * grand totals, the GEN general-overhead bucket, the `unattributed` bucket
+ * (PO-less confirmed invoices with no project — distinct from GEN), and the
+ * per-project rows. Totals == Σ(project rows) + general_bucket + unattributed.
  */
 export interface ConsolidatedPnl {
   totals: PnlBreakdown;
   general_bucket: PnlBreakdown;
+  /** PO-less confirmed invoices/CNs with no direct project. Kept out of the project
+   * rows and the GEN bucket; folded into `totals` so the company total reconciles. */
+  unattributed: PnlBreakdown;
   projects: PnlProjectRow[];
 }
 
