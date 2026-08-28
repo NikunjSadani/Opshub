@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     # deployed the endpoint stays disabled (404) until the owner deliberately flips this on
     # (after setting per-client PINs). A kill-switch for all public invoice access.
     qr_invoice_access_enabled: bool = False
+    # Retention horizon for the public invoice-access audit log. Rows older than this are
+    # pruned (defense-in-depth against unbounded growth) during the secret-gated sweep.
+    invoice_access_retention_days: int = 180
 
     # --- reconcile sweep (scheduler) ---
     # Shared secret gating POST /numbering/sweep. Unset/empty -> the endpoint is

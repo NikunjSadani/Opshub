@@ -198,6 +198,59 @@ class Challan(Base):
     )
 
 
+class AccessOutcome:
+    """The mutually-exclusive outcomes of one PIN submission on the public
+    challan-QR invoice viewer (stored verbatim in `challan_invoice_access.outcome`).
+
+    Plain string constants (not an Enum) so callers write `AccessOutcome.VIEWED`
+    and the column stores the bare string. `FAILED` groups the three brute-force /
+    misconfiguration outcomes for reporting (WRONG_PIN + RATE_LIMITED + NO_PIN)."""
+
+    VIEWED = "VIEWED"                # correct PIN + invoice served (PDF streamed)
+    WRONG_PIN = "WRONG_PIN"         # PIN mismatch (constant-time compare failed)
+    NOT_AVAILABLE = "NOT_AVAILABLE"  # correct PIN but no confirmed/servable invoice
+    RATE_LIMITED = "RATE_LIMITED"   # token locked out (too many failures)
+    NO_PIN = "NO_PIN"               # no client / no access PIN configured
+
+    ALL = (VIEWED, WRONG_PIN, NOT_AVAILABLE, RATE_LIMITED, NO_PIN)
+    FAILED = (WRONG_PIN, RATE_LIMITED, NO_PIN)
+
+
+class ChallanInvoiceAccess(Base):
+    """One PIN submission on the PUBLIC challan-QR invoice viewer (POST /d/{token}).
+
+    An append-only audit log powering the operator "Invoice Access" dashboard. Rows
+    are written best-effort from the public route (a logging failure never changes the
+    visitor's response) and only for RESOLVED tokens — unknown/unresolved tokens log
+    nothing (abuse-safe, mirrors the rate limiter's "only resolved tokens get state").
+
+    `viewer_hash` is a salted, truncated SHA-256 of the client IP for approx-distinct
+    viewer counting + coarse privacy (NOT security); the raw IP is never stored.
+    """
+
+    __tablename__ = "challan_invoice_access"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome in ('VIEWED', 'WRONG_PIN', 'NOT_AVAILABLE', 'RATE_LIMITED', 'NO_PIN')",
+            name="ck_challan_invoice_access_outcome",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    challan_id: Mapped[int] = mapped_column(ForeignKey("challan.id"), index=True)
+    # Resolved best-effort from challan -> project -> client; NULL when the challan's
+    # project/client can't be resolved (kept plain, not FK'd, so the log never blocks
+    # on referential coupling to the client master).
+    client_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    accessed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+    outcome: Mapped[str] = mapped_column(String(20))
+    # Salted+truncated SHA-256 of the client IP (approx-distinct viewers + coarse
+    # privacy, NOT security). NULL when the IP is unavailable.
+    viewer_hash: Mapped[str | None] = mapped_column(String(64))
+
+
 class ChallanLineItem(Base):
     __tablename__ = "challan_line_item"
 

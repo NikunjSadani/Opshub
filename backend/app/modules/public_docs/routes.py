@@ -16,18 +16,21 @@ locked down:
 """
 from __future__ import annotations
 
+import contextlib
 import hmac
 import html
 from collections.abc import Iterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
+from app.modules.challan import invoice_access
+from app.modules.challan.models import AccessOutcome, Challan
 from app.modules.files.models import StoredFile
 from app.modules.public_docs import service
 from app.platform.storage import get_storage
@@ -104,15 +107,48 @@ def view_form(
     return HTMLResponse(_form_page(token, challan.number))
 
 
+def _log_access(
+    db: Session,
+    request: Request,
+    challan: Challan,
+    outcome: str,
+) -> None:
+    """Best-effort audit-log write for one PIN submission (resolved token only).
+
+    Wrapped so a logging failure NEVER changes the visitor's response: any error
+    (including record_access being patched to raise) is swallowed. Commits the row
+    so it survives independent of the response path.
+
+    Client attribution ALWAYS resolves via `resolve_client_id` (challan -> project ->
+    client, ANY project status) so on-hold/closed-project challans attribute
+    consistently across every outcome — never the caller's ACTIVE-only client."""
+    try:
+        client_id = invoice_access.resolve_client_id(db, challan)
+        viewer_hash = invoice_access.hash_ip(
+            invoice_access.client_ip_from_request(request)
+        )
+        invoice_access.record_access(
+            db, challan=challan, client_id=client_id,
+            outcome=outcome, viewer_hash=viewer_hash,
+        )
+        db.commit()
+    except Exception:
+        with contextlib.suppress(Exception):
+            db.rollback()
+
+
 @router.post("/d/{token}", include_in_schema=False, response_model=None)
 def submit_password(
     token: str,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     password: Annotated[str, Form()] = "",
 ) -> HTMLResponse | StreamingResponse:
     """Validate the password (constant-time) then stream the confirmed invoice PDF.
 
     Pre-auth failures are indistinguishable (generic 404); a locked token is 429.
+    Every outcome on a RESOLVED token is recorded to the invoice-access audit log
+    (best-effort — logging never alters the response).
     """
     if not _enabled():
         return _generic_404()
@@ -123,6 +159,7 @@ def submit_password(
 
     # Throttle brute force (only resolved tokens can reach here -> bounded state).
     if service.is_rate_limited(token):
+        _log_access(db, request, challan, AccessOutcome.RATE_LIMITED)
         return HTMLResponse(
             _page(
                 "<h1 style=\"font-size:1.25rem\">Too many attempts</h1>"
@@ -138,18 +175,21 @@ def submit_password(
     # wrong password: same generic 404, and we never say which. There is nothing to
     # brute-force in this state, so we don't spend a rate-limit slot on it.
     if client is None or not client.access_pin:
+        _log_access(db, request, challan, AccessOutcome.NO_PIN)
         return _generic_404()
 
     expected = (client.access_pin + challan.number).encode("utf-8")
     supplied = password.encode("utf-8")
     if not hmac.compare_digest(supplied, expected):
         service.record_failure(token)
+        _log_access(db, request, challan, AccessOutcome.WRONG_PIN)
         return _generic_404()
 
     # Correct password: unlock and late-bind the invoice.
     service.clear_failures(token)
     invoice = service.resolve_confirmed_invoice(db, challan)
     if invoice is None:
+        _log_access(db, request, challan, AccessOutcome.NOT_AVAILABLE)
         return HTMLResponse(_NOT_AVAILABLE_YET_HTML)
 
     stored = db.execute(
@@ -161,6 +201,7 @@ def submit_password(
     if stored is None or stored.module_key != "billing":
         # Confirmed invoice with a dangling/foreign blob ref: the visitor is already
         # authenticated, so surfacing "not available yet" is not an enumeration risk.
+        _log_access(db, request, challan, AccessOutcome.NOT_AVAILABLE)
         return HTMLResponse(_NOT_AVAILABLE_YET_HTML)
 
     try:
@@ -168,7 +209,11 @@ def submit_password(
     except (FileNotFoundError, ValueError, NotImplementedError):
         # NotImplementedError guards a not-yet-wired backend (e.g. GcsStorage) -> degrade to
         # "not available" instead of a 500 that would leak a stack trace.
+        _log_access(db, request, challan, AccessOutcome.NOT_AVAILABLE)
         return HTMLResponse(_NOT_AVAILABLE_YET_HTML)
+
+    # Record the successful view BEFORE returning (the StreamingResponse body is lazy).
+    _log_access(db, request, challan, AccessOutcome.VIEWED)
 
     def _stream() -> Iterator[bytes]:
         try:

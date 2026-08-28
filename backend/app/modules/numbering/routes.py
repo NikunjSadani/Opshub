@@ -14,6 +14,7 @@ mutations are Admin-only via `can()` and every mutation is audited.
 """
 from __future__ import annotations
 
+import contextlib
 import hmac
 from datetime import timedelta
 from typing import Annotated
@@ -25,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
+from app.modules.challan import invoice_access
 from app.modules.numbering import service
 from app.modules.numbering.models import (
     AllocationStatus,
@@ -218,4 +220,13 @@ def sweep_reservations(
         db, older_than=timedelta(hours=body.older_than_hours)
     )
     db.commit()
+    # Piggyback invoice-access retention on the existing hourly sweep (best-effort — a
+    # prune failure must never fail the reservation sweep). Bounds long-term growth of the
+    # public challan-QR access log beyond the coalescing that caps its write rate.
+    with contextlib.suppress(Exception):
+        pruned = invoice_access.prune_old(
+            db, older_than_days=get_settings().invoice_access_retention_days
+        )
+        if pruned:
+            db.commit()
     return SweepOut(swept=len(swept))

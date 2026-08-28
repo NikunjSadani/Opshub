@@ -13,13 +13,14 @@ Admin-only (`challan.void`).
 """
 from __future__ import annotations
 
+import contextlib
 import hmac
 import re
 import shutil
 import tempfile
 from collections.abc import Iterator
 from contextlib import ExitStack
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import IO, Annotated, Any, Literal, cast
@@ -44,7 +45,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.modules.challan import download, render, service, template
+from app.modules.challan import download, invoice_access, render, service, template
 from app.modules.challan.models import BatchStatus, Challan, ChallanBatch, ChallanStatus
 from app.modules.files.models import StoredFile
 from app.platform import rbac
@@ -372,6 +373,16 @@ def sweep_stuck_batches(
         db, older_than=timedelta(minutes=body.older_than_minutes)
     )
     db.commit()
+    # Defense-in-depth: piggyback the invoice-access retention prune on this same
+    # secret-gated sweep so the public-access audit log can't grow unbounded, on the
+    # existing scheduled cadence. Best-effort — a prune failure must NEVER fail the
+    # batch sweep, and the response shape stays unchanged (prune count not surfaced).
+    with contextlib.suppress(Exception):
+        pruned = invoice_access.prune_old(
+            db, older_than_days=get_settings().invoice_access_retention_days
+        )
+        if pruned:
+            db.commit()
     return StuckSweepOut(reset=len(ids))
 
 
@@ -742,3 +753,89 @@ def void_challan(
         raise HTTPException(status.HTTP_409_CONFLICT, str(err)) from err
     db.refresh(challan)
     return challan
+
+
+# ----------------------------------------------------- invoice-access dashboard
+
+class AccessByOutcomeOut(BaseModel):
+    VIEWED: int
+    WRONG_PIN: int
+    NOT_AVAILABLE: int
+    RATE_LIMITED: int
+    NO_PIN: int
+
+
+class AccessByClientOut(BaseModel):
+    client_id: int | None
+    client_name: str | None
+    client_code: str | None
+    pin_entries: int
+    views: int
+    failed: int
+    approx_viewers: int
+
+
+class AccessTrendOut(BaseModel):
+    date: str
+    views: int
+    failed: int
+
+
+class AccessSummaryOut(BaseModel):
+    total_pin_entries: int
+    total_views: int
+    total_not_available: int
+    total_failed: int
+    approx_viewers: int
+    by_outcome: AccessByOutcomeOut
+    by_client: list[AccessByClientOut]
+    trend: list[AccessTrendOut]
+
+
+class AccessRecentOut(BaseModel):
+    challan_number: str
+    client_name: str | None
+    accessed_at: datetime
+    outcome: str
+
+
+_ACCESS_DEFAULT_DAYS = 30
+
+
+@router.get("/challan/invoice-access/summary", response_model=AccessSummaryOut)
+def invoice_access_summary(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    date_from: Annotated[date | None, Query(alias="from")] = None,
+    date_to: Annotated[date | None, Query(alias="to")] = None,
+    client_id: Annotated[int | None, Query()] = None,
+) -> AccessSummaryOut:
+    """Aggregate PIN-submission stats for the public challan-QR invoice viewer.
+
+    MANAGE-gated on document_automation. Range defaults to the last 30 days ending
+    today when `from`/`to` are omitted."""
+    rbac.require_level(user, rbac.CHALLAN, Level.MANAGE)
+    if date_to is None:
+        date_to = date.today()
+    if date_from is None:
+        date_from = date_to - timedelta(days=_ACCESS_DEFAULT_DAYS)
+    data = invoice_access.summary(
+        db, date_from=date_from, date_to=date_to, client_id=client_id
+    )
+    return AccessSummaryOut(**data)
+
+
+@router.get("/challan/invoice-access/recent", response_model=list[AccessRecentOut])
+def invoice_access_recent(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    client_id: Annotated[int | None, Query()] = None,
+) -> list[AccessRecentOut]:
+    """The newest PIN submissions (capped at 200). Never leaks viewer_hash/IP.
+    MANAGE-gated on document_automation."""
+    rbac.require_level(user, rbac.CHALLAN, Level.MANAGE)
+    return [
+        AccessRecentOut(**row)
+        for row in invoice_access.recent(db, limit=limit, client_id=client_id)
+    ]

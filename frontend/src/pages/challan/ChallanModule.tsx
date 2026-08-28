@@ -8,6 +8,7 @@ import { Register } from './Register';
 import { DownloadChallans } from './DownloadChallans';
 import { Numbering } from './Numbering';
 import { MasterData } from './MasterData';
+import { InvoiceAccess } from './InvoiceAccess';
 
 const BASE = '/m/document_automation';
 
@@ -28,7 +29,12 @@ export function ChallanModule() {
     { to: `${BASE}/register`, label: 'Register' },
     { to: `${BASE}/download`, label: 'Download' },
     { to: `${BASE}/numbering`, label: 'Numbering' },
-    ...(canManage ? [{ to: `${BASE}/master-data`, label: 'Master Data' }] : []),
+    ...(canManage
+      ? [
+          { to: `${BASE}/invoice-access`, label: 'Invoice Access' },
+          { to: `${BASE}/master-data`, label: 'Master Data' },
+        ]
+      : []),
   ];
 
   return (
@@ -41,6 +47,21 @@ export function ChallanModule() {
         <Route path="register" element={<Register />} />
         <Route path="download" element={<DownloadChallans />} />
         <Route path="numbering" element={<Numbering />} />
+        <Route
+          path="invoice-access"
+          element={
+            // Defer the guard until /me resolves — a fresh deep-link to this
+            // route must not be bounced before permissions load (mirrors the
+            // Master Data gating below).
+            perms.loading ? (
+              <div className="grid place-items-center py-10 text-sm text-slate-400">Loading…</div>
+            ) : canManage ? (
+              <InvoiceAccess />
+            ) : (
+              <Navigate to={BASE} replace />
+            )
+          }
+        />
         <Route
           path="master-data/*"
           element={

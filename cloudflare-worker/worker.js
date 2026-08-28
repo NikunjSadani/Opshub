@@ -41,6 +41,14 @@ export default {
     const headers = new Headers(request.headers)
     headers.set('x-forwarded-host', publicHost)
     headers.set('x-forwarded-proto', url.protocol.replace(':', ''))
+    // Forward the REAL client IP so the app can log public invoice-viewer access
+    // (approx-distinct viewers on the Invoice Access dashboard). Strip any inbound value
+    // first so a client can't smuggle a forged x-client-ip THROUGH the worker; then set it
+    // from Cloudflare's trusted cf-connecting-ip. (A direct hit to the *.run.app origin could
+    // still forge this — it only skews analytics, never security.)
+    headers.delete('x-client-ip')
+    const clientIp = request.headers.get('cf-connecting-ip')
+    if (clientIp) headers.set('x-client-ip', clientIp)
     // Cloud Run doesn't need Cloudflare's edge headers.
     headers.delete('cf-connecting-ip')
     headers.delete('cf-ipcountry')
