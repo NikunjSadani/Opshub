@@ -45,9 +45,23 @@ Live + verified:
 - **Client PAN + credit terms — LIVE.** Capturable at client registration (New-client modal +
   `POST /projects/clients`) as well as editable on the client detail page.
 
+- **Invoice Access dashboard — LIVE (2026-08-28, rev opshub-api-00010-rl2).** Every PIN
+  submission on the public challan-QR viewer is logged (`challan_invoice_access` table, migration
+  `b7f3c2a19d84`) and shown on a MANAGE-gated "Invoice Access" tab in the Delivery Challan module
+  (totals, per-client, daily trend, recent list; approx viewers via salted-hashed IP). Best-effort
+  logging (never breaks the viewer); only resolved tokens log. Hardened post-audit: 60s write
+  coalescing, SQL aggregation, UTC trend, 180-day retention prune (on the hourly numbering sweep).
+  The worker now forwards the client IP. The dashboard is live but empty until the QR feature is on.
+
 ▶ Remaining (not blocking use):
-- **Challan-QR activation** — built + dormant; owner-gated flip later (`public_base_url`,
-  per-client Access PINs, `qr_invoice_access_enabled`, per-IP protection).
+- **Challan-QR activation** — built + dormant. Owner-gated flip checklist:
+  1. Owner sets per-client **Access PIN** (Projects › Clients › Edit client), 8–32 chars.
+  2. Set `PUBLIC_BASE_URL=https://opshub.gifsy.in` + `QR_INVOICE_ACCESS_ENABLED=true` on Cloud Run + redeploy.
+  3. Owner re-runs `wrangler deploy` (client-IP forwarding is already in the worker source).
+  4. Owner adds a Cloudflare rate-limit rule on `opshub.gifsy.in/d/*` (~30 req/min/IP).
+  5. Verify: a NEW challan (PIN + confirmed matching invoice) → QR → PIN+challan-number → invoice;
+     accesses appear on the Invoice Access dashboard.
+  ⚠️ QRs print only on challans generated AFTER enabling; invoice must be uploaded + CONFIRMED.
 
 ---
 
