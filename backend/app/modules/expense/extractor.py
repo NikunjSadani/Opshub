@@ -22,9 +22,20 @@ class Extractor(Protocol):
         ...
 
 
-def get_extractor(setting: str = "text_layer") -> Extractor:
-    """Config-driven factory. Only ``text_layer`` is registered today; ``docai`` (a paid
-    engine) is deferred until a real OCR-volume use case arrives."""
+def get_extractor(setting: str = "auto") -> Extractor:
+    """Config-driven factory.
+
+    ``auto`` (the DEFAULT, so every service call site gets it without change) resolves to the
+    `TallyAwareExtractor`: it reads the PDF once and routes a Tally 'Tax Invoice' to the
+    dedicated `TallyInvoiceExtractor`, delegating every other document UNCHANGED to the
+    zero-cost `TextLayerExtractor`. ``text_layer`` forces the generic engine only (used by the
+    eval gold-set harness). ``docai`` (a paid engine) is deferred until a real OCR-volume use
+    case arrives.
+    """
+    if setting in ("auto", "tally_aware"):
+        module = importlib.import_module("app.modules.expense.tally")
+        aware: Extractor = module.TallyAwareExtractor()
+        return aware
     if setting == "text_layer":
         module = importlib.import_module("app.modules.expense.text_layer")
         extractor: Extractor = module.TextLayerExtractor()
