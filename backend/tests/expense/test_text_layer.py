@@ -533,6 +533,22 @@ def test_m4_wrong_tax_head_flagged_when_place_of_supply_absent() -> None:
     assert any("intra/inter" in r for r in result.review_reasons)
 
 
+def test_nil_rated_invoice_supply_type_consistent() -> None:
+    """A 0%/exempt invoice (no tax head at all) is consistent with ANY supply type — it must
+    NOT trip the intra/inter tax-split contradiction flag (was a false review flag for
+    nil-rated intra-state sales). A REAL contradiction (a tax head on the wrong side) still
+    flags."""
+    from app.modules.expense.text_layer import _supply_type_consistent
+
+    # nil-rated intra-state (pos == supplier) and inter-state: both consistent (no tax head).
+    assert _supply_type_consistent("27", "27", "27", 0, 0, 0) is True
+    assert _supply_type_consistent("27", "19", "27", 0, 0, 0) is True
+    # regression: a genuine wrong-head still flags, and a correct split stays consistent.
+    assert _supply_type_consistent("27", "27", "27", 0, 0, 5000) is False   # intra w/ IGST
+    assert _supply_type_consistent("27", "27", "27", 5000, 5000, 0) is True  # intra CGST+SGST
+    assert _supply_type_consistent("27", "19", "27", 5000, 0, 0) is False    # inter w/ CGST
+
+
 # --- M5: a total must not earn the 0.95 band when no corroborating check actually ran -------
 
 

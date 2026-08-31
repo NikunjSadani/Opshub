@@ -674,10 +674,16 @@ def _supply_type_consistent(pos_code: str | None, supplier_code: str | None,
     When place-of-supply is absent the supply type is INFERRED from the supplier-vs-buyer
     GSTIN state codes (M4) so a wrong tax head is still caught; only a truly indeterminate
     supply type → True (no false review flag).
+
+    A NIL-RATED / EXEMPT invoice (no tax head at all: cgst=sgst=igst=0) is consistent with
+    ANY supply type — there is no tax head that could be on the wrong side — so it never
+    trips this contradiction check (was a false review flag for 0%/exempt intra-state sales).
     """
     intra = _supply_type(pos_code, supplier_code, buyer_code)
     if intra is None:
         return True
+    if cgst == 0 and sgst == 0 and igst == 0:
+        return True                    # nil-rated / exempt: no tax head to contradict
     if intra:                          # intra-state
         return igst == 0 and (cgst > 0 or sgst > 0)
     return cgst == 0 and sgst == 0     # inter-state
