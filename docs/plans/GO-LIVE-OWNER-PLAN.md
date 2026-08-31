@@ -2,8 +2,13 @@
 
 **The one thing to understand:** almost everything left is a **one-time cloud setup** that you
 do **once**, and it unlocks *all* the parked work at once — going live, real logins, durable
-file storage, AND the challan-QR feature. It is not per-feature. Nothing is deployed today;
-all the code is built, tested, and sitting on the local `develop` branch.
+file storage, AND the challan-QR feature. It is not per-feature.
+
+> **UPDATE (superseding the paragraph below):** OpsHub is now **LIVE in production** at
+> https://opshub.gifsy.in — deployed, real Firebase logins, durable GCS storage, and pushed to
+> the `github.com/NikunjSadani/Opshub` repo (`develop`). The historical "nothing is deployed
+> today" framing is kept below only for the record; see the **✅ LIVE STATUS** section for the
+> real current state. The only owner-gated item remaining is the Phase-4 challan-QR flip.
 
 The plan is 4 phases. **You only truly block Phase 1** (three accounts). After that I do most
 of the work; you approve/configure a few things.
@@ -71,9 +76,9 @@ These three are the true prerequisites. Until they exist, nothing can deploy. Th
 created in parallel, but **start with the GitHub repo** — it's quick and lets me push all the
 work (also your off-machine backup) and lets the automated checks run.
 
-1. 🧑 **GitHub repository** — create a private repo (e.g. `gifsy-opshub`). Send me the URL and
-   give push access (or add me as a collaborator). → *Unblocks: pushing all the built code +
-   CI running.*  Today there is **no git remote** — the code is local-only.
+1. ✅ **GitHub repository — DONE.** Repo exists at **github.com/NikunjSadani/Opshub**; all the
+   built code is pushed (branch `develop`). This unblocked pushing the code + CI running; the
+   original "no git remote — code is local-only" note no longer applies.
 2. ✅ **Google Cloud project — DONE (owner created 2026-08-24):** dedicated project **`opshub-506704`**
    (name "OpsHub", project number 310561620535), fresh/empty, separate from the loyalty platform.
    → **Terraform adjustment (my Phase-2 task):** the code currently *creates* the project
@@ -119,11 +124,15 @@ Auth: owner ADC (`nikunj.sadani28@gmail.com`), quota project set. Remaining Phas
 
 **✅ FIRST DEPLOY DONE (2026-08-24):** built via Cloud Build → AR (`asia-south1-docker.pkg.dev/opshub-506704/opshub/api:64c1c0e`); migrated `opshub_prod` (`alembic upgrade head` via the `opshub-migrate` job — succeeded, schema created); deployed to Cloud Run `opshub-api`. **Health = 200 `{"status":"ok","env":"prod"}`** at https://opshub-api-2aadkzwkua-el.a.run.app. AR repo + Cloud Build API created during this pass. ⚠️ Fixed a self-inflicted `.gcloudignore` bug (unanchored `platform/` dropped `backend/app/platform` → migrate crash) — now anchored. **NOT yet usable by staff:** login needs Firebase wired (dev-auth is off in prod) + file uploads need `GcsStorage` (both below).
 
-8. 🤝 **Deploy to staging** — pushing `develop` auto-deploys; the database migration runs
+**✅ PHASE 3 ACCOMPLISHED (see the LIVE STATUS section):** the app is deployed to Cloud Run
+(`opshub-api`, asia-south1), the first Administrator was bootstrapped, real Firebase login works,
+and it is promoted to production at https://opshub.gifsy.in. The steps below are kept for the record.
+
+8. ✅ **Deploy to staging** — pushing `develop` auto-deploys; the database migration runs
    automatically first, and we **verify it on Postgres** (some issues only show on the real DB).
-9. 🤝 **Bootstrap the first admin** — create the very first Administrator user (the system starts
-   with no one holding the admin role). Then verify real login works for each role.
-10. 🤝 **UAT on staging**, then promote to production (the required-reviewer gate = your click).
+9. ✅ **Bootstrap the first admin** — the very first Administrator user was created and real login
+   verified per role.
+10. ✅ **UAT**, then promoted to production. **Live at https://opshub.gifsy.in.**
 
 ---
 

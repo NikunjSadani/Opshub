@@ -59,6 +59,11 @@ Typed aliases: `MoneyField=Field[int]` (paise), `DateField=Field[date]`,
 `TextLayerExtractor` (name "text_layer/1.0"). `get_extractor(setting="text_layer")` factory;
 "docai" raises `NotImplementedError` (deferred). Non-`gst_invoice` doc_type → clean `ValueError`.
 
+> **UPDATE:** `get_extractor()` now defaults to **`setting="auto"` → `TallyAwareExtractor`**
+> (`app/modules/expense/tally.py`), which routes Tally 'Tax Invoice' PDFs to a dedicated
+> `TallyInvoiceExtractor` and delegates every other document unchanged to `TextLayerExtractor`.
+> `"text_layer"` still forces the generic engine (used by the eval gold-set harness).
+
 1. **Text-layer gate (fail soft):** `Σ page.extract_text()`; if `< ~20×page_count` chars →
    `needs_ocr=True`, all fields MISSING, `review_reasons=["no text layer — scanned/image PDF, OCR deferred"]`. Encrypted/corrupt/zero-page → caught → REJECTED quality-gate (never a 500).
 2. **Header fields:** label-anchored regex over `extract_words()` positions. GSTIN regex +

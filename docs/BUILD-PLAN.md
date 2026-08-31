@@ -62,6 +62,8 @@ This plan carries the Loyaltybase build learnings forward. **Principles retained
 ---
 
 ## Part 3 — To start
+> **UPDATE (2026-08):** all phases **0–3 are built and the app is LIVE in production** at https://opshub.gifsy.in. The "to start / start Phase 0 now" framing below is historical; the governance content (audit gates, DoD, phasing rationale) still applies to ongoing work.
+
 Phase 0 needs **none** of the four outstanding inputs, so it can begin immediately. The module inputs gate Phases 1–2:
 1. Second use case (Phase 2 schema) · 2. Challan `L`-series seed (Phase 1) · 3. Master data (Phase 1) · 4. GST retention period (Phase 3).
 

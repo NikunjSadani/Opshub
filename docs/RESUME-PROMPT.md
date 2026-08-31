@@ -14,17 +14,20 @@ Repo: `C:\Users\nikun\gifsy-opshub`
 (v4 architecture + evolved-state log) → `docs/BUILD-PLAN.md` (governance/phases). Load the
 `opshub-platform` memory and the WAYS-OF-WORKING standing agreements.
 
-**STATE — `develop` @ `4309a48`** (code; docs commits ride on top — `git log --oneline -1`
-for the true tip), **UNPUSHED, NO git remote.** Gate-green:
+**STATE — 🚀 LIVE IN PRODUCTION** at https://opshub.gifsy.in (Cloud Run `opshub-api`, GCP
+`opshub-506704`, asia-south1, rev `opshub-api-00015-8cz`; Cloud SQL `opshub-db` db-f1-micro
+~$11–13/mo; GCS storage; real Firebase auth; first admin bootstrapped). **`develop` @ `5a635ac`,
+pushed to `github.com/NikunjSadani/Opshub`.** Gate-green:
 - Backend: `.venv/Scripts/python.exe -m ruff check app tests` · `mypy app` · `pytest` ·
-  `alembic check` → **ruff 0 · mypy 70 · pytest 411 · no-drift** (+ migration round-trips)
-- Frontend: `npm run typecheck` · `npm run build` · `npm test` → **vitest 73**
-- E2E: `npm run e2e` (Playwright) → **9/9** · `terraform validate` clean
+  `alembic check` → **ruff 0 · mypy clean · pytest 708 · no-drift** (+ migration round-trips)
+- Frontend: `npm run typecheck` · `npm run build` · `npm test` → **vitest 175**
+- E2E: `npm run e2e` (Playwright). Deploys build → in-VPC migrate job → deploy → verify serving revision.
 
-Stack: API-first FastAPI backend (`api/`) + thin React SPA (`platform/`, same-origin, proxies
-`/api`→`/v1`), Firebase auth **NOT wired** (mock AuthProvider + double-guarded dev-auth shim;
-`X-Dev-Uid` switches seeded dev users locally), Postgres prod / sqlite local, separate GCP
-project, DB Option-B, Cloud Run scale-to-zero (~₹2k/mo).
+Stack: **single Cloud Run service** = FastAPI backend (`backend/`) that serves the built React SPA
+(`frontend/`) same-origin; the API is under `/api/v1`. Real **Firebase** email/password auth is
+LIVE (local dev uses the double-guarded `DEV_AUTH` + `X-Dev-Uid` shim over seeded dev users).
+Postgres prod / sqlite local, dedicated GCP project. Fronted by the Cloudflare worker
+`opshub-proxy` (`cloudflare-worker/`) on the custom domain `opshub.gifsy.in`.
 
 **DONE** (feature-complete; every item dual/adversarial + UI/UX audited + E2E + runtime-verified):
 - **Phase 1 Delivery Challan** — numbering engine · master data (+ GSTIN-keyed `ConsigneeParty`)
@@ -43,6 +46,15 @@ project, DB Option-B, Cloud Run scale-to-zero (~₹2k/mo).
   + admin-managed **Payment method** (soft-delete, case-insensitive-unique), confirm-blocked
   without them; register cols/filters + **`GET /expense/summary`** → an **Overview** spend
   dashboard (by project + payment); catch-all **GEN-001 "General/Overhead"** project seeded.
+- **Go-live + post-launch (inc 28–38), all LIVE:** production deploy (GcsStorage, Firebase auth,
+  first admin) · custom domain via the Cloudflare worker · **Project Spine** Waves 1–4 (`sales_orders`/PO
+  DRAFT→CONFIRMED→IN_PROGRESS · `billing`/AR upload→match-to-PO→confirm + credit notes · `finance`
+  project + consolidated P&L · `logistics` · `action_center`) · **confirm-invoice-without-a-PO +
+  invoice project attribution** (finance "Unattributed" bucket, always reconciles with AR) · **Tally
+  invoice extractor** (`get_extractor()` default → `TallyAwareExtractor`, `app/modules/expense/tally.py`)
+  · challan-QR viewer (built, dormant) + **Invoice Access dashboard** · **auto-emailed invites** (MSG91
+  SMTP, `app/platform/email.py`) · Change/Forgot password · **Help** page · client PAN/credit-terms ·
+  **Audit & Access** report (`app/modules/audit_report/`, `/admin/audit`, login tracking).
 
 **KEY TRAPS / DURABLES:**
 - SQLAlchemy model files must **NOT** `from __future__ import annotations` (py3.14 crash).
@@ -58,18 +70,19 @@ project, DB Option-B, Cloud Run scale-to-zero (~₹2k/mo).
   (an agent-run `git stash` once clobbered a parallel tree). YOU own the shared foundation, run
   the FULL gate (never trust a piped exit code), runtime-verify through the real interface, and
   run an INDEPENDENT adversarial audit per build item (DUAL for money/auth/destructive) + a UI/UX
-  lane. Runtime = definition of done. Keep `develop` unpushed until green; **no push / cloud /
-  irreversible action without owner go.**
+  lane. Runtime = definition of done. Run the FULL gate before every push (never trust a piped
+  exit code); **"pushed" ≠ "deployed"** — verify the serving Cloud Run revision; **no prod DB op /
+  prod deploy without owner go.**
 
-**PENDING = all owner-gated deploy (NO code queued):** provision **GCP + Firebase** + apply
-Terraform; add a **git remote + CI deploy secrets** (`WIF_PROVIDER`/`DEPLOY_SA`/`GCP_PROJECT_ID`
-(+`_PROD`), an Artifact Registry repo `opshub`, a `production` env with a reviewer); implement
-**`GcsStorage`** (+ the folded-in bulk-download streaming + 413 orphan-blob cleanup); wire **real
-Firebase auth**; **verify the RBAC + allocation migrations on Postgres**; **prod bootstrap**
-(`ensure_builtin_roles` + create the first Administrator user + the overhead project); container
-**WeasyPrint render** + `L/433` byte-match; real data (**`L`-series seed**, master data, GST
-retention). Critical path = standing up a GCP project → then run the deploy-enablement pass as
-one orchestrated increment.
+**REMAINING (owner-gated; nothing blocking use — the whole pre-launch deploy list is DONE + LIVE):**
+- Flip the **challan-QR** public viewer when ready: per-client Access PINs + `PUBLIC_BASE_URL` +
+  `QR_INVOICE_ACCESS_ENABLED=true` + a Cloudflare `/d/*` rate-limit rule (checklist:
+  `plans/GO-LIVE-OWNER-PLAN.md` Phase 4). Built + dormant.
+- Provide a real **IGST/inter-state** + a **multi-line/multi-page** Tally invoice to fully pin the
+  extractor fixtures (verified on one single-page invoice + synthetic).
+- **Project-Spine Wave 5** (live Google-Sheet sync · push email/WhatsApp reminders + scheduler ·
+  e-invoice/e-way) — UNBLOCKED (GCP/Firebase live) but unbuilt.
+- Optional: full mobile hamburger nav (desktop-first internal tool).
 
 **Run locally:** backend — migrate + `python -m app.seed`, then
 `DEV_AUTH=true STUB_RENDER=true uvicorn app.main:app --port 8000`; FE —

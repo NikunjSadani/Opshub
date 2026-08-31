@@ -3,6 +3,10 @@
 Finalised 2026-07-31. Styled version: `design-doc.html` (published artifact). This is the text source of record.
 
 > **Status:** architecture finalised for build. Only *inputs* remain (see §12) — not decisions.
+>
+> **UPDATE (2026-08):** the system is now **BUILT and LIVE in production** at
+> https://opshub.gifsy.in. This doc is the v4 architecture baseline; the real current state
+> (many increments past v4 — see §14 and `RESUME.md`) has moved well beyond it.
 
 ---
 
@@ -17,7 +21,7 @@ Platform spine + first modules. Build shared **conventions and services**, not a
 
 ## 3. Identity & access
 - **AuthN:** Firebase Authentication, email/password. Token verified server-side on every request; provider is the sole authority for "active"; documented offboarding runbook.
-- **AuthZ:** Postgres RBAC on two axes — a **role** (Admin/MIS/Operations/Finance) governs *actions* via `can(user, action, resource?)`; a per-user **module-access list** (explicit grants, not role-derived) governs *which modules* via `can_access_module(user, module)`. `resource` arg shaped in now for later per-consignor/brand scoping. Default: all staff, all entities. A full per-*action* permission matrix stays out of scope.
+- **AuthZ:** *(This fixed-role model is superseded by RBAC v2 — inc 26; see §14. Now: named custom ROLE entities granting per-module LEVELS + platform permissions.)* Postgres RBAC on two axes — a **role** (Admin/MIS/Operations/Finance) governs *actions* via `can(user, action, resource?)`; a per-user **module-access list** (explicit grants, not role-derived) governs *which modules* via `can_access_module(user, module)`. `resource` arg shaped in now for later per-consignor/brand scoping. Default: all staff, all entities. A full per-*action* permission matrix stays out of scope.
 - **User Management (Admin screen):** create/invite users by email, assign role + module access, enable/disable. Users provisioned via **Firebase Admin SDK**; they set their own password via an invite/reset link (admin never handles passwords). Every user/role/access change audited. This is a **Phase 0 platform capability** (shared across modules), and — being an auth path — gets the **dual audit + UI/UX audit**.
 
 ## 4. Document Intelligence (the reusable capability being BUILT)
@@ -70,6 +74,8 @@ Three GCP projects, each isolated by **risk class** (not one per app):
 ## 10. Cost (finalised)
 ~₹2,000/month typical (₹1,700–2,500), 100 invoices/mo, both modules.
 
+> **ACTUAL (live 2026-08):** Cloud SQL `opshub-db` on **db-f1-micro ≈ $11–13/mo** is the dominant line, consistent with this estimate (DB ~half the bill).
+
 | Component | Config | Monthly |
 |---|---|---|
 | Cloud SQL | 1 instance · smallest · single-zone · prod+non-prod DBs | ~₹1,000 |
@@ -87,6 +93,7 @@ Run cost only — the real investment is the one-time engineering to build the e
 schema-per-module · Cloud Tasks queue for Module 1 · signed URLs · read-from-Excel numbering (v1) · permissions admin UI · plugin-loader/registries-as-frameworks · micro-frontends · template branching · e-way portal integration (flag only) · the 30-module framework.
 
 ## 12. Inputs still needed (facts, not decisions)
+> **UPDATE:** the system is **built and live in production** — these inputs were gathered and the modules shipped. Kept as the historical build-time list.
 1. **Second use case** for extraction — doc types + timeline (shapes the canonical schema/contract; decides when Doc-Intelligence graduates out of OpsHub).
 2. **Challan seed** — current last `L`-series number for FY 26-27.
 3. **Master data** — consignor entities + brand→state-GSTIN/address registry.
@@ -109,6 +116,13 @@ schema-per-module · Cloud Tasks queue for Module 1 · signed URLs · read-from-
 ---
 ### 14. Evolutions since v4 (recorded during the build — `RESUME.md` is the live source of truth)
 The v4 design above is the baseline; a few things evolved as the build progressed (owner-driven, from the real challan template). Authoritative current state lives in `RESUME.md` / `RESUME-PROMPT.md`.
+- **Continuation since inc 27 (concise — `RESUME.md` is authoritative):**
+  - **Project Spine (multi-wave):** a full sales/procurement/finance spine layered onto the platform — `sales_orders` module (Product Master, Client Master with multi-GSTIN/address/contact + PAN + credit-terms, **Purchase Orders** with a DRAFT→CONFIRMED→IN_PROGRESS lifecycle + line items + amendments), **billing/AR** (client invoices + credit notes, uploaded-and-tallied against PO lines), **finance** (per-project + consolidated **P&L**, Excel export, an **"Unattributed"** bucket for invoices confirmed without a PO), **logistics** tracking (POD), and a computed **Action Center** (procurement / invoicing-due / AR-overdue reminders, no infra). Confirm-invoice-**without-a-PO** + invoice **project attribution** shipped post-Wave-4. See `PROJECT-SPINE-DESIGN.md` / `PROJECT-SPINE-BUILD-PLAN.md`.
+  - **Expense Tally-aware extractor:** `get_extractor()` now defaults to **"auto" → `TallyAwareExtractor`** (`app/modules/expense/tally.py`), routing Tally 'Tax Invoice' PDFs to a dedicated `TallyInvoiceExtractor` and delegating everything else to the zero-cost `TextLayerExtractor`.
+  - **Challan-QR + Invoice Access:** public challan-QR invoice viewer (built, **DORMANT** — owner flip pending) + a MANAGE-gated **Invoice Access** dashboard (LIVE) logging every PIN submission.
+  - **Auth/onboarding:** **auto-emailed invites** over the MSG91 SMTP relay; in-app **Change / Forgot password**; **real Firebase** email/password auth live (first admin bootstrapped).
+  - **Ops:** in-app **Help & Guides** page; admin-only **Audit & Access** report (`app/modules/audit_report/`, `login_event` table, `/admin/audit/*`).
+  - **Production deployment:** LIVE at **https://opshub.gifsy.in** (Cloud Run `opshub-api`, GCP `opshub-506704`, asia-south1, rev `opshub-api-00015-8cz`), fronted by the `cloudflare-worker/` proxy; pushed to `github.com/NikunjSadani/Opshub` (`develop`). Gate: BE pytest **708** · FE vitest **175**.
 - **Expense cost-allocation (inc 27 — LANDED, `07e070e`→`4309a48`):** every expense invoice is tagged, **at upload for the whole batch**, with a required **Project** (from the Projects module, Active) + an admin-managed **Payment method** (soft-delete list, case-insensitive-unique); **confirm is blocked** without both. Registers/CSV gain Project + Payment columns + filters, and a new `GET /expense/summary` powers an **Overview dashboard** (confirmed spend by project + by payment method, BigInt paise, reconciling). Money-path + UI/UX audited (allocation stamped on every persist path; no join fan-out). A catch-all **"General / Overhead" project (GEN-001)** is seeded so overhead has a home. This realises the "per-project rollups" the Projects module (inc 13) was shaped for.
 - **RBAC v2 — custom roles + per-module levels (inc 26 — LANDED, `df05894`→`9992ee8`):** the original fixed `Role` enum + per-user `UserModuleAccess` (§3) is superseded by a **named ROLE entity** granting **per-module LEVELS** (View<Operate<Manage) + **platform permissions** (`iam`, `settings`); a user holds one role. `app/platform/rbac.py` enforces via an action-catalog (default-deny); `GET /me` returns effective permissions that drive the FE `usePermissions()` gating; an admin **Roles editor** (`/admin/roles`) + a Users role-picker manage it; the built-in **Administrator** role is protected. DUAL-security + UI/UX audited. ⚠️ `iam` is de-facto Administrator (owner-accepted); prod bootstrap must `ensure_builtin_roles` + create the first admin.
 - **Challan range/list bulk download (inc 25 — LANDED, `8f9b6c8`→`f196ba3`):** a Download tab — pick series + FY, enter a range and/or list of challan numbers → preview → download as separate PDFs (ZIP) or a paper-saving **2-up merged** PDF (2 challans/A4). Correctness + UI/UX audited to a "never silently drop a statutory doc" invariant (VOID / unrendered / vanished-blob challans are reported via `X-Skipped-Void` / `X-Skipped-Unavailable`, never dropped or 500-ing the batch).

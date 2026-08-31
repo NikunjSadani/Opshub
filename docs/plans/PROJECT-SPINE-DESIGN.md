@@ -103,6 +103,12 @@ po_amendment    (id, po_id FK, version int, summary String(500),
 
 ### 5d. Delivery-challan linkage (change to the challan module)
 
+> **⚠️ NOT built as designed (Wave 3, 2026-08).** The `challan.invoice_id` FK and the
+> `challan_line.po_line_item_id` FK column linkage below were **NOT implemented**. The owner kept
+> the statutory challan module **untouched**; the challan carries the **invoice#/PO#/project as
+> free text** (from the inc-15 template), so the link is textual, not a foreign-key column. Wave 3
+> shipped **logistics tracking only**. This section is retained as the original design.
+
 Because the flow is **invoice-first** and one invoice can ship on several challans, the challan ties to its invoice and its lines tie to the PO lines they physically carry:
 - `challan.invoice_id` (nullable FK→`billing_invoice`) — the invoice this delivery fulfils (nullable so legacy Phase-1 challans are unaffected; required for new-flow challans).
 - `challan_line.po_line_item_id` (nullable FK) — the PO line each challan row delivers, with the **quantity the challan already carries** — this is what makes *delivered* reconcilable per line when an invoice is split across challans.
@@ -263,7 +269,7 @@ Each wave is an increment: I own the shared foundation + the gate + runtime veri
 
 1. **Foundation** — Product Master + Client Master (multi-GSTIN/address/contacts/credit-terms) + PO/line-item entry (Excel + manual, amendments, soft-copy upload) + numbering-prefix generalization + the `sales_orders` module & RBAC wiring. *Everything else depends on this.*
 2. **Revenue + AR (parallel after 1)** — client invoice + client credit note + payments + advances + AR tracker (`billing` module); **and** Project + Consolidated P&L + Excel export (`finance` module). **Also here (cost side): vendor credit notes** — the `doc_type` + sign-aware-aggregate extension to the existing expense module (§5h, money-path → DUAL audit). These share no code and can run in parallel.
-3. **Fulfilment** — challan → `invoice_id` + challan-line → `po_line_item` linkage (the §5d challan change) + Logistics tracking module (Excel/manual, POD).
+3. **Fulfilment** — challan → `invoice_id` + challan-line → `po_line_item` linkage (the §5d challan change) + Logistics tracking module (Excel/manual, POD). *(⚠️ As built, Wave 3 = Logistics tracking ONLY; the §5d `invoice_id` / `po_line_item_id` column linkage was NOT built — the statutory challan was left untouched and the link is free-text invoice#/PO# on the challan. See the §5d note.)*
 4. **Action Center** — computed reminders across PO / invoicing / AR (no infra).
 5. **Owner-gated cloud (batches with deploy)** — live Sheet sync, push reminders/schedulers, and any e-invoice/e-way integration.
 

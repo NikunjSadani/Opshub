@@ -1,6 +1,6 @@
 # RBAC v2 — Custom roles + per-module access levels (DESIGN)
 
-Status: **DESIGN — awaiting owner go-ahead to build.** Target increment: **inc 26.**
+Status: **BUILT (inc 26), now live in prod.** (Originally: "DESIGN — awaiting owner go-ahead to build," target increment inc 26.)
 Owner decisions locked (2026-08-19): **per-module access levels** (Option A) **+ a custom
 role builder** (Option 2), composed together; **no per-entity data scoping** (modules +
 actions only). This document is the frozen contract for the build.
@@ -86,9 +86,10 @@ user
   role_id -> role                       # REPLACES the old `role` enum column
 ```
 
-**Cutover, not migration.** There are **no real users in prod yet** (Firebase isn't wired;
-only the mock admin + dev shim exist), so this is a clean replace with **zero production-data
-risk**: create the new tables, seed Administrator + the presets, point the seed/mock-admin at
+**Cutover, not migration.** *(Build-time rationale — since superseded: Firebase is now wired
+and live in prod with real users.)* At build time there were **no real users in prod yet**
+(Firebase wasn't wired; only the mock admin + dev shim existed), so this was a clean replace with
+**zero production-data risk**: create the new tables, seed Administrator + the presets, point the seed/mock-admin at
 Administrator, and **drop the old `Role` enum column and the `user_module_access` table**
 (its binary grants are superseded by role levels). One Alembic migration.
 
