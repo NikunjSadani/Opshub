@@ -1,13 +1,19 @@
-# Prod cutover on push to main. GATED: the `deploy` job uses the `production`
-# GitHub Environment, so a required reviewer must approve before it (and its
-# migration) runs — the deliberate, non-auto prod cutover (WoW #8).
+# Prod deploy — MANUAL only. The single deliberate trigger IS the approval (WoW #8):
+# nothing auto-deploys. To ship prod: Actions → "Deploy prod" → Run workflow (defaults
+# to the develop HEAD, which is the release branch; pick another ref to deploy it).
 #
-# Owner must set: the `production` environment + required reviewers; secrets
-# WIF_PROVIDER, DEPLOY_SA; var GCP_PROJECT_ID_PROD.
+# NOTE: a real "required-reviewer" pause needs GitHub Pro/Team on a private repo — not on
+# this plan — so the gate here is the manual dispatch, not an approval prompt (same as the
+# loyalty repo, whose `production` environment has no reviewer rule either). The bare
+# `environment: production` below only scopes/labels the deployment; if the plan is ever
+# upgraded, adding a required reviewer to that environment turns this into a click-approve
+# pause with no workflow change.
+#
+# Wired: WIF via secrets WIF_PROVIDER + DEPLOY_SA (Workload Identity, no key file);
+# var GCP_PROJECT_ID_PROD=opshub-506704.
 name: Deploy prod
 on:
-  push:
-    branches: [main]
+  workflow_dispatch: {}
 
 env:
   REGION: asia-south1
@@ -22,7 +28,7 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    environment: production # required-reviewer gate
+    environment: production # labels/scopes the deployment; add a reviewer here if plan upgraded
     permissions:
       contents: read
       id-token: write
