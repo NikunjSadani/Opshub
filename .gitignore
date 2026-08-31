@@ -37,4 +37,8 @@ backend/_files/
 # Playwright E2E (artifacts + generated fixtures)
 frontend/test-results/
 frontend/playwright-report/
-frontend/e2e/fixtures/
+# Ignore generated fixtures (template.xlsx is written by global-setup.ts at run time)
+# and any stray artifacts, but TRACK the static invoice PDF the billing/expense specs
+# read — it isn't generated, so CI needs it committed (else 6 e2e tests ENOENT).
+frontend/e2e/fixtures/*
+!frontend/e2e/fixtures/expense-invoice.pdf
