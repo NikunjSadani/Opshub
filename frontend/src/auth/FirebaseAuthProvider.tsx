@@ -14,6 +14,7 @@ import {
 } from 'firebase/auth';
 import { firebaseConfig } from '../firebaseConfig';
 import { AuthAndPermissions, type AuthContextValue } from './AuthProvider';
+import { recordLoginEvent } from '../api/audit';
 
 /**
  * Real auth provider — Firebase email/password. Renders through <AuthAndPermissions>, so GET /me
@@ -48,7 +49,17 @@ export function FirebaseAuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    await signInWithEmailAndPassword(firebaseAuth(), email.trim(), password);
+    const cred = await signInWithEmailAndPassword(firebaseAuth(), email.trim(), password);
+    // Best-effort audit ping — records THIS explicit sign-in (the backend reads
+    // IP + user-agent from the request). Fired ONLY here, never from
+    // onAuthStateChanged (a restored session), and never allowed to block or
+    // fail the login: any error (network / 403 / non-2xx) is swallowed.
+    try {
+      const token = await cred.user.getIdToken();
+      await recordLoginEvent(token);
+    } catch {
+      /* swallow — the audit ping must never break a successful sign-in */
+    }
   }, []);
 
   const signOut = useCallback(async () => {

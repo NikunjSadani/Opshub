@@ -81,6 +81,19 @@ class Settings(BaseSettings):
     msg91_smtp_port: int = 587
     msg91_smtp_user: str = "emailer@notify.gifsy.in"
 
+    # --- access tracking (inc 38) ---
+    # GET /me stamps the caller's `last_seen_at` at most this often (seconds), so
+    # "last active" tracking never becomes a write on every request. Default 5 min.
+    last_seen_throttle_seconds: int = 300
+    # POST /auth/login-event coalesces a repeat sign-in with the SAME (ip, user_agent)
+    # within this window (seconds) into no new row, so an authenticated client can't loop
+    # the endpoint to flood login_event on the small prod DB. Default 5 min.
+    login_event_coalesce_seconds: int = 300
+    # Retention horizon for login_event: rows older than this are pruned during the
+    # secret-gated sweep (defense-in-depth vs unbounded growth). audit_log is NEVER pruned
+    # (tamper-evident compliance record). Default 180 days.
+    login_event_retention_days: int = 180
+
     # --- misc ---
     cors_allow_origins: list[str] = []  # SPA is served same-origin; empty by design
 

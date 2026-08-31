@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -98,10 +98,26 @@ def log(
     raise RuntimeError("audit chain contention: could not append after retries")
 
 
-def verify_chain(db: Session) -> bool:
-    """Recompute the whole chain; True if intact (used by a periodic integrity check)."""
+class ChainStatus(NamedTuple):
+    """Outcome of a full chain recomputation.
+
+    `intact` is True when every row's prev/row hash reproduces; `entries_checked` is how
+    many rows were examined; `broken_at_id` is the id of the FIRST row whose hash fails
+    (None when intact). Verification stops at the first break, so `entries_checked` counts
+    the rows examined up to and including that row."""
+
+    intact: bool
+    entries_checked: int
+    broken_at_id: int | None
+
+
+def verify_chain_detailed(db: Session) -> ChainStatus:
+    """Recompute the whole chain in id order, reporting how far it got and where (if
+    anywhere) it broke. Single source of truth for integrity — `verify_chain` wraps this."""
     prev_hash = ""
+    checked = 0
     for row in db.execute(select(AuditLog).order_by(AuditLog.id.asc())).scalars():
+        checked += 1
         payload = {
             "ts": _iso_utc(row.ts),
             "actor_uid": row.actor_uid,
@@ -112,6 +128,11 @@ def verify_chain(db: Session) -> bool:
             "ip": row.ip,
         }
         if row.prev_hash != prev_hash or row.row_hash != compute_row_hash(prev_hash, payload):
-            return False
+            return ChainStatus(intact=False, entries_checked=checked, broken_at_id=row.id)
         prev_hash = row.row_hash
-    return True
+    return ChainStatus(intact=True, entries_checked=checked, broken_at_id=None)
+
+
+def verify_chain(db: Session) -> bool:
+    """Recompute the whole chain; True if intact (used by a periodic integrity check)."""
+    return verify_chain_detailed(db).intact

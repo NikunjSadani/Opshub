@@ -15,6 +15,13 @@ export function roleLabel(roleName: string | null): string {
   return roleName && roleName.length > 0 ? roleName : '—';
 }
 
+/** Localised datetime for an ISO string; em dash for null/blank, raw string if unparseable. */
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
 /** Basic email shape check (UI hint only; the server is authoritative). */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export function isValidEmail(value: string): boolean {

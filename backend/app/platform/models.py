@@ -104,6 +104,15 @@ class User(Base):
     role_id: Mapped[int | None] = mapped_column(ForeignKey("role.id"), index=True, default=None)
     active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Access-tracking (inc 38). `last_login_at` is stamped by POST /auth/login-event on an
+    # explicit sign-in; `last_seen_at` is stamped (throttled) on GET /me so admins can see
+    # who is actually active. Both nullable — no value until the user next logs in / is seen.
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
 
     role: Mapped[Role | None] = relationship(back_populates="users")
 
@@ -125,6 +134,25 @@ class AuditLog(Base):
     # same prev_hash fails the constraint and retries against the new head.
     prev_hash: Mapped[str] = mapped_column(String(64), default="", unique=True)
     row_hash: Mapped[str] = mapped_column(String(64), index=True)
+
+
+class LoginEvent(Base):
+    """One row per explicit sign-in (recorded by POST /auth/login-event).
+
+    Feeds the admin-only "Audit & Access" login report. `ip` is the Cloudflare-forwarded
+    client IP (best-effort); `user_agent` is truncated to fit. Append-only in practice
+    (never edited), but NOT hash-chained — the tamper-evident chain is `audit_log`.
+    """
+
+    __tablename__ = "login_event"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id"), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+    ip: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(400))
 
 
 class Setting(Base):

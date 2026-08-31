@@ -24,6 +24,8 @@ const USERS = [
     active: true,
     is_provisioned: true,
     created_at: '2026-01-01T00:00:00Z',
+    last_login_at: '2026-02-20T09:00:00Z',
+    last_seen_at: '2026-02-21T10:30:00Z',
   },
   {
     id: 2,
@@ -34,6 +36,8 @@ const USERS = [
     active: false,
     is_provisioned: false,
     created_at: '2026-02-01T00:00:00Z',
+    last_login_at: '2026-02-05T08:15:00Z',
+    last_seen_at: '2026-02-06T11:45:00Z',
   },
 ];
 

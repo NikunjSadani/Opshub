@@ -137,6 +137,18 @@ export function Sidebar() {
               >
                 Roles
               </NavLink>
+              <NavLink
+                to="/admin/audit"
+                className={({ isActive }) =>
+                  `rounded-md px-3 py-2 text-sm font-medium ${
+                    isActive
+                      ? 'bg-brand-50 text-brand-700'
+                      : 'text-slate-700 hover:bg-slate-100'
+                  }`
+                }
+              >
+                Audit &amp; Access
+              </NavLink>
             </div>
           </div>
         )}

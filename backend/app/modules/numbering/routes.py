@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
+from app.modules.audit_report import service as audit_report_service
 from app.modules.challan import invoice_access
 from app.modules.numbering import service
 from app.modules.numbering.models import (
@@ -228,5 +229,14 @@ def sweep_reservations(
             db, older_than_days=get_settings().invoice_access_retention_days
         )
         if pruned:
+            db.commit()
+    # Same defense-in-depth for login_event retention (best-effort; a prune failure must
+    # never fail the sweep). audit_log is intentionally NOT pruned — it is the tamper-
+    # evident compliance record and must stay intact.
+    with contextlib.suppress(Exception):
+        pruned_logins = audit_report_service.prune_login_events(
+            db, older_than_days=get_settings().login_event_retention_days
+        )
+        if pruned_logins:
             db.commit()
     return SweepOut(swept=len(swept))

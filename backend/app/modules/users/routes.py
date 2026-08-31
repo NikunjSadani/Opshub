@@ -12,7 +12,7 @@ stored. Writes are audited by the service. The raw firebase_uid is never exposed
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -61,6 +61,9 @@ class UserOut(BaseModel):
     active: bool
     is_provisioned: bool
     created_at: datetime
+    # Access tracking (inc 38): UTC ISO-8601 strings, or null until first login / seen.
+    last_login_at: str | None
+    last_seen_at: str | None
 
 
 class CreateResult(BaseModel):
@@ -70,6 +73,15 @@ class CreateResult(BaseModel):
 
 class SetupLinkOut(BaseModel):
     setup_link: str | None
+
+
+def _iso(value: datetime | None) -> str | None:
+    """UTC ISO-8601 for a stored timestamp (tz-naive sqlite round-trip treated as UTC)."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
 
 
 def _user_out(u: User) -> UserOut:
@@ -84,6 +96,8 @@ def _user_out(u: User) -> UserOut:
         active=u.active,
         is_provisioned=not u.firebase_uid.startswith("local:"),
         created_at=u.created_at,
+        last_login_at=_iso(u.last_login_at),
+        last_seen_at=_iso(u.last_seen_at),
     )
 
 

@@ -34,6 +34,10 @@ export interface UserOut {
   is_provisioned: boolean;
   /** ISO datetime string. */
   created_at: string;
+  /** ISO datetime of the last recorded explicit sign-in, or null. */
+  last_login_at: string | null;
+  /** ISO datetime the user was last seen active, or null. */
+  last_seen_at: string | null;
 }
 
 /** Body for `POST /users`. */

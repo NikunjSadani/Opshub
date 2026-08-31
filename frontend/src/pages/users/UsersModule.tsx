@@ -15,7 +15,7 @@ import {
 import { useUsers, type UserOut } from '../../api/users';
 import { InviteUserModal } from './InviteUserModal';
 import { EditUserModal } from './EditUserModal';
-import { roleLabel } from './usersFormat';
+import { formatDateTime, roleLabel } from './usersFormat';
 
 /**
  * User Management (ADMIN, RBAC v2). Lists users and their assigned role, invites
@@ -55,6 +55,7 @@ export function UsersModule() {
               <Th>Name</Th>
               <Th>Role</Th>
               <Th>Status</Th>
+              <Th>Last active</Th>
               <Th>{''}</Th>
             </Tr>
           </THead>
@@ -77,6 +78,14 @@ export function UsersModule() {
                   {!u.is_provisioned && (
                     <span className="ml-1.5 text-[11px] text-amber-600">setup pending</span>
                   )}
+                </Td>
+                <Td className="whitespace-nowrap text-slate-600">
+                  <div className="leading-tight">
+                    <div>{formatDateTime(u.last_seen_at)}</div>
+                    <div className="text-[11px] text-slate-400">
+                      signed in {formatDateTime(u.last_login_at)}
+                    </div>
+                  </div>
                 </Td>
                 <Td className="text-right">
                   <Button variant="secondary" size="sm" onClick={() => setEditing(u)}>

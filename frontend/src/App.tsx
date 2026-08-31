@@ -24,6 +24,7 @@ import { ActionCenterModule } from './pages/action_center/ActionCenterModule';
 import { HelpModule } from './pages/help/HelpModule';
 import { RolesModule } from './pages/roles/RolesModule';
 import { UsersModule } from './pages/users/UsersModule';
+import { AuditModule } from './pages/audit/AuditModule';
 import { RequirePlatform } from './auth/RequireRole';
 import { ToastProvider } from './ui';
 
@@ -101,6 +102,20 @@ export function AppRoutes() {
           element={
             <RequirePlatform perm="iam">
               <RolesModule />
+            </RequirePlatform>
+          }
+        />
+        {/*
+          Audit & Access — an admin report over the audit trail + login events,
+          governed by the same `iam` platform permission (the backend enforces
+          `iam` → 403 on every /admin/audit call). Wildcard path so the module's
+          own Activity/Logins tabs can nest their routes.
+        */}
+        <Route
+          path="/admin/audit/*"
+          element={
+            <RequirePlatform perm="iam">
+              <AuditModule />
             </RequirePlatform>
           }
         />

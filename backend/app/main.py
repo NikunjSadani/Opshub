@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 
 from app.config import get_settings
 from app.modules.action_center.routes import router as action_center_router
+from app.modules.audit_report.routes import router as audit_report_router
 from app.modules.billing.routes import router as billing_router
 from app.modules.challan.routes import router as challan_router
 from app.modules.expense.routes import router as expense_router
@@ -123,6 +124,9 @@ def create_app() -> FastAPI:
     # roles that grant access); NOT nav ModuleSpecs, mounted like files/settings above.
     app.include_router(users_router, prefix="/api/v1", tags=["users"])
     app.include_router(roles_router, prefix="/api/v1", tags=["roles"])
+    # Audit & Access report — admin-only (IAM) audit-log + sign-in reporting; a platform
+    # primitive (not a nav ModuleSpec), mounted like users/roles above.
+    app.include_router(audit_report_router, prefix="/api/v1", tags=["audit_report"])
     # The current user's identity + effective permissions (any authenticated user).
     app.include_router(me_router, prefix="/api/v1", tags=["me"])
     # Public challan-QR invoice viewer — mounted at /d/{token} with NO auth and NO
