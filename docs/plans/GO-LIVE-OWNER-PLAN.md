@@ -113,10 +113,15 @@ Auth: owner ADC (`nikunj.sadani28@gmail.com`), quota project set. Remaining Phas
    env on Cloud Run selects it; api SA has objectAdmin). Round-trip-verified against the real
    `opshub-506704-files` bucket. Terraform now `ignore_changes` the image (config vs image split).
 6. 🤖 **Real login (`FirebaseAuthProvider`)** — I wire the app's login to your Firebase project.
-7. 🤝 **GitHub deploy wiring** — a few GitHub secrets/vars (`WIF_PROVIDER`, `DEPLOY_SA`,
-   `GCP_PROJECT_ID`), an Artifact Registry repo, and a "production" approval gate with a
-   required reviewer (so no prod deploy happens without a click from you). I prepare the exact
-   values; you paste them into GitHub settings.
+7. ✅ **GitHub deploy wiring — DONE + VERIFIED (2026-08-31).** WIF pool + OIDC provider
+   (locked to `NikunjSadani/Opshub`) + deploy SA `github-deployer` (least-priv) created; GitHub
+   secrets `WIF_PROVIDER`/`DEPLOY_SA` + var `GCP_PROJECT_ID_PROD` set; AR repo `opshub` already
+   existed. `deploy-prod.yml` runs on **`workflow_dispatch`** — a test dispatch deployed clean
+   (rev `opshub-api-00016-wdq`, health 200). Prod deploys are **manual** (Actions → Deploy prod →
+   Run workflow — the click is your approval); a required-reviewer *pause* needs GitHub Pro/Team,
+   which a free private repo doesn't have (the loyalty repo's `production` env has no reviewer
+   rule either), so the deliberate trigger is the gate. ▶ residual: `terraform import` the WIF/SA
+   into `infra/terraform/` (created out-of-band to avoid a risky full apply on the live project).
 
 ---
 
