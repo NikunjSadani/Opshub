@@ -1,8 +1,11 @@
 import {
   useInfiniteQuery,
+  useMutation,
   useQuery,
+  useQueryClient,
   type InfiniteData,
   type UseInfiniteQueryResult,
+  type UseMutationResult,
   type UseQueryResult,
 } from '@tanstack/react-query';
 import { useApi } from './client';
@@ -104,5 +107,38 @@ export function useCountersQuery(): UseQueryResult<Counter[], Error> {
   return useQuery<Counter[], Error>({
     queryKey: numberingKeys.counters(),
     queryFn: ({ signal }) => get<Counter[]>('/numbering/counters', signal),
+  });
+}
+
+// ---------------------------------------------------------------- mutations
+
+export interface SeedSeriesInput {
+  series: string;
+  /** FY like "26-27"; omit/blank for the current financial year. */
+  fy?: string;
+  /** High-water mark = last issued number; the next issue is this + 1 (0 = fresh series). */
+  last_number: number;
+}
+
+/**
+ * Seed (configure) the starting number for a (series, fy) — mirrors backend
+ * `POST /numbering/seed`. Sets the high-water mark so the next allocated challan
+ * is `last_number + 1`. Requires MANAGE on the Delivery Challan module; the
+ * backend additionally guards it so it can NEVER drop below a number already
+ * issued (no reissue risk). Refreshes the counters grid on success.
+ */
+export function useSeedSeries(): UseMutationResult<Counter, Error, SeedSeriesInput> {
+  const { post } = useApi();
+  const qc = useQueryClient();
+  return useMutation<Counter, Error, SeedSeriesInput>({
+    mutationFn: ({ series, fy, last_number }) =>
+      post<Counter>('/numbering/seed', {
+        series,
+        ...(fy && fy.trim() ? { fy: fy.trim() } : {}),
+        last_number,
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: numberingKeys.counters() });
+    },
   });
 }

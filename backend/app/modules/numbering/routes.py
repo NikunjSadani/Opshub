@@ -102,9 +102,15 @@ def seed_counter(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> NumberingCounter:
-    """Mode-2 custom-start: set the high-water mark for (series, fy). ADMIN only."""
+    """Mode-2 custom-start: set the high-water mark for (series, fy).
+
+    Requires MANAGE on the Delivery Challan module (`series.seed`).
+    """
     if not can(user, "series.seed"):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "series.seed requires ADMIN")
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "series.seed requires Manage on the Delivery Challan module",
+        )
     try:
         counter = service.seed_series(
             db,
