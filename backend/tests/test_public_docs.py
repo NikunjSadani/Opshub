@@ -5,10 +5,12 @@ flipped per-test via a fake settings object patched onto the routes module. Seed
 client (+ PIN), an ACTIVE project, a Challan bearing an access_token, and — where a
 case needs it — a CONFIRMED SalesInvoice whose source blob lives in LocalStorage.
 
-Security properties under test: feature-off is a hard 404 wall; unknown token and
-wrong password are indistinguishable (no enumeration oracle); a per-token throttle
-turns to 429 after N failures; only a correct password reveals the (streamed) PDF or
-the "not available yet" page; the compare is constant-time.
+Security properties under test: feature-off is a hard 404 wall; an unknown token is a
+generic 404 (exactly as the GET form already returns for it); a WRONG password and an
+UNCONFIGURED PIN on a valid token are byte-identical (no "is a PIN set?" oracle) and
+re-render the form with a clear "Incorrect password" message; a per-token throttle turns
+to 429 after N failures; only a correct password reveals the (streamed) PDF or the "not
+available yet" page; the compare is constant-time.
 """
 from __future__ import annotations
 
@@ -203,22 +205,45 @@ def test_get_valid_token_shows_form_with_challan_number(ctx: dict[str, Any]) -> 
     assert "<form" in r.text and 'name="password"' in r.text
 
 
-def test_wrong_password_rejected_generic_404(ctx: dict[str, Any]) -> None:
+def test_wrong_password_shows_clear_error_on_form(ctx: dict[str, Any]) -> None:
     client: TestClient = ctx["client"]
     r = client.post("/d/tok-good", data={"password": "wrong"})
-    assert r.status_code == 404
-    # No hint about why (constant generic page).
+    # A valid token with a wrong PIN re-renders the password form with a CLEAR, to-the-
+    # point error (not the misleading "link not available" page a legit mistype used to get).
+    assert r.status_code == 401
+    assert "text/html" in r.headers["content-type"]
+    assert "Incorrect password" in r.text
+    assert "<form" in r.text and 'name="password"' in r.text
+    # Still leaks nothing sensitive.
     assert PIN not in r.text and INVOICE_NUMBER not in r.text
 
 
 def test_rate_limit_after_n_attempts_429(ctx: dict[str, Any]) -> None:
     client: TestClient = ctx["client"]
     for _ in range(service.MAX_FAILED_ATTEMPTS):
-        assert client.post("/d/tok-good", data={"password": "wrong"}).status_code == 404
+        assert client.post("/d/tok-good", data={"password": "wrong"}).status_code == 401
     # The next attempt is locked out — even a correct password now gets 429.
     r = client.post("/d/tok-good", data={"password": ctx["good_password"]})
     assert r.status_code == 429
     assert r.headers.get("retry-after") == str(service.COOLDOWN_SECONDS)
+
+
+def test_no_pin_also_throttles_to_429(ctx: dict[str, Any]) -> None:
+    # Throttle parity: a client with NO PIN configured must ALSO flip to 429 after N
+    # attempts, exactly like a wrong PIN — otherwise "never reaches 429" would leak that
+    # no PIN is set (the audit's LOW oracle, now closed).
+    db = ctx["TestSession"]()
+    from app.modules.projects.models import ProjectClient
+    row = db.get(ProjectClient, ctx["client_id"])
+    assert row is not None
+    row.access_pin = None
+    db.commit()
+    db.close()
+
+    client: TestClient = ctx["client"]
+    for _ in range(service.MAX_FAILED_ATTEMPTS):
+        assert client.post("/d/tok-good", data={"password": "x"}).status_code == 401
+    assert client.post("/d/tok-good", data={"password": "x"}).status_code == 429
 
 
 def test_correct_password_no_invoice_returns_not_available(ctx: dict[str, Any]) -> None:
@@ -245,8 +270,9 @@ def test_correct_password_streams_pdf(ctx: dict[str, Any]) -> None:
     assert r.content == PDF_BYTES
 
 
-def test_access_pin_not_configured_is_generic_404(ctx: dict[str, Any]) -> None:
-    # Clear the PIN -> access not configured; must look exactly like a wrong password.
+def test_access_pin_not_configured_looks_like_wrong_password(ctx: dict[str, Any]) -> None:
+    # Clear the PIN -> access not configured; must be INDISTINGUISHABLE from a wrong
+    # password (same 401 + same form + same message), so there is no "is a PIN set?" oracle.
     db = ctx["TestSession"]()
     from app.modules.projects.models import ProjectClient
     row = db.get(ProjectClient, ctx["client_id"])
@@ -258,19 +284,50 @@ def test_access_pin_not_configured_is_generic_404(ctx: dict[str, Any]) -> None:
     client: TestClient = ctx["client"]
     # Even the "would-be-correct" concat (empty PIN + number) must NOT authenticate.
     r = client.post("/d/tok-good", data={"password": ctx["challan_number"]})
-    assert r.status_code == 404
+    assert r.status_code == 401
+    assert "Incorrect password" in r.text
 
 
-def test_enumeration_wrong_password_vs_invalid_token_indistinguishable(
+def test_enumeration_wrong_password_vs_unconfigured_pin_indistinguishable(
     ctx: dict[str, Any],
 ) -> None:
+    # The security-critical property: on a VALID token, a WRONG password and a client with
+    # NO PIN configured are byte-identical, so an attacker cannot tell whether a PIN is even
+    # set. (Whether a *token* is valid is already observable via the GET form, so that is not
+    # the property being protected here.)
     client: TestClient = ctx["client"]
-    valid_wrong = client.post("/d/tok-good", data={"password": "definitely-wrong"})
-    invalid_token = client.post("/d/does-not-exist", data={"password": "definitely-wrong"})
-    # Same status AND byte-identical body — no oracle distinguishing the two.
-    assert valid_wrong.status_code == invalid_token.status_code == 404
-    assert valid_wrong.content == invalid_token.content
-    assert valid_wrong.headers["content-type"] == invalid_token.headers["content-type"]
+    from app.modules.projects.models import ProjectClient
+
+    # NO_PIN path first (clearing the PIN records no failure -> no rate-limit spend).
+    db = ctx["TestSession"]()
+    row = db.get(ProjectClient, ctx["client_id"])
+    assert row is not None
+    row.access_pin = None
+    db.commit()
+    db.close()
+    no_pin = client.post("/d/tok-good", data={"password": "x"})
+
+    # Restore a PIN, then a WRONG password -> the WRONG_PIN path.
+    db = ctx["TestSession"]()
+    row = db.get(ProjectClient, ctx["client_id"])
+    assert row is not None
+    row.access_pin = PIN
+    db.commit()
+    db.close()
+    wrong = client.post("/d/tok-good", data={"password": "definitely-wrong"})
+
+    assert no_pin.status_code == wrong.status_code == 401
+    assert no_pin.content == wrong.content
+    assert no_pin.headers["content-type"] == wrong.headers["content-type"]
+
+
+def test_invalid_token_is_generic_404(ctx: dict[str, Any]) -> None:
+    # An UNKNOWN token stays a generic 404 on POST — the same thing the GET form already
+    # returns for it, so no new information is exposed by the clearer wrong-password page.
+    client: TestClient = ctx["client"]
+    r = client.post("/d/does-not-exist", data={"password": "whatever"})
+    assert r.status_code == 404
+    assert "Incorrect password" not in r.text
 
 
 def test_constant_time_compare_is_used(

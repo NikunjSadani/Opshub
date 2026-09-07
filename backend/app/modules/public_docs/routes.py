@@ -67,19 +67,28 @@ _NOT_AVAILABLE_YET_HTML = _page(
 
 
 def _generic_404() -> HTMLResponse:
-    """The one and only pre-auth failure response (unknown token / wrong password /
-    unconfigured PIN / unresolvable client all collapse to this identical page)."""
+    """The 'not available' page for an UNKNOWN/invalid token or a disabled feature —
+    identical to what the GET form already returns for those, so it reveals nothing new.
+    A wrong password or unconfigured PIN on a VALID token does NOT land here: those
+    re-render the password form with a clear error (see `_wrong_password`), and are
+    byte-identical to each other so the two stay indistinguishable."""
     return HTMLResponse(_GENERIC_404_HTML, status_code=404)
 
 
-def _form_page(token: str, challan_number: str) -> str:
+def _form_page(token: str, challan_number: str, error: str = "") -> str:
     safe_number = html.escape(challan_number)
     # The action posts back to the same path; the token in the URL is already known
     # to the visitor (they scanned it), so echoing it in the form action leaks nothing.
     safe_action = f"/d/{html.escape(token, quote=True)}"
+    error_html = (
+        f"<p style=\"color:#b00020;font-weight:600\" role=\"alert\">{html.escape(error)}</p>"
+        if error
+        else ""
+    )
     body = (
         f"<h1 style=\"font-size:1.25rem\">Delivery Challan {safe_number}</h1>"
         f"<p style=\"color:#555\">Enter the access password to view the invoice.</p>"
+        f"{error_html}"
         f"<form method=\"post\" action=\"{safe_action}\">"
         f"<label>Password<br><input type=\"password\" name=\"password\" "
         f"autocomplete=\"off\" style=\"padding:.5rem;width:100%;max-width:20rem\"></label>"
@@ -87,6 +96,22 @@ def _form_page(token: str, challan_number: str) -> str:
         f"</form>"
     )
     return _page(body, title=f"Challan {challan_number}")
+
+
+# A valid token whose password submission fails — a WRONG PIN, or a client with NO PIN
+# configured — re-renders the SAME password form with the SAME message, so the two remain
+# byte-identical (an attacker still can't tell "wrong PIN" from "no PIN set"). Unknown
+# tokens still collapse to the generic 404, exactly as the GET form already does, so token
+# validity is no more discoverable than before. This replaces the old "This link is not
+# available" page, which misled a legitimate visitor who simply mistyped their password.
+_WRONG_PASSWORD_MSG = "Incorrect password. Please check it and try again."
+
+
+def _wrong_password(token: str, challan_number: str) -> HTMLResponse:
+    return HTMLResponse(
+        _form_page(token, challan_number, error=_WRONG_PASSWORD_MSG),
+        status_code=401,
+    )
 
 
 def _enabled() -> bool:
@@ -171,19 +196,21 @@ def submit_password(
         )
 
     client = service.resolve_client_for_challan(db, challan)
-    # Access-not-configured (no client, or no PIN set) is indistinguishable from a
-    # wrong password: same generic 404, and we never say which. There is nothing to
-    # brute-force in this state, so we don't spend a rate-limit slot on it.
+    # Access-not-configured (no client, or no PIN set) is indistinguishable from a WRONG
+    # password: both re-render the SAME password form with the SAME message (byte-identical),
+    # AND advance the SAME throttle so both flip to 429 after N attempts. If this state
+    # skipped the throttle, "never reaches 429" vs "does" would leak whether a PIN is set.
     if client is None or not client.access_pin:
+        service.record_failure(token)
         _log_access(db, request, challan, AccessOutcome.NO_PIN)
-        return _generic_404()
+        return _wrong_password(token, challan.number)
 
     expected = (client.access_pin + challan.number).encode("utf-8")
     supplied = password.encode("utf-8")
     if not hmac.compare_digest(supplied, expected):
         service.record_failure(token)
         _log_access(db, request, challan, AccessOutcome.WRONG_PIN)
-        return _generic_404()
+        return _wrong_password(token, challan.number)
 
     # Correct password: unlock and late-bind the invoice.
     service.clear_failures(token)

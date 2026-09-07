@@ -453,7 +453,7 @@ def test_log_viewed(viewer: dict[str, Any]) -> None:
 
 def test_log_wrong_pin(viewer: dict[str, Any]) -> None:
     r = viewer["client"].post("/d/tok-good", data={"password": "nope"})
-    assert r.status_code == 404
+    assert r.status_code == 401  # re-renders the form with a clear "Incorrect password"
     assert _outcomes(viewer["TestSession"]) == [AccessOutcome.WRONG_PIN]
 
 
@@ -473,7 +473,7 @@ def test_log_no_pin(viewer: dict[str, Any]) -> None:
     db.commit()
     db.close()
     r = viewer["client"].post("/d/tok-good", data={"password": viewer["number"]})
-    assert r.status_code == 404
+    assert r.status_code == 401  # indistinguishable from a wrong PIN (same form + message)
     assert _outcomes(viewer["TestSession"]) == [AccessOutcome.NO_PIN]
 
 
@@ -486,7 +486,7 @@ def test_log_rate_limited(viewer: dict[str, Any]) -> None:
     # FIX 1 (coalesce): the identical WRONG_PIN attempts (same challan + outcome +
     # viewer within the 60s window — the TestClient's peer hash is constant) collapse
     # to ONE audit row; the distinct RATE_LIMITED outcome still logs. The visitor's
-    # responses (repeated 404s then a 429) are unchanged — only the log write coalesces.
+    # responses (repeated 401s then a 429) are unchanged — only the log write coalesces.
     assert outcomes == [AccessOutcome.WRONG_PIN, AccessOutcome.RATE_LIMITED]
 
 
