@@ -754,7 +754,10 @@ def _generate_inner(
 
         zip_file = _store(db, storage, render.zip_files(pdfs), f"batch-{batch.id}.zip",
                           "challan-zip", actor_uid, "application/zip")
-        merged = _store(db, storage, render.merge_pdfs([p for _, p in pdfs]),
+        # Paper-saving 2-up: two half-A4 challans stacked per A4 sheet (the L/433 canvas
+        # is sized for this), matching the Download tab's "merged" option. The ZIP above
+        # still holds the individual PDFs for anyone needing one-per-page.
+        merged = _store(db, storage, render.merge_2up([p for _, p in pdfs]),
                         f"batch-{batch.id}-merged.pdf", "challan-merged", actor_uid,
                         "application/pdf")
         # Every challan is issued — NOW write the operator's UPDATE_MASTER choices to

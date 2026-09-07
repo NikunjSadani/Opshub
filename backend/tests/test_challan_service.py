@@ -207,6 +207,16 @@ def test_happy_path_reserves_before_render_and_issues(env: tuple[Session, str]) 
     assert challans[0].total_paise == 210000 and challans[0].eway_required is True
     assert challans[1].total_paise == 21000 and challans[1].eway_required is False
     assert batch.zip_file_id is not None and batch.merged_pdf_file_id is not None
+    # The batch merged PDF is paper-saving 2-up (two half-A4 challans per A4 sheet),
+    # matching the Download tab — so 2 challans render on 1 sheet, not 2.
+    from pypdf import PdfReader
+
+    from app.modules.files.models import StoredFile
+
+    merged_sf = db.get(StoredFile, batch.merged_pdf_file_id)
+    assert merged_sf is not None
+    merged_bytes = get_storage().open(merged_sf.storage_ref).read()
+    assert len(PdfReader(io.BytesIO(merged_bytes)).pages) == 1
 
 
 def test_generation_mints_unique_access_token(env: tuple[Session, str]) -> None:
