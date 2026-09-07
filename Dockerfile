@@ -15,6 +15,17 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 
+# WeasyPrint native runtime deps (Pango/Cairo/GLib + image loader + MIME + fonts).
+# Without these, `import weasyprint` fails at load ("cannot load library
+# 'libgobject-2.0-0'") and challan PDF generation 500s — libpango pulls in glib
+# (libgobject), cairo, harfbuzz, fontconfig, freetype. Liberation fonts are
+# metric-compatible with the challan template's Arial family so text metrics match.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libpango-1.0-0 libpangoft2-1.0-0 \
+      libgdk-pixbuf-2.0-0 libffi8 shared-mime-info \
+      fonts-liberation fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
