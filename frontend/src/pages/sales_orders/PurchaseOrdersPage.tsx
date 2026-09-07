@@ -188,7 +188,7 @@ function Register({ canOperate }: { canOperate: boolean }) {
                 <Th>PO date</Th>
                 <Th>Status</Th>
                 <Th className="text-right">Lines</Th>
-                <Th className="text-right">Total sell</Th>
+                <Th className="text-right">Order value</Th>
                 <Th className="text-right">Actions</Th>
               </Tr>
             </THead>
@@ -203,7 +203,9 @@ function Register({ canOperate }: { canOperate: boolean }) {
                     <Badge tone={PO_STATUS_TONE[po.status]}>{PO_STATUS_LABEL[po.status]}</Badge>
                   </Td>
                   <Td className="text-right tabular-nums">{po.line_count}</Td>
-                  <Td className="text-right tabular-nums">{rupees(po.total_sell_paise)}</Td>
+                  {/* Client-facing order value (client-sell total + agency fee) — visible to
+                      all. The ACTUAL sell total is admin-only and not shown in the register. */}
+                  <Td className="text-right tabular-nums">{rupees(po.total_with_agency_paise)}</Td>
                   <Td>
                     <div className="flex justify-end">
                       <Link

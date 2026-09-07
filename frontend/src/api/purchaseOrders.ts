@@ -36,6 +36,15 @@ export const PO_STATUSES: readonly POStatus[] = [
 /** A single PO line's status (backend LineStatus / ck_po_line_status). */
 export type LineStatus = 'OPEN' | 'SHORT_CLOSED' | 'CLOSED';
 
+/** How a PO-header agency fee is charged (backend AgencyFeeType). */
+export type AgencyFeeType = 'NONE' | 'PERCENT' | 'FIXED';
+
+export const AGENCY_FEE_LABEL: Record<AgencyFeeType, string> = {
+  NONE: 'None',
+  PERCENT: '% of order value',
+  FIXED: 'Fixed ₹',
+};
+
 type Tone = 'green' | 'red' | 'amber' | 'slate' | 'blue';
 
 /** Sentence-case labels + badge tones for a PO's lifecycle status. */
@@ -86,7 +95,8 @@ export function rupeesToPaise(input: string): number | null {
 /** A register row (backend `POSummaryOut`). */
 export interface POSummary {
   id: string;
-  po_number: string;
+  /** Now OPTIONAL on the PO — may be null and added later via an amend. */
+  po_number: string | null;
   client_id: string;
   client_name: string | null;
   project_id: string;
@@ -96,8 +106,28 @@ export interface POSummary {
   expected_procurement_date: string | null;
   status: POStatus;
   line_count: number;
-  /** PAISE — sum of every line's sell value. */
-  total_sell_paise: number;
+  /** PAISE — sum of every line's ACTUAL sell value. ADMIN-ONLY: the API returns `null`
+   * for non-admins, so this is nullable and must be rendered with `rupeesOrDash`. */
+  total_sell_paise: number | null;
+  /** PAISE — sum of every line's CLIENT-quoted GOODS value. Visible to everyone. */
+  total_client_sell_paise: number;
+  /** PAISE — sum of every live line's CLIENT-quoted freight. Revenue billed to the client;
+   * visible to everyone. */
+  total_client_freight_paise: number;
+  /** PAISE — packaging + handling + other flat per-line client charges (revenue). Visible. */
+  total_client_extras_paise: number;
+  /** Header-level agency fee, charged on the entire client billing. Visible to everyone. */
+  agency_fee_type: AgencyFeeType;
+  /** Set when `agency_fee_type === 'PERCENT'` (e.g. 2.5 for 2.5%). */
+  agency_fee_percent: number | null;
+  /** Set (PAISE) when `agency_fee_type === 'FIXED'`. */
+  agency_fee_amount_paise: number | null;
+  /** PAISE — the resolved agency fee (percent-of-entire-client-billing or the fixed amount).
+   * Agency fee is REVENUE we charge the client, not a cost — visible to everyone. */
+  agency_fee_computed_paise: number;
+  /** PAISE — entire client billing (goods + freight + packaging/handling/other) + agency fee
+   * = full client-facing revenue. */
+  total_with_agency_paise: number;
   /** ISO datetime string. */
   created_at: string;
 }
@@ -119,9 +149,22 @@ export interface POLine {
   uom: string;
   /** Decimal serialised as a string. */
   ordered_qty: string;
+  /** Our CP (billed) — always visible. */
   cost_price_paise: number;
-  sell_price_paise: number;
-  freight_paise: number;
+  /** Original CP (optional) — visible. */
+  original_cost_price_paise: number | null;
+  /** Client-quoted sell — the primary shown sell; visible. */
+  client_sell_price_paise: number;
+  /** Vendor sell (optional) — visible. */
+  vendor_sell_price_paise: number | null;
+  /** Actual sell — ADMIN-ONLY: the API returns null for non-admins. */
+  sell_price_paise: number | null;
+  /** Client freight (optional) — visible. */
+  client_freight_paise: number | null;
+  /** Vendor freight (optional) — visible. */
+  vendor_freight_paise: number | null;
+  /** Actual freight — ADMIN-ONLY: the API returns null for non-admins. */
+  freight_paise: number | null;
   packaging_paise: number;
   handling_paise: number;
   other_paise: number;
@@ -138,6 +181,8 @@ export interface PODetail extends POSummary {
   notes: string | null;
   soft_copy_file: SoftCopyFile | null;
   amendments_count: number;
+  // Agency fee (type/percent/amount + computed + with-agency total) is inherited from
+  // POSummary — the backend returns it on both the summary and the detail shapes.
   lines: POLine[];
 }
 
@@ -148,8 +193,21 @@ export interface POLineInput {
   uom?: string;
   /** Decimal string or number; must be > 0. */
   ordered_qty: string;
+  /** Our CP (billed) — required. */
   cost_price_paise: number;
-  sell_price_paise: number;
+  /** Original CP — optional. */
+  original_cost_price_paise?: number;
+  /** Client-quoted sell — required. */
+  client_sell_price_paise: number;
+  /** Vendor sell — optional. */
+  vendor_sell_price_paise?: number;
+  /** Actual sell — ADMIN-ONLY; omit unless the operator is an admin. */
+  sell_price_paise?: number;
+  /** Client freight — optional. */
+  client_freight_paise?: number;
+  /** Vendor freight — optional. */
+  vendor_freight_paise?: number;
+  /** Actual freight — ADMIN-ONLY; omit unless the operator is an admin. */
   freight_paise?: number;
   packaging_paise?: number;
   handling_paise?: number;
@@ -158,9 +216,19 @@ export interface POLineInput {
   tax_rate?: number;
 }
 
+/** The agency-fee slice shared by create + amend headers. */
+export interface AgencyFeeInput {
+  agency_fee_type?: AgencyFeeType;
+  /** Sent when `agency_fee_type === 'PERCENT'`. */
+  agency_fee_percent?: number;
+  /** Sent (PAISE) when `agency_fee_type === 'FIXED'`. */
+  agency_fee_amount_paise?: number;
+}
+
 /** Create body (backend `POCreateIn`). */
-export interface POCreateInput {
-  po_number: string;
+export interface POCreateInput extends AgencyFeeInput {
+  /** Optional now — a PO can be created without a number and get one later. */
+  po_number?: string | null;
   client_id: string;
   client_gstin_id?: string | null;
   project_id: string;
@@ -173,8 +241,9 @@ export interface POCreateInput {
 }
 
 /** Amend body (backend `POAmendIn`) — only supplied keys apply; `lines` fully replaces. */
-export interface POAmendInput {
-  po_number?: string;
+export interface POAmendInput extends AgencyFeeInput {
+  /** Add or change the PO number (it may have been created without one). */
+  po_number?: string | null;
   client_gstin_id?: string | null;
   project_id?: string;
   po_date?: string;
@@ -283,14 +352,23 @@ export function usePurchaseOrderQuery(id: string | null): UseQueryResult<PODetai
 }
 
 /**
- * Active products for the line-item picker. Self-contained (GETs `/products?active=true`
- * directly) so this file does not depend on the parallel Products FE agent's api module.
+ * SERVER-searched active products for the line-item picker. There can be hundreds of
+ * products, so the combobox drives this with its debounced query text: it GETs
+ * `/products?q=<query>&active=true&limit=200`. An empty query loads the first page.
+ * `keepPreviousData` keeps the last results on screen while the next page loads so the
+ * list doesn't flicker as the operator types.
  */
-export function useProductPicker(): UseQueryResult<PickerProduct[], Error> {
+export function useProductSearch(query: string): UseQueryResult<PickerProduct[], Error> {
   const { get } = useApi();
+  const q = query.trim();
   return useQuery<PickerProduct[], Error>({
-    queryKey: poKeys.products,
-    queryFn: ({ signal }) => get<PickerProduct[]>('/products?active=true', signal),
+    queryKey: [...poKeys.products, 'search', q] as const,
+    queryFn: ({ signal }) => {
+      const params = new URLSearchParams({ active: 'true', limit: '200' });
+      if (q) params.set('q', q);
+      return get<PickerProduct[]>(`/products?${params.toString()}`, signal);
+    },
+    placeholderData: (prev) => prev,
   });
 }
 

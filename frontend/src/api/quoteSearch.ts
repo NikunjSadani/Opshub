@@ -31,10 +31,16 @@ export interface QuoteRow {
   /** Decimal quantity as a string (never coerced to float). */
   ordered_qty: string;
   cost_price_paise: number;
-  sell_price_paise: number;
-  /** Margin percentage, or null when it can't be computed. */
+  /** The VISIBLE client-quoted price (returned to everyone). */
+  client_sell_price_paise: number;
+  /** ADMIN-ONLY actual sell — `null` for non-IAM users. */
+  sell_price_paise: number | null;
+  /** Margin over the actual sell — ADMIN-ONLY, `null` for non-IAM users or when uncomputable. */
   margin_pct: number | null;
-  freight_paise: number;
+  /** The VISIBLE client-quoted freight (returned to everyone). */
+  client_freight_paise: number;
+  /** ADMIN-ONLY actual freight — `null` for non-IAM users. */
+  freight_paise: number | null;
   packaging_paise: number;
   handling_paise: number;
   other_paise: number;
@@ -49,7 +55,10 @@ export interface TrendPoint {
   client_name: string;
   ordered_qty: string;
   cost_price_paise: number;
-  sell_price_paise: number;
+  /** The VISIBLE client-quoted price (returned to everyone). */
+  client_sell_price_paise: number;
+  /** ADMIN-ONLY actual sell — `null` for non-IAM users. */
+  sell_price_paise: number | null;
 }
 
 /**
@@ -63,9 +72,9 @@ export interface QuoteFilters {
   client_id?: string;
   date_from?: string;
   date_to?: string;
-  /** Minimum sell price, in RUPEES (converted to `budget_min_paise`). */
+  /** Minimum CLIENT-quoted price, in RUPEES (converted to `budget_min_paise`). */
   budget_min?: string;
-  /** Maximum sell price, in RUPEES (converted to `budget_max_paise`). */
+  /** Maximum CLIENT-quoted price, in RUPEES (converted to `budget_max_paise`). */
   budget_max?: string;
 }
 

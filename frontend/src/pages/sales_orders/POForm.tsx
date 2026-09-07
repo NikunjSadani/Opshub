@@ -1,22 +1,27 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   Button,
   ErrorState,
-  Loading,
   PageHeader,
+  SearchableSelect,
   SelectField,
   TextArea,
   TextField,
   useToast,
+  type SearchableSelectOption,
 } from '../../ui';
 import { ApiError, useApi } from '../../api/client';
+import { usePermissions } from '../../auth/AuthProvider';
 import { useClientsQuery, useProjectsQuery } from '../../api/projects';
 import {
+  AGENCY_FEE_LABEL,
   rupeesToPaise,
   useClientGstinsQuery,
   useCreatePurchaseOrder,
-  useProductPicker,
+  useProductSearch,
+  type AgencyFeeType,
+  type PickerProduct,
   type POCreateInput,
   type POLineInput,
 } from '../../api/purchaseOrders';
@@ -28,6 +33,21 @@ function errorMessage(err: unknown): string {
   return 'Something went wrong.';
 }
 
+/** A concise, stable label for a product in the picker. */
+function productLabel(p: PickerProduct): string {
+  return `${p.code ? `${p.code} — ` : ''}${p.name}${p.brand ? ` (${p.brand})` : ''}`;
+}
+
+/** Debounce a rapidly-changing value (e.g. the product search query) by `delay` ms. */
+function useDebounced<T>(value: T, delay = 250): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
+
 /** One editable line row (money is kept as the operator's rupee text until submit). */
 interface LineRow {
   key: number;
@@ -35,9 +55,18 @@ interface LineRow {
   description: string;
   uom: string;
   qty: string;
-  cost: string;
-  sell: string;
-  freight: string;
+  // Cost
+  originalCost: string;
+  cost: string; // Our CP (billed) — required
+  // Sell
+  clientSell: string; // required
+  vendorSell: string;
+  actualSell: string; // admin-only
+  // Freight
+  clientFreight: string;
+  vendorFreight: string;
+  actualFreight: string; // admin-only
+  // Other charges
   packaging: string;
   handling: string;
   other: string;
@@ -52,9 +81,14 @@ function blankLine(): LineRow {
     description: '',
     uom: '',
     qty: '',
+    originalCost: '',
     cost: '',
-    sell: '',
-    freight: '',
+    clientSell: '',
+    vendorSell: '',
+    actualSell: '',
+    clientFreight: '',
+    vendorFreight: '',
+    actualFreight: '',
     packaging: '',
     handling: '',
     other: '',
@@ -68,7 +102,7 @@ function qtyValid(qty: string): boolean {
   return Number.isFinite(n) && n > 0;
 }
 
-/** An optional money cell: blank is fine (→ 0), otherwise it must parse to paise. */
+/** An optional money cell: blank is fine (→ omitted), otherwise it must parse to paise. */
 function optionalMoneyValid(text: string): boolean {
   return text.trim() === '' || rupeesToPaise(text) != null;
 }
@@ -80,13 +114,24 @@ function taxValid(text: string): boolean {
   return Number.isFinite(n) && n >= 0 && n <= 100;
 }
 
+/** A percent 0..100 (used for the agency fee). */
+function percentValid(text: string): boolean {
+  const n = Number(text.trim());
+  return text.trim() !== '' && Number.isFinite(n) && n >= 0 && n <= 100;
+}
+
 function lineValid(row: LineRow): boolean {
   return (
     !!row.productId &&
     qtyValid(row.qty) &&
     rupeesToPaise(row.cost) != null &&
-    rupeesToPaise(row.sell) != null &&
-    optionalMoneyValid(row.freight) &&
+    rupeesToPaise(row.clientSell) != null &&
+    optionalMoneyValid(row.originalCost) &&
+    optionalMoneyValid(row.vendorSell) &&
+    optionalMoneyValid(row.actualSell) &&
+    optionalMoneyValid(row.clientFreight) &&
+    optionalMoneyValid(row.vendorFreight) &&
+    optionalMoneyValid(row.actualFreight) &&
     optionalMoneyValid(row.packaging) &&
     optionalMoneyValid(row.handling) &&
     optionalMoneyValid(row.other) &&
@@ -94,10 +139,28 @@ function lineValid(row: LineRow): boolean {
   );
 }
 
+/** Our CP = Original CP + (Vendor SP − Original CP) / 2 (computed in paise, returned as ₹). */
+function computeOurCp(originalCost: string, vendorSell: string): string | null {
+  const o = rupeesToPaise(originalCost);
+  const v = rupeesToPaise(vendorSell);
+  if (o == null || v == null) return null;
+  const cp = o + Math.round((v - o) / 2);
+  return (cp / 100).toFixed(2);
+}
+
+/** Optional-money → paise, or undefined when the cell is blank. */
+function optMoney(text: string): number | undefined {
+  return text.trim() ? (rupeesToPaise(text) as number) : undefined;
+}
+
 /** The Purchase Order create form (OPERATE). */
 export function POForm() {
   const toast = useToast();
   const navigate = useNavigate();
+  const perms = usePermissions();
+  // Only admins (platform IAM) may view/enter the "actual" sell + freight — matches
+  // the backend has_platform(IAM) gate that masks those fields for everyone else.
+  const isAdmin = perms.hasPlatform('iam');
 
   const [poNumber, setPoNumber] = useState('');
   const [clientId, setClientId] = useState('');
@@ -107,6 +170,12 @@ export function POForm() {
   const [expectedDate, setExpectedDate] = useState('');
   const [notes, setNotes] = useState('');
   const [lines, setLines] = useState<LineRow[]>([blankLine()]);
+
+  // Agency fee (PO header). Value input is conditional on the type.
+  const [agencyFeeType, setAgencyFeeType] = useState<AgencyFeeType>('NONE');
+  const [agencyFeePercent, setAgencyFeePercent] = useState('');
+  const [agencyFeeAmount, setAgencyFeeAmount] = useState('');
+
   // Optional soft-copy attachment: uploaded up-front to `/files/upload`, then its id
   // is sent as `soft_copy_file_id` on create. Upload needs OPERATE (which PO create
   // already requires), so no extra gate here.
@@ -119,19 +188,47 @@ export function POForm() {
   // backend rejects a non-active project). Reset project/GSTIN when the client changes.
   const projectsQuery = useProjectsQuery({ client_id: clientId, status: 'ACTIVE' });
   const gstinsQuery = useClientGstinsQuery(clientId || null);
-  const productsQuery = useProductPicker();
   const create = useCreatePurchaseOrder();
 
-  const products = productsQuery.data ?? [];
+  // SERVER-searched product picker: one debounced query drives one fetch, and the
+  // options are shared by every line's combobox. `selectedProducts` remembers the
+  // products already chosen so their labels stay stable even when they drop out of
+  // the latest result page.
+  const [productQuery, setProductQuery] = useState('');
+  const debouncedProductQuery = useDebounced(productQuery, 250);
+  const productsQuery = useProductSearch(debouncedProductQuery);
+  const products = useMemo(() => productsQuery.data ?? [], [productsQuery.data]);
+  const [selectedProducts, setSelectedProducts] = useState<Record<string, PickerProduct>>({});
+
+  const productOptions = useMemo<SearchableSelectOption[]>(() => {
+    const map = new Map<string, string>();
+    for (const p of products) map.set(p.id, productLabel(p));
+    // Preserve any selected-but-missing product's label so the picker stays stable.
+    for (const [id, p] of Object.entries(selectedProducts)) {
+      if (!map.has(id)) map.set(id, productLabel(p));
+    }
+    return Array.from(map, ([value, label]) => ({ value, label }));
+  }, [products, selectedProducts]);
 
   function updateLine(key: number, patch: Partial<LineRow>) {
     setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  }
+  function selectProduct(key: number, id: string) {
+    const found = products.find((p) => p.id === id);
+    if (found) setSelectedProducts((prev) => ({ ...prev, [id]: found }));
+    updateLine(key, { productId: id });
   }
   function addLine() {
     setLines((prev) => [...prev, blankLine()]);
   }
   function removeLine(key: number) {
     setLines((prev) => (prev.length === 1 ? prev : prev.filter((l) => l.key !== key)));
+  }
+  function computeLineCp(key: number) {
+    const row = lines.find((l) => l.key === key);
+    if (!row) return;
+    const cp = computeOurCp(row.originalCost, row.vendorSell);
+    if (cp != null) updateLine(key, { cost: cp });
   }
 
   function onClientChange(id: string) {
@@ -160,14 +257,20 @@ export function POForm() {
     }
   }
 
+  const agencyFeeValid =
+    agencyFeeType === 'NONE' ||
+    (agencyFeeType === 'PERCENT' && percentValid(agencyFeePercent)) ||
+    (agencyFeeType === 'FIXED' && rupeesToPaise(agencyFeeAmount) != null);
+
   const linesValid = lines.every(lineValid);
+  // NB: po_number is now OPTIONAL — it can be added later on the detail page.
   const canSubmit =
-    poNumber.trim() !== '' &&
     !!clientId &&
     !!projectId &&
     !!poDate &&
     lines.length > 0 &&
     linesValid &&
+    agencyFeeValid &&
     !uploadingSoftCopy;
 
   function onSubmit() {
@@ -179,8 +282,16 @@ export function POForm() {
       ordered_qty: l.qty.trim(),
       // Non-null: canSubmit already proved every required money cell parses.
       cost_price_paise: rupeesToPaise(l.cost) as number,
-      sell_price_paise: rupeesToPaise(l.sell) as number,
-      freight_paise: l.freight.trim() ? (rupeesToPaise(l.freight) as number) : 0,
+      original_cost_price_paise: optMoney(l.originalCost),
+      client_sell_price_paise: rupeesToPaise(l.clientSell) as number,
+      vendor_sell_price_paise: optMoney(l.vendorSell),
+      // Actual sell/freight are admin-only: never send them for a non-admin (the
+      // inputs aren't even rendered), and only when the operator actually filled them.
+      sell_price_paise: isAdmin ? optMoney(l.actualSell) : undefined,
+      client_freight_paise: optMoney(l.clientFreight),
+      vendor_freight_paise: optMoney(l.vendorFreight),
+      freight_paise: isAdmin ? optMoney(l.actualFreight) : undefined,
+      // Packaging / Handling / Other kept as-is: blank → 0 (as the prior form sent them).
       packaging_paise: l.packaging.trim() ? (rupeesToPaise(l.packaging) as number) : 0,
       handling_paise: l.handling.trim() ? (rupeesToPaise(l.handling) as number) : 0,
       other_paise: l.other.trim() ? (rupeesToPaise(l.other) as number) : 0,
@@ -188,7 +299,7 @@ export function POForm() {
     }));
 
     const body: POCreateInput = {
-      po_number: poNumber.trim(),
+      po_number: poNumber.trim() || undefined,
       client_id: clientId,
       client_gstin_id: gstinId || undefined,
       project_id: projectId,
@@ -196,12 +307,17 @@ export function POForm() {
       expected_procurement_date: expectedDate || undefined,
       notes: notes.trim() || undefined,
       soft_copy_file_id: softCopy?.id ?? undefined,
+      agency_fee_type: agencyFeeType,
+      agency_fee_percent:
+        agencyFeeType === 'PERCENT' ? Number(agencyFeePercent.trim()) : undefined,
+      agency_fee_amount_paise:
+        agencyFeeType === 'FIXED' ? (rupeesToPaise(agencyFeeAmount) as number) : undefined,
       lines: payloadLines,
     };
 
     create.mutate(body, {
       onSuccess: (po) => {
-        toast.success(`Purchase order ${po.po_number} created.`);
+        toast.success(`Purchase order ${po.po_number ?? '(no number)'} created.`);
         navigate(`${SALES_ORDERS_BASE}/${po.id}`);
       },
       onError: (err) => toast.error(errorMessage(err)),
@@ -233,12 +349,12 @@ export function POForm() {
       <div className="max-w-4xl">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <TextField
-            label="PO number"
-            required
+            label="PO number (optional)"
             value={poNumber}
             onChange={(e) => setPoNumber(e.target.value)}
             maxLength={64}
             placeholder="e.g. PO-2026-001"
+            hint="Optional — you can add it later from the PO page."
           />
           <SelectField
             label="Client"
@@ -344,6 +460,51 @@ export function POForm() {
           />
         </div>
 
+        {/* Agency fee — header-level, charged on the whole order. */}
+        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <SelectField
+            label="Agency fee"
+            value={agencyFeeType}
+            onChange={(e) => setAgencyFeeType(e.target.value as AgencyFeeType)}
+          >
+            {(Object.keys(AGENCY_FEE_LABEL) as AgencyFeeType[]).map((t) => (
+              <option key={t} value={t}>
+                {AGENCY_FEE_LABEL[t]}
+              </option>
+            ))}
+          </SelectField>
+          {agencyFeeType === 'PERCENT' && (
+            <TextField
+              label="Agency fee %"
+              required
+              inputMode="decimal"
+              value={agencyFeePercent}
+              onChange={(e) => setAgencyFeePercent(e.target.value)}
+              error={
+                agencyFeePercent.trim() !== '' && !percentValid(agencyFeePercent)
+                  ? '0–100'
+                  : undefined
+              }
+              placeholder="e.g. 2.5"
+            />
+          )}
+          {agencyFeeType === 'FIXED' && (
+            <TextField
+              label="Agency fee ₹"
+              required
+              inputMode="decimal"
+              value={agencyFeeAmount}
+              onChange={(e) => setAgencyFeeAmount(e.target.value)}
+              error={
+                agencyFeeAmount.trim() !== '' && rupeesToPaise(agencyFeeAmount) == null
+                  ? 'Invalid amount'
+                  : undefined
+              }
+              placeholder="e.g. 5000"
+            />
+          )}
+        </div>
+
         <div className="mt-3">
           <TextArea
             label="Notes (optional)"
@@ -396,132 +557,224 @@ export function POForm() {
 
         {productsQuery.isError ? (
           <ErrorState error={productsQuery.error} onRetry={() => void productsQuery.refetch()} />
-        ) : productsQuery.isPending ? (
-          <Loading label="Loading products…" />
-        ) : products.length === 0 ? (
-          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            No active products exist yet. Add products in the Products tab before creating a PO.
-          </p>
         ) : (
           <div className="space-y-4">
-            {lines.map((line, idx) => (
-              <div
-                key={line.key}
-                className="rounded-xl border border-slate-200 bg-white p-3"
-              >
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                    Line {idx + 1}
-                  </span>
-                  {lines.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => removeLine(line.key)}
-                      className="text-xs font-medium text-rose-600 hover:text-rose-700"
-                    >
-                      Remove
-                    </button>
-                  )}
+            {lines.map((line, idx) => {
+              const canCompute =
+                rupeesToPaise(line.originalCost) != null && rupeesToPaise(line.vendorSell) != null;
+              return (
+                <div key={line.key} className="rounded-xl border border-slate-200 bg-white p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                      Line {idx + 1}
+                    </span>
+                    {lines.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => removeLine(line.key)}
+                        className="text-xs font-medium text-rose-600 hover:text-rose-700"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Product + quantity/UOM/tax */}
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="sm:col-span-2 lg:col-span-1">
+                      <SearchableSelect
+                        label="Product"
+                        required
+                        value={line.productId || null}
+                        options={productOptions}
+                        onChange={(id) => selectProduct(line.key, id)}
+                        onQueryChange={setProductQuery}
+                        placeholder="Search products…"
+                        hint={productsQuery.isFetching ? 'Searching…' : undefined}
+                      />
+                    </div>
+                    <TextField
+                      label="Ordered qty"
+                      required
+                      inputMode="decimal"
+                      value={line.qty}
+                      onChange={(e) => updateLine(line.key, { qty: e.target.value })}
+                      error={
+                        line.qty.trim() !== '' && !qtyValid(line.qty) ? 'Must be > 0' : undefined
+                      }
+                    />
+                    <TextField
+                      label="UOM (optional)"
+                      value={line.uom}
+                      onChange={(e) => updateLine(line.key, { uom: e.target.value })}
+                      maxLength={20}
+                      placeholder="e.g. PCS"
+                    />
+                    <TextField
+                      label="Tax rate % (optional)"
+                      inputMode="decimal"
+                      value={line.taxRate}
+                      onChange={(e) => updateLine(line.key, { taxRate: e.target.value })}
+                      error={!taxValid(line.taxRate) ? '0–100' : undefined}
+                    />
+                  </div>
+
+                  {/* Cost / Sell / Freight groups */}
+                  <div className="mt-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
+                    {/* Cost */}
+                    <fieldset className="rounded-lg border border-slate-200 p-2">
+                      <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Cost
+                      </legend>
+                      <div className="grid grid-cols-2 gap-2">
+                        <TextField
+                          label="Original CP ₹ (optional)"
+                          inputMode="decimal"
+                          value={line.originalCost}
+                          onChange={(e) => updateLine(line.key, { originalCost: e.target.value })}
+                          error={
+                            !optionalMoneyValid(line.originalCost) ? 'Invalid amount' : undefined
+                          }
+                        />
+                        <TextField
+                          label="Our CP ₹"
+                          required
+                          inputMode="decimal"
+                          value={line.cost}
+                          onChange={(e) => updateLine(line.key, { cost: e.target.value })}
+                          error={
+                            line.cost.trim() !== '' && rupeesToPaise(line.cost) == null
+                              ? 'Invalid amount'
+                              : undefined
+                          }
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => computeLineCp(line.key)}
+                        disabled={!canCompute}
+                        className="mt-2 text-xs font-medium text-brand-600 hover:text-brand-700 disabled:cursor-not-allowed disabled:text-slate-300"
+                        title="Our CP = Original CP + (Vendor sell − Original CP) / 2"
+                      >
+                        Compute from 50%
+                      </button>
+                    </fieldset>
+
+                    {/* Sell */}
+                    <fieldset className="rounded-lg border border-slate-200 p-2">
+                      <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Sell
+                      </legend>
+                      <div className="grid grid-cols-2 gap-2">
+                        <TextField
+                          label="Client sell ₹"
+                          required
+                          inputMode="decimal"
+                          value={line.clientSell}
+                          onChange={(e) => updateLine(line.key, { clientSell: e.target.value })}
+                          error={
+                            line.clientSell.trim() !== '' && rupeesToPaise(line.clientSell) == null
+                              ? 'Invalid amount'
+                              : undefined
+                          }
+                        />
+                        <TextField
+                          label="Vendor sell ₹ (optional)"
+                          inputMode="decimal"
+                          value={line.vendorSell}
+                          onChange={(e) => updateLine(line.key, { vendorSell: e.target.value })}
+                          error={
+                            !optionalMoneyValid(line.vendorSell) ? 'Invalid amount' : undefined
+                          }
+                        />
+                        {isAdmin && (
+                          <TextField
+                            label="🔒 Actual sell ₹ (admin only)"
+                            inputMode="decimal"
+                            value={line.actualSell}
+                            onChange={(e) => updateLine(line.key, { actualSell: e.target.value })}
+                            error={
+                              !optionalMoneyValid(line.actualSell) ? 'Invalid amount' : undefined
+                            }
+                          />
+                        )}
+                      </div>
+                    </fieldset>
+
+                    {/* Freight */}
+                    <fieldset className="rounded-lg border border-slate-200 p-2">
+                      <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Freight
+                      </legend>
+                      <div className="grid grid-cols-2 gap-2">
+                        <TextField
+                          label="Client freight ₹ (optional)"
+                          inputMode="decimal"
+                          value={line.clientFreight}
+                          onChange={(e) => updateLine(line.key, { clientFreight: e.target.value })}
+                          error={
+                            !optionalMoneyValid(line.clientFreight) ? 'Invalid amount' : undefined
+                          }
+                        />
+                        <TextField
+                          label="Vendor freight ₹ (optional)"
+                          inputMode="decimal"
+                          value={line.vendorFreight}
+                          onChange={(e) => updateLine(line.key, { vendorFreight: e.target.value })}
+                          error={
+                            !optionalMoneyValid(line.vendorFreight) ? 'Invalid amount' : undefined
+                          }
+                        />
+                        {isAdmin && (
+                          <TextField
+                            label="🔒 Actual freight ₹ (admin only)"
+                            inputMode="decimal"
+                            value={line.actualFreight}
+                            onChange={(e) =>
+                              updateLine(line.key, { actualFreight: e.target.value })
+                            }
+                            error={
+                              !optionalMoneyValid(line.actualFreight) ? 'Invalid amount' : undefined
+                            }
+                          />
+                        )}
+                      </div>
+                    </fieldset>
+                  </div>
+
+                  {/* Other charges + description */}
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <TextField
+                      label="Packaging ₹ (optional)"
+                      inputMode="decimal"
+                      value={line.packaging}
+                      onChange={(e) => updateLine(line.key, { packaging: e.target.value })}
+                      error={!optionalMoneyValid(line.packaging) ? 'Invalid amount' : undefined}
+                    />
+                    <TextField
+                      label="Handling ₹ (optional)"
+                      inputMode="decimal"
+                      value={line.handling}
+                      onChange={(e) => updateLine(line.key, { handling: e.target.value })}
+                      error={!optionalMoneyValid(line.handling) ? 'Invalid amount' : undefined}
+                    />
+                    <TextField
+                      label="Other ₹ (optional)"
+                      inputMode="decimal"
+                      value={line.other}
+                      onChange={(e) => updateLine(line.key, { other: e.target.value })}
+                      error={!optionalMoneyValid(line.other) ? 'Invalid amount' : undefined}
+                    />
+                    <TextField
+                      label="Description (optional)"
+                      value={line.description}
+                      onChange={(e) => updateLine(line.key, { description: e.target.value })}
+                      maxLength={500}
+                    />
+                  </div>
                 </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  <SelectField
-                    label="Product"
-                    required
-                    value={line.productId}
-                    onChange={(e) => updateLine(line.key, { productId: e.target.value })}
-                  >
-                    <option value="">Select a product…</option>
-                    {products.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.code ? `${p.code} — ` : ''}
-                        {p.name}
-                        {p.brand ? ` (${p.brand})` : ''}
-                      </option>
-                    ))}
-                  </SelectField>
-                  <TextField
-                    label="Ordered qty"
-                    required
-                    inputMode="decimal"
-                    value={line.qty}
-                    onChange={(e) => updateLine(line.key, { qty: e.target.value })}
-                    error={line.qty.trim() !== '' && !qtyValid(line.qty) ? 'Must be > 0' : undefined}
-                  />
-                  <TextField
-                    label="UOM (optional)"
-                    value={line.uom}
-                    onChange={(e) => updateLine(line.key, { uom: e.target.value })}
-                    maxLength={20}
-                    placeholder="e.g. PCS"
-                  />
-                  <TextField
-                    label="Tax rate % (optional)"
-                    inputMode="decimal"
-                    value={line.taxRate}
-                    onChange={(e) => updateLine(line.key, { taxRate: e.target.value })}
-                    error={!taxValid(line.taxRate) ? '0–100' : undefined}
-                  />
-                  <TextField
-                    label="Cost price ₹"
-                    required
-                    inputMode="decimal"
-                    value={line.cost}
-                    onChange={(e) => updateLine(line.key, { cost: e.target.value })}
-                    error={
-                      line.cost.trim() !== '' && rupeesToPaise(line.cost) == null
-                        ? 'Invalid amount'
-                        : undefined
-                    }
-                  />
-                  <TextField
-                    label="Sell price ₹"
-                    required
-                    inputMode="decimal"
-                    value={line.sell}
-                    onChange={(e) => updateLine(line.key, { sell: e.target.value })}
-                    error={
-                      line.sell.trim() !== '' && rupeesToPaise(line.sell) == null
-                        ? 'Invalid amount'
-                        : undefined
-                    }
-                  />
-                  <TextField
-                    label="Freight ₹ (optional)"
-                    inputMode="decimal"
-                    value={line.freight}
-                    onChange={(e) => updateLine(line.key, { freight: e.target.value })}
-                    error={!optionalMoneyValid(line.freight) ? 'Invalid amount' : undefined}
-                  />
-                  <TextField
-                    label="Packaging ₹ (optional)"
-                    inputMode="decimal"
-                    value={line.packaging}
-                    onChange={(e) => updateLine(line.key, { packaging: e.target.value })}
-                    error={!optionalMoneyValid(line.packaging) ? 'Invalid amount' : undefined}
-                  />
-                  <TextField
-                    label="Handling ₹ (optional)"
-                    inputMode="decimal"
-                    value={line.handling}
-                    onChange={(e) => updateLine(line.key, { handling: e.target.value })}
-                    error={!optionalMoneyValid(line.handling) ? 'Invalid amount' : undefined}
-                  />
-                  <TextField
-                    label="Other ₹ (optional)"
-                    inputMode="decimal"
-                    value={line.other}
-                    onChange={(e) => updateLine(line.key, { other: e.target.value })}
-                    error={!optionalMoneyValid(line.other) ? 'Invalid amount' : undefined}
-                  />
-                  <TextField
-                    label="Description (optional)"
-                    value={line.description}
-                    onChange={(e) => updateLine(line.key, { description: e.target.value })}
-                    maxLength={500}
-                  />
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -531,7 +784,8 @@ export function POForm() {
           </Button>
           {!canSubmit && !create.isPending && (
             <span className="text-xs text-slate-500">
-              Fill the PO number, client, project, date, and at least one valid line.
+              Fill the client, project, date, and at least one valid line (Our CP + Client sell).
+              PO number is optional.
             </span>
           )}
         </div>

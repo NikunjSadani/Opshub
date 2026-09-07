@@ -20,7 +20,8 @@ from app.db import get_db
 from app.modules.sales_orders import quote_service
 from app.platform import rbac
 from app.platform.auth import current_user
-from app.platform.models import User
+from app.platform.models import PlatformPerm, User
+from app.platform.rbac import has_platform
 
 router = APIRouter()
 
@@ -29,9 +30,13 @@ class QuoteRow(BaseModel):
     """One priced line in the price book, joined to its product/PO/client/project.
 
     Money is per-UNIT integer paise; freight/packaging/handling/other are per-LINE paise.
-    `margin_pct` is the gross margin over sell (Decimal-rounded 2dp) or null when
-    sell is 0. `ordered_qty` / `tax_rate` are serialized as strings to preserve the
-    exact Decimal (no float rounding)."""
+    `client_sell_price_paise` / `client_freight_paise` are the VISIBLE client-quoted figures
+    (returned to everyone). `sell_price_paise` (the ADMIN-ONLY actual sell), `freight_paise`
+    (the ADMIN-ONLY actual freight) and `margin_pct` (cost-vs-actual gross margin over that
+    actual, Decimal-rounded 2dp) are returned ONLY to IAM admins — `null` for everyone else,
+    so a VIEW user never sees the actual sell, the actual freight, or the true margin.
+    `ordered_qty` / `tax_rate` are serialized as strings to preserve the exact Decimal
+    (no float rounding)."""
 
     po_line_item_id: int
     product_id: int
@@ -47,9 +52,11 @@ class QuoteRow(BaseModel):
     po_date: date
     ordered_qty: str
     cost_price_paise: int
-    sell_price_paise: int
+    client_sell_price_paise: int
+    sell_price_paise: int | None
     margin_pct: float | None
-    freight_paise: int
+    client_freight_paise: int
+    freight_paise: int | None
     packaging_paise: int
     handling_paise: int
     other_paise: int
@@ -57,17 +64,21 @@ class QuoteRow(BaseModel):
 
 
 class TrendPoint(BaseModel):
-    """One point on a product's price-history trend (oldest-first from the service)."""
+    """One point on a product's price-history trend (oldest-first from the service).
+
+    `client_sell_price_paise` (the client-quoted price) is returned to everyone;
+    `sell_price_paise` (the ADMIN-ONLY actual sell) is `null` for non-IAM users."""
 
     po_date: date
     po_number: str
     client_name: str
     ordered_qty: str
     cost_price_paise: int
-    sell_price_paise: int
+    client_sell_price_paise: int
+    sell_price_paise: int | None
 
 
-def _quote_row(r: Any) -> QuoteRow:
+def _quote_row(r: Any, *, is_admin: bool) -> QuoteRow:
     return QuoteRow(
         po_line_item_id=r.po_line_item_id,
         product_id=r.product_id,
@@ -83,9 +94,16 @@ def _quote_row(r: Any) -> QuoteRow:
         po_date=r.po_date,
         ordered_qty=str(r.ordered_qty),
         cost_price_paise=r.cost_price_paise,
-        sell_price_paise=r.sell_price_paise,
-        margin_pct=quote_service.margin_pct(r.cost_price_paise, r.sell_price_paise),
-        freight_paise=r.freight_paise,
+        client_sell_price_paise=r.client_sell_price_paise,
+        # ADMIN-ONLY: mask the actual sell, actual freight + true margin for non-IAM users.
+        sell_price_paise=r.sell_price_paise if is_admin else None,
+        margin_pct=(
+            quote_service.margin_pct(r.cost_price_paise, r.sell_price_paise)
+            if is_admin
+            else None
+        ),
+        client_freight_paise=r.client_freight_paise,
+        freight_paise=r.freight_paise if is_admin else None,
         packaging_paise=r.packaging_paise,
         handling_paise=r.handling_paise,
         other_paise=r.other_paise,
@@ -107,7 +125,10 @@ def quote_search(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[QuoteRow]:
+    """`budget_min_paise` / `budget_max_paise` bound the per-unit CLIENT-QUOTED price
+    (`client_sell_price_paise`), NOT the admin-only actual sell."""
     rbac.require_module(user, rbac.SALES_ORDERS)  # VIEW — quote.search capability
+    is_admin = has_platform(user, PlatformPerm.IAM)
     rows = quote_service.search(
         db,
         q=q,
@@ -120,7 +141,7 @@ def quote_search(
         limit=limit,
         offset=offset,
     )
-    return [_quote_row(r) for r in rows]
+    return [_quote_row(r, is_admin=is_admin) for r in rows]
 
 
 @router.get("/quote-search/trend", response_model=list[TrendPoint])
@@ -131,6 +152,7 @@ def quote_trend(
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> list[TrendPoint]:
     rbac.require_module(user, rbac.SALES_ORDERS)  # VIEW — quote.search capability
+    is_admin = has_platform(user, PlatformPerm.IAM)
     rows = quote_service.price_trend(db, product_id, limit)
     return [
         TrendPoint(
@@ -139,7 +161,9 @@ def quote_trend(
             client_name=r.client_name,
             ordered_qty=str(r.ordered_qty),
             cost_price_paise=r.cost_price_paise,
-            sell_price_paise=r.sell_price_paise,
+            client_sell_price_paise=r.client_sell_price_paise,
+            # ADMIN-ONLY: mask the actual sell for non-IAM users.
+            sell_price_paise=r.sell_price_paise if is_admin else None,
         )
         for r in rows
     ]

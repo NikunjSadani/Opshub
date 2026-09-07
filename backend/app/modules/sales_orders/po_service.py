@@ -61,9 +61,15 @@ _MAX_UOM_LEN = 20
 _MAX_NOTES_LEN = 1000
 _MAX_REASON_LEN = 500
 _MONEY_FIELDS = (
-    "cost_price_paise", "sell_price_paise",
-    "freight_paise", "packaging_paise", "handling_paise", "other_paise",
+    "cost_price_paise", "original_cost_price_paise",
+    "client_sell_price_paise", "vendor_sell_price_paise", "sell_price_paise",
+    "client_freight_paise", "vendor_freight_paise", "freight_paise",
+    "packaging_paise", "handling_paise", "other_paise",
 )
+_AGENCY_FEE_TYPES = ("NONE", "PERCENT", "FIXED")
+_AGENCY_KEYS = frozenset({
+    "agency_fee_type", "agency_fee_percent", "agency_fee_amount_paise",
+})
 
 
 # --------------------------------------------------------------------- errors
@@ -89,15 +95,33 @@ class POValidationError(POError):
 @dataclass(frozen=True)
 class LineInput:
     """One line to create on a PO. ``description``/``uom`` fall back to the product's
-    name/uom when omitted. Money is per-UNIT (cost/sell) or per-LINE (the rest)."""
+    name/uom when omitted. Money is per-UNIT (cost/sell tiers) or per-LINE (the rest).
+
+    Pricing tiers:
+      * ``cost_price_paise``           — Our CP (billed to us), visible, required.
+      * ``original_cost_price_paise``  — Original CP, visible, optional.
+      * ``client_sell_price_paise``    — client-quoted sell, visible, REQUIRED.
+      * ``vendor_sell_price_paise``    — vendor sell, visible, optional.
+      * ``sell_price_paise``           — ACTUAL sell, ADMIN-ONLY. ``None`` => default to the
+                                         client sell (a non-admin can never diverge it).
+      * ``client_freight_paise``       — client freight, visible (default 0).
+      * ``vendor_freight_paise``       — vendor freight, visible, optional.
+      * ``freight_paise``              — ACTUAL freight, ADMIN-ONLY. ``None`` => default to
+                                         the client freight.
+    """
 
     product_id: int
     ordered_qty: Decimal
     cost_price_paise: int
-    sell_price_paise: int
+    client_sell_price_paise: int
     description: str | None = None
     uom: str | None = None
-    freight_paise: int = 0
+    original_cost_price_paise: int | None = None
+    vendor_sell_price_paise: int | None = None
+    sell_price_paise: int | None = None
+    client_freight_paise: int | None = 0
+    vendor_freight_paise: int | None = None
+    freight_paise: int | None = None
     packaging_paise: int = 0
     handling_paise: int = 0
     other_paise: int = 0
@@ -174,12 +198,17 @@ def _qty_ok(qty: Decimal) -> bool:
 
 def _validate_line_numbers(li: LineInput) -> None:
     """Enforce qty > 0 + column-fit, money >= 0 + ceiling, tax 0..100 for a direct
-    service caller (the route's pydantic guards most of this at the edge)."""
+    service caller (the route's pydantic guards most of this at the edge). The
+    client-quoted sell is REQUIRED; the optional tiers only validate when present."""
     if not _qty_ok(li.ordered_qty):
         raise POValidationError(
             "ordered_qty must be a positive number that fits 15 digits and 3 decimals")
+    if li.client_sell_price_paise is None:
+        raise POValidationError("client_sell_price_paise is required")
     for attr in _MONEY_FIELDS:
         value = getattr(li, attr)
+        if value is None:  # optional tier omitted — nothing to bound
+            continue
         if value < 0:
             raise POValidationError(f"{attr} must not be negative")
         if value > _MAX_MONEY_PAISE:
@@ -188,9 +217,57 @@ def _validate_line_numbers(li: LineInput) -> None:
         raise POValidationError("tax_rate must be between 0 and 100")
 
 
-def _resolve_line(db: Session, li: LineInput) -> POLineItem:
+def _validate_agency_fee(
+    fee_type: str, percent: Decimal | None, amount: int | None
+) -> None:
+    """A PO-level agency fee is one of NONE / PERCENT / FIXED, with EXACTLY the matching
+    figure set and the other null: PERCENT ⇒ percent in [0,100] and amount null;
+    FIXED ⇒ amount in [0, ceiling] and percent null; NONE ⇒ both null."""
+    if fee_type not in _AGENCY_FEE_TYPES:
+        raise POValidationError(
+            f"agency_fee_type must be one of {_AGENCY_FEE_TYPES}")
+    if fee_type == "PERCENT":
+        if percent is None:
+            raise POValidationError("agency_fee_percent is required for a PERCENT agency fee")
+        if percent < 0 or percent > 100:
+            raise POValidationError("agency_fee_percent must be between 0 and 100")
+        if amount is not None:
+            raise POValidationError(
+                "agency_fee_amount_paise must be null for a PERCENT agency fee")
+    elif fee_type == "FIXED":
+        if amount is None:
+            raise POValidationError("agency_fee_amount_paise is required for a FIXED agency fee")
+        if amount < 0 or amount > _MAX_MONEY_PAISE:
+            raise POValidationError(
+                "agency_fee_amount_paise must be between 0 and the ceiling")
+        if percent is not None:
+            raise POValidationError("agency_fee_percent must be null for a FIXED agency fee")
+    else:  # NONE
+        if percent is not None or amount is not None:
+            raise POValidationError(
+                "a NONE agency fee must not set agency_fee_percent or agency_fee_amount_paise")
+
+
+def _resolve_line(
+    db: Session, li: LineInput, *, can_set_actuals: bool,
+    carry_actual_from: POLineItem | None = None,
+) -> POLineItem:
     """Validate a line's numbers + product (must exist and be active), snapshotting
-    the description (product name when omitted) and uom (product uom when omitted)."""
+    the description (product name when omitted) and uom (product uom when omitted).
+
+    ACTUAL-FIELD RULE (critical): the actual sell/freight (``sell_price_paise`` /
+    ``freight_paise``, both ADMIN-ONLY and NOT NULL) may only diverge from the client
+    figure when ``can_set_actuals`` is True. For a non-admin caller — or an admin who
+    omits them — the actual DEFAULTS to the client value, so a non-admin can never set an
+    actual that differs from the client-quoted one.
+
+    ``carry_actual_from`` (amend only): the admin-set actuals cannot be seen or re-sent by a
+    non-admin, and even an admin editing (say) a quantity typo need not re-type them — so
+    when the amended line OMITS an actual we PRESERVE the matching existing line's actual
+    instead of silently RESETTING it to the client figure (which would destroy an admin's
+    recorded margin). The caller matches the old line by PRODUCT (not list position), so a
+    reorder/insert no longer loses the margin; a genuinely new product still defaults to
+    client. An admin who EXPLICITLY sends an actual always overrides the carry."""
     _validate_line_numbers(li)
     product = db.get(Product, li.product_id)
     if product is None:
@@ -199,14 +276,36 @@ def _resolve_line(db: Session, li: LineInput) -> POLineItem:
         raise POValidationError(f"product {li.product_id} is not active")
     description = (li.description or product.name).strip()[:_MAX_DESCRIPTION_LEN]
     uom = (li.uom or product.uom).strip()[:_MAX_UOM_LEN] or product.uom
+    client_sell = li.client_sell_price_paise
+    client_freight = li.client_freight_paise if li.client_freight_paise is not None else 0
+    # Actual resolution order: (1) an admin's EXPLICIT value wins; (2) else carry the prior
+    # line's actual forward (admins who omit + non-admins alike — preserves recorded margin
+    # across a reorder/qty edit); (3) else default to the client figure (new line / no prior).
+    if can_set_actuals and li.sell_price_paise is not None:
+        actual_sell = li.sell_price_paise
+    elif carry_actual_from is not None:
+        actual_sell = carry_actual_from.sell_price_paise
+    else:
+        actual_sell = client_sell
+    if can_set_actuals and li.freight_paise is not None:
+        actual_freight = li.freight_paise
+    elif carry_actual_from is not None:
+        actual_freight = carry_actual_from.freight_paise
+    else:
+        actual_freight = client_freight
     return POLineItem(
         product_id=product.id,
         description=description,
         uom=uom,
         ordered_qty=li.ordered_qty,
         cost_price_paise=li.cost_price_paise,
-        sell_price_paise=li.sell_price_paise,
-        freight_paise=li.freight_paise,
+        original_cost_price_paise=li.original_cost_price_paise,
+        client_sell_price_paise=client_sell,
+        vendor_sell_price_paise=li.vendor_sell_price_paise,
+        sell_price_paise=actual_sell,
+        client_freight_paise=client_freight,
+        vendor_freight_paise=li.vendor_freight_paise,
+        freight_paise=actual_freight,
         packaging_paise=li.packaging_paise,
         handling_paise=li.handling_paise,
         other_paise=li.other_paise,
@@ -216,10 +315,14 @@ def _resolve_line(db: Session, li: LineInput) -> POLineItem:
     )
 
 
-def _clean_po_number(po_number: str) -> str:
+def _clean_po_number(po_number: str | None) -> str | None:
+    """Normalize an OPTIONAL client PO number: blank / None ⇒ ``None`` (stored NULL, not an
+    error), otherwise whitespace-collapsed and length-bounded."""
+    if po_number is None:
+        return None
     cleaned = " ".join(po_number.split())
     if not cleaned:
-        raise POValidationError("po_number is required")
+        return None
     if len(cleaned) > _MAX_PO_NUMBER_LEN:
         raise POValidationError(f"po_number must be at most {_MAX_PO_NUMBER_LEN} characters")
     return cleaned
@@ -230,7 +333,7 @@ def _clean_po_number(po_number: str) -> str:
 def create_po(
     db: Session,
     *,
-    po_number: str,
+    po_number: str | None,
     client_id: int,
     project_id: int,
     po_date: date,
@@ -239,15 +342,22 @@ def create_po(
     expected_procurement_date: date | None = None,
     notes: str | None = None,
     soft_copy_file_id: int | None = None,
+    agency_fee_type: str = "NONE",
+    agency_fee_percent: Decimal | None = None,
+    agency_fee_amount_paise: int | None = None,
+    can_set_actuals: bool = False,
     actor_uid: str | None = None,
 ) -> PurchaseOrder:
     """Create a PO with its lines. Validates client + project + every product are
     ACTIVE and the optional GSTIN/file references resolve, then inserts under a
     SAVEPOINT so a ``(client_id, po_number)`` collision surfaces as ``DuplicatePO``.
-    Audited ``po.created``. Caller commits."""
+    ``po_number`` is OPTIONAL (NULL when absent); the actual sell/freight per line only
+    diverge from the client figure when ``can_set_actuals`` (admin). Audited ``po.created``.
+    Caller commits."""
     po_number = _clean_po_number(po_number)
     if not lines:
         raise POValidationError("at least one line item is required")
+    _validate_agency_fee(agency_fee_type, agency_fee_percent, agency_fee_amount_paise)
     _ensure_client_active(db, client_id)
     _ensure_project_active(db, project_id, client_id)
     if client_gstin_id is not None:
@@ -255,7 +365,7 @@ def create_po(
     if soft_copy_file_id is not None:
         _ensure_file(db, soft_copy_file_id)
 
-    resolved = [_resolve_line(db, li) for li in lines]
+    resolved = [_resolve_line(db, li, can_set_actuals=can_set_actuals) for li in lines]
 
     po = PurchaseOrder(
         po_number=po_number,
@@ -267,6 +377,9 @@ def create_po(
         expected_procurement_date=expected_procurement_date,
         status=POStatus.DRAFT.value,
         notes=(notes.strip()[:_MAX_NOTES_LEN] if notes else None),
+        agency_fee_type=agency_fee_type,
+        agency_fee_percent=agency_fee_percent,
+        agency_fee_amount_paise=agency_fee_amount_paise,
         created_by=actor_uid,
     )
     po.lines.extend(resolved)
@@ -347,15 +460,113 @@ def _escape_like(term: str) -> str:
 
 # --------------------------------------------------------------------- totals
 
+def _net_qty(line: POLineItem) -> Decimal:
+    """A line's INVOICEABLE quantity = ordered_qty minus any short-closed (retired) qty,
+    floored at 0. A short-close retires the un-invoiced remainder, so only the remaining
+    (ordered - short_closed) quantity is billable and counts toward every revenue total."""
+    net = Decimal(line.ordered_qty) - Decimal(line.short_closed_qty or 0)
+    return net if net > 0 else Decimal(0)
+
+
+def _is_voided(po: PurchaseOrder) -> bool:
+    """A CANCELLED (voided) PO carries NO revenue — every money total collapses to 0."""
+    return po.status == POStatus.CANCELLED.value
+
+
 def line_sell_paise(line: POLineItem) -> int:
-    """A line's sell value in paise = ordered_qty * per-unit sell price (HALF-UP)."""
-    total = Decimal(line.ordered_qty) * Decimal(line.sell_price_paise)
+    """A line's ACTUAL sell value in paise = INVOICEABLE qty * per-unit actual sell (HALF-UP).
+    ADMIN-ONLY figure (the margin basis); the route masks it for non-admins. Nets out any
+    short-closed quantity — retired units are never billed."""
+    total = _net_qty(line) * Decimal(line.sell_price_paise)
     return int(total.quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
 def po_total_sell_paise(po: PurchaseOrder) -> int:
-    """Sum of every line's sell value in paise (all lines, regardless of status)."""
+    """Sum of every line's ACTUAL sell value in paise (net of short-close; 0 for a voided PO).
+    ADMIN-ONLY aggregate — masked for non-admins in the serializer."""
+    if _is_voided(po):
+        return 0
     return sum((line_sell_paise(line) for line in po.lines), 0)
+
+
+def line_client_sell_paise(line: POLineItem) -> int:
+    """A line's CLIENT-quoted sell value in paise = INVOICEABLE qty * per-unit client sell
+    (HALF-UP). Visible to everyone. Nets out any short-closed quantity. A NULL client sell
+    contributes 0 (giveaway line)."""
+    total = _net_qty(line) * Decimal(line.client_sell_price_paise or 0)
+    return int(total.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def po_total_client_sell_paise(po: PurchaseOrder) -> int:
+    """Sum of every line's CLIENT-quoted sell value in paise (net of short-close; 0 for a
+    voided PO). Visible to all."""
+    if _is_voided(po):
+        return 0
+    return sum((line_client_sell_paise(line) for line in po.lines), 0)
+
+
+def line_client_freight_paise(line: POLineItem) -> int:
+    """A line's CLIENT-quoted freight in paise — a FLAT per-line charge (not per-unit), and
+    REVENUE billed to the client. Counted only while the line still delivers: a FULLY
+    short-closed line (net qty 0 — nothing ships) carries no freight; a partial short-close
+    keeps the flat freight (the shipment still happens). Visible to everyone."""
+    return line.client_freight_paise or 0 if _net_qty(line) > 0 else 0
+
+
+def po_total_client_freight_paise(po: PurchaseOrder) -> int:
+    """Sum of every live line's CLIENT-quoted freight in paise (0 for a voided PO). Client
+    freight is revenue we bill the client. Visible to all."""
+    if _is_voided(po):
+        return 0
+    return sum((line_client_freight_paise(line) for line in po.lines), 0)
+
+
+def line_client_extras_paise(line: POLineItem) -> int:
+    """A line's packaging + handling + other FLAT per-line charges in paise — all billed to
+    the client (revenue). Like freight, counted only while the line still delivers: a FULLY
+    short-closed line (nothing ships) carries none; a partial short-close keeps them flat."""
+    if _net_qty(line) <= 0:
+        return 0
+    return line.packaging_paise + line.handling_paise + line.other_paise
+
+
+def po_total_client_extras_paise(po: PurchaseOrder) -> int:
+    """Sum of every live line's packaging/handling/other client charges (0 for a voided PO).
+    These are revenue billed to the client. Visible to all."""
+    if _is_voided(po):
+        return 0
+    return sum((line_client_extras_paise(line) for line in po.lines), 0)
+
+
+def po_total_client_billing_paise(po: PurchaseOrder) -> int:
+    """The ENTIRE billing to the client (excl. the agency fee itself) = goods client-sell +
+    client freight + packaging/handling/other — all net of short-close, 0 for a voided PO.
+    This is the base the PERCENT agency fee is charged on. Visible to all."""
+    return (po_total_client_sell_paise(po) + po_total_client_freight_paise(po)
+            + po_total_client_extras_paise(po))
+
+
+def agency_fee_paise(po: PurchaseOrder) -> int:
+    """The agency fee CHARGED TO THE CLIENT, in paise — ADDITIONAL revenue for us. PERCENT is
+    applied to the ENTIRE client billing (goods client-sell + client freight + packaging/
+    handling/other), net of short-close, HALF-UP; FIXED is the flat amount; NONE is 0. A
+    voided PO charges no agency fee. Visible to everyone (not a sensitive/actual figure)."""
+    if _is_voided(po):
+        return 0
+    if po.agency_fee_type == "PERCENT" and po.agency_fee_percent is not None:
+        base = Decimal(po_total_client_billing_paise(po))
+        fee = base * (Decimal(po.agency_fee_percent) / Decimal(100))
+        return int(fee.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    if po.agency_fee_type == "FIXED" and po.agency_fee_amount_paise is not None:
+        return po.agency_fee_amount_paise
+    return 0
+
+
+def po_total_with_agency_paise(po: PurchaseOrder) -> int:
+    """Full client-facing REVENUE = the entire client billing (goods + client freight +
+    packaging/handling/other) + the agency fee (all 0 for a voided PO). The agency fee is a
+    percentage of the billing base; it is not compounded on itself."""
+    return po_total_client_billing_paise(po) + agency_fee_paise(po)
 
 
 # --------------------------------------------------------------- labels (join)
@@ -428,6 +639,11 @@ def _snapshot(po: PurchaseOrder) -> dict[str, Any]:
         ),
         "status": po.status,
         "notes": po.notes,
+        "agency_fee_type": po.agency_fee_type,
+        "agency_fee_percent": (
+            str(po.agency_fee_percent) if po.agency_fee_percent is not None else None
+        ),
+        "agency_fee_amount_paise": po.agency_fee_amount_paise,
         "lines": [
             {
                 "product_id": line.product_id,
@@ -435,7 +651,12 @@ def _snapshot(po: PurchaseOrder) -> dict[str, Any]:
                 "uom": line.uom,
                 "ordered_qty": str(line.ordered_qty),
                 "cost_price_paise": line.cost_price_paise,
+                "original_cost_price_paise": line.original_cost_price_paise,
+                "client_sell_price_paise": line.client_sell_price_paise,
+                "vendor_sell_price_paise": line.vendor_sell_price_paise,
                 "sell_price_paise": line.sell_price_paise,
+                "client_freight_paise": line.client_freight_paise,
+                "vendor_freight_paise": line.vendor_freight_paise,
                 "freight_paise": line.freight_paise,
                 "packaging_paise": line.packaging_paise,
                 "handling_paise": line.handling_paise,
@@ -453,6 +674,7 @@ def _snapshot(po: PurchaseOrder) -> dict[str, Any]:
 _HEADER_KEYS = frozenset({
     "po_number", "client_gstin_id", "project_id", "po_date",
     "expected_procurement_date", "notes", "soft_copy_file_id",
+    "agency_fee_type", "agency_fee_percent", "agency_fee_amount_paise",
 })
 
 
@@ -463,6 +685,7 @@ def amend_po(
     header: dict[str, Any],
     lines: list[LineInput] | None = None,
     summary: str | None = None,
+    can_set_actuals: bool = False,
     actor_uid: str | None = None,
 ) -> PurchaseOrder:
     """Snapshot the PO into a new ``POAmendment`` version, then apply the header edits
@@ -478,25 +701,41 @@ def amend_po(
     if unknown:
         raise POValidationError(f"unknown header field(s): {sorted(unknown)}")
 
-    # Snapshot BEFORE mutating so the amendment records prior state.
     next_version = max((a.version for a in po.amendments), default=0) + 1
-    po.amendments.append(POAmendment(
-        version=next_version,
-        summary=(summary or f"amendment v{next_version}").strip()[:_MAX_REASON_LEN],
-        snapshot=_snapshot(po),
-        created_by=actor_uid,
-    ))
+    if lines is not None and not lines:
+        raise POValidationError("a line replacement must contain at least one line")
 
-    _apply_header(db, po, header)
-    if lines is not None:
-        if not lines:
-            raise POValidationError("a line replacement must contain at least one line")
-        resolved = [_resolve_line(db, li) for li in lines]
-        po.lines.clear()  # cascade delete-orphan removes the old rows
-        po.lines.extend(resolved)
-
+    # ALL mutations happen INSIDE the SAVEPOINT: ``begin_nested()`` pre-flushes any dirty
+    # state at entry, so a po_number/version change made BEFORE the savepoint would flush
+    # (and a unique collision would break) OUTSIDE it. Mutating inside keeps a collision
+    # contained to the savepoint (mirrors ``create_po``). The snapshot is still taken BEFORE
+    # ``_apply_header`` so it records prior state.
     try:
         with db.begin_nested():
+            po.amendments.append(POAmendment(
+                version=next_version,
+                summary=(summary or f"amendment v{next_version}").strip()[:_MAX_REASON_LEN],
+                snapshot=_snapshot(po),
+                created_by=actor_uid,
+            ))
+            _apply_header(db, po, header)
+            if lines is not None:
+                # Capture the pre-replacement lines so an edit carries each line's admin-set
+                # actuals forward (matched by PRODUCT, not list position, so a reorder/insert
+                # no longer wipes the margin) instead of resetting them to the client figure
+                # (see `_resolve_line`). Greedy first-unconsumed match pairs duplicate-product
+                # lines in order.
+                carry_pool: dict[int, list[POLineItem]] = {}
+                for old in po.lines:
+                    carry_pool.setdefault(old.product_id, []).append(old)
+                resolved = []
+                for li in lines:
+                    pool = carry_pool.get(li.product_id)
+                    carry = pool.pop(0) if pool else None
+                    resolved.append(_resolve_line(
+                        db, li, can_set_actuals=can_set_actuals, carry_actual_from=carry))
+                po.lines.clear()  # cascade delete-orphan removes the old rows
+                po.lines.extend(resolved)
             db.flush()
     except IntegrityError as exc:
         # Two uniques can trip here: the PO number (only if po_number was edited) or
@@ -527,7 +766,20 @@ def amend_po(
 def _apply_header(db: Session, po: PurchaseOrder, header: dict[str, Any]) -> None:
     """Apply the present header keys, validating each cross-module reference."""
     if "po_number" in header:
-        po.po_number = _clean_po_number(str(header["po_number"]))
+        # None / blank ⇒ store NULL; the partial unique index still 409s a dup non-null.
+        po.po_number = _clean_po_number(header["po_number"])
+    if _AGENCY_KEYS & set(header):
+        # The agency fee is one interdependent trio — a change must name its type so the
+        # matching field / null-out rule is validated as a whole.
+        if "agency_fee_type" not in header:
+            raise POValidationError("agency_fee_type is required to change the agency fee")
+        fee_type = str(header["agency_fee_type"])
+        percent = header.get("agency_fee_percent")
+        amount = header.get("agency_fee_amount_paise")
+        _validate_agency_fee(fee_type, percent, amount)
+        po.agency_fee_type = fee_type
+        po.agency_fee_percent = percent
+        po.agency_fee_amount_paise = amount
     if "project_id" in header and header["project_id"] != po.project_id:
         project_id = int(header["project_id"])
         _ensure_project_active(db, project_id, po.client_id)
@@ -841,14 +1093,17 @@ def _build_bulk_line(db: Session, cells: dict[str, str]) -> LineInput | str:
 
     description = cells.get("description", "").strip() or None
     uom = cells.get("uom", "").strip() or None
+    # Bulk carries only the visible client-facing figures: the sell/freight columns map to
+    # client_sell / client_freight. The ADMIN-ONLY actuals are left to default to them
+    # (bulk is a non-admin path — no per-row actual override).
     return LineInput(
         product_id=product.id,
         ordered_qty=qty,
         cost_price_paise=money["cost_price"],
-        sell_price_paise=money["sell_price"],
+        client_sell_price_paise=money["sell_price"],
         description=description,
         uom=uom,
-        freight_paise=money["freight"],
+        client_freight_paise=money["freight"],
         packaging_paise=money["packaging"],
         handling_paise=money["handling"],
         other_paise=money["other"],
@@ -874,7 +1129,10 @@ def _parse_bulk_date(raw: str) -> date | None | str:
     return "po_date must be a date (YYYY-MM-DD or DD/MM/YYYY)"
 
 
-def _po_exists(db: Session, client_id: int, po_number: str) -> bool:
+def _po_exists(db: Session, client_id: int, po_number: str | None) -> bool:
+    # A NULL / blank number is never a duplicate (the partial unique index excludes NULLs).
+    if not po_number:
+        return False
     return db.execute(
         select(PurchaseOrder.id).where(
             PurchaseOrder.client_id == client_id,

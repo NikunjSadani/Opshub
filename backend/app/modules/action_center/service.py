@@ -61,7 +61,7 @@ class InvoicingDueItem:
     client_name: str | None
     project_code: str | None
     uninvoiced_qty: Decimal          # Σ per-line clamped open_qty
-    uninvoiced_value_paise: int      # Σ (open_qty × sell_price_paise), ROUND_HALF_UP
+    uninvoiced_value_paise: int      # Σ (open_qty × client_sell_price_paise), ROUND_HALF_UP
 
 
 @dataclass(frozen=True)
@@ -134,7 +134,7 @@ def procurement_followups(db: Session, horizon_days: int) -> list[ProcurementIte
     items = [
         ProcurementItem(
             po_id=po.id,
-            po_number=po.po_number,
+            po_number=po.po_number or "",  # a numberless PO shows as blank in the tile
             client_name=names.get(po.client_id),
             project_code=codes.get(po.project_id),
             # expected_procurement_date is non-null by the query filter above.
@@ -154,7 +154,8 @@ def invoicing_due(db: Session) -> list[InvoicingDueItem]:
     skipped. Per OPEN line ``open_qty = ordered_qty − invoiced_qty_for_po_line(line.id)``,
     clamped at 0 (the §6 rollup already nets confirmed credit notes and floors at 0); a PO is
     included when Σ open_qty > 0. Money is integer paise: ``uninvoiced_value_paise`` sums
-    ``open_qty × sell_price_paise`` (Decimal) then rounds HALF_UP to paise — no float. Ordered
+    ``open_qty × client_sell_price_paise`` (the client-quoted sell, Decimal) then rounds
+    HALF_UP to paise — no float. Ordered
     most-urgent first (largest uninvoiced value; ``po_id`` breaks ties).
 
     Only a CONFIRMED / IN_PROGRESS PO is "invoicing due": a DRAFT PO has not been confirmed
@@ -181,7 +182,9 @@ def invoicing_due(db: Session) -> list[InvoicingDueItem]:
             if open_qty <= _ZERO:
                 continue
             total_open += open_qty
-            total_value += open_qty * line.sell_price_paise
+            # Uninvoiced VALUE is a client-facing figure — it uses the CLIENT-quoted sell,
+            # not the admin-only actual sell. A NULL client sell contributes 0.
+            total_value += open_qty * (line.client_sell_price_paise or 0)
         if total_open > _ZERO:
             value_paise = int(total_value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
             pending.append((po, total_open, value_paise))
@@ -191,7 +194,7 @@ def invoicing_due(db: Session) -> list[InvoicingDueItem]:
     for po, total_open, value_paise in pending:
         items.append(InvoicingDueItem(
             po_id=po.id,
-            po_number=po.po_number,
+            po_number=po.po_number or "",  # a numberless PO shows as blank in the tile
             client_name=names.get(po.client_id),
             project_code=codes.get(po.project_id),
             uninvoiced_qty=total_open,

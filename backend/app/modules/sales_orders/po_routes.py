@@ -38,8 +38,8 @@ from app.modules.sales_orders import po_service
 from app.modules.sales_orders.models import PurchaseOrder
 from app.platform import rbac
 from app.platform.auth import current_user
-from app.platform.models import Level, User
-from app.platform.rbac import can
+from app.platform.models import Level, PlatformPerm, User
+from app.platform.rbac import can, has_platform
 
 router = APIRouter()
 
@@ -49,6 +49,13 @@ _UPLOAD_CHUNK = 1024 * 1024
 
 def _require_module(user: User) -> None:
     rbac.require_module(user, MODULE_KEY)
+
+
+def _can_see_actuals(user: User) -> bool:
+    """Only an IAM (admin) user may VIEW or SET the ACTUAL sell/freight figures. The read
+    serializers mask them to None otherwise; the create/amend path defaults them to the
+    client figure for a non-admin so they can never diverge."""
+    return has_platform(user, PlatformPerm.IAM)
 
 
 def _map_error(err: po_service.POError, *, validation_status: int = 400) -> HTTPException:
@@ -70,9 +77,17 @@ class POLineIn(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     uom: str | None = Field(default=None, max_length=20)
     ordered_qty: Decimal = Field(gt=0)
-    cost_price_paise: int = Field(ge=0)
-    sell_price_paise: int = Field(ge=0)
-    freight_paise: int = Field(default=0, ge=0)
+    # cost tier
+    cost_price_paise: int = Field(ge=0)                               # Our CP, visible, required
+    original_cost_price_paise: int | None = Field(default=None, ge=0)  # Original CP, optional
+    # sell tiers
+    client_sell_price_paise: int = Field(ge=0)                       # client-quoted, REQUIRED
+    vendor_sell_price_paise: int | None = Field(default=None, ge=0)   # vendor sell, optional
+    sell_price_paise: int | None = Field(default=None, ge=0)          # ACTUAL — admin-only
+    # freight tiers
+    client_freight_paise: int | None = Field(default=0, ge=0)        # client freight, visible
+    vendor_freight_paise: int | None = Field(default=None, ge=0)     # vendor freight, optional
+    freight_paise: int | None = Field(default=None, ge=0)            # ACTUAL — admin-only
     packaging_paise: int = Field(default=0, ge=0)
     handling_paise: int = Field(default=0, ge=0)
     other_paise: int = Field(default=0, ge=0)
@@ -83,9 +98,14 @@ class POLineIn(BaseModel):
             product_id=self.product_id,
             ordered_qty=self.ordered_qty,
             cost_price_paise=self.cost_price_paise,
-            sell_price_paise=self.sell_price_paise,
+            client_sell_price_paise=self.client_sell_price_paise,
             description=self.description,
             uom=self.uom,
+            original_cost_price_paise=self.original_cost_price_paise,
+            vendor_sell_price_paise=self.vendor_sell_price_paise,
+            sell_price_paise=self.sell_price_paise,
+            client_freight_paise=self.client_freight_paise,
+            vendor_freight_paise=self.vendor_freight_paise,
             freight_paise=self.freight_paise,
             packaging_paise=self.packaging_paise,
             handling_paise=self.handling_paise,
@@ -95,7 +115,7 @@ class POLineIn(BaseModel):
 
 
 class POCreateIn(BaseModel):
-    po_number: str = Field(min_length=1, max_length=64)
+    po_number: str | None = Field(default=None, max_length=64)  # OPTIONAL client reference
     client_id: int
     client_gstin_id: int | None = None
     project_id: int
@@ -103,6 +123,9 @@ class POCreateIn(BaseModel):
     expected_procurement_date: date | None = None
     notes: str | None = Field(default=None, max_length=1000)
     soft_copy_file_id: int | None = None
+    agency_fee_type: Literal["NONE", "PERCENT", "FIXED"] = "NONE"
+    agency_fee_percent: Decimal | None = Field(default=None, ge=0, le=100)
+    agency_fee_amount_paise: int | None = Field(default=None, ge=0)
     lines: list[POLineIn] = Field(min_length=1)
 
 
@@ -110,13 +133,16 @@ class POAmendIn(BaseModel):
     """Editable header (only supplied keys apply) + an OPTIONAL full line replacement."""
 
     model_config = ConfigDict(extra="forbid")
-    po_number: str | None = Field(default=None, min_length=1, max_length=64)
+    po_number: str | None = Field(default=None, max_length=64)
     client_gstin_id: int | None = None
     project_id: int | None = None
     po_date: date | None = None
     expected_procurement_date: date | None = None
     notes: str | None = Field(default=None, max_length=1000)
     soft_copy_file_id: int | None = None
+    agency_fee_type: Literal["NONE", "PERCENT", "FIXED"] | None = None
+    agency_fee_percent: Decimal | None = Field(default=None, ge=0, le=100)
+    agency_fee_amount_paise: int | None = Field(default=None, ge=0)
     lines: list[POLineIn] | None = Field(default=None, min_length=1)
     summary: str | None = Field(default=None, max_length=500)
 
@@ -145,8 +171,13 @@ class POLineOut(BaseModel):
     uom: str
     ordered_qty: str
     cost_price_paise: int
-    sell_price_paise: int
-    freight_paise: int
+    original_cost_price_paise: int | None
+    client_sell_price_paise: int | None
+    vendor_sell_price_paise: int | None
+    sell_price_paise: int | None       # ACTUAL sell — None for non-admins (masked)
+    client_freight_paise: int | None
+    vendor_freight_paise: int | None
+    freight_paise: int | None          # ACTUAL freight — None for non-admins (masked)
     packaging_paise: int
     handling_paise: int
     other_paise: int
@@ -158,7 +189,7 @@ class POLineOut(BaseModel):
 
 class POSummaryOut(BaseModel):
     id: int
-    po_number: str
+    po_number: str | None
     client_id: int
     client_name: str | None
     project_id: int
@@ -166,8 +197,17 @@ class POSummaryOut(BaseModel):
     po_date: date
     expected_procurement_date: date | None
     status: str
+    agency_fee_type: str
+    agency_fee_percent: float | None
+    agency_fee_amount_paise: int | None
     line_count: int
-    total_sell_paise: int
+    total_sell_paise: int | None       # ACTUAL aggregate — None for non-admins (masked)
+    total_client_sell_paise: int       # client-quoted GOODS aggregate — visible to all
+    total_client_freight_paise: int    # client-quoted freight aggregate (revenue) — visible
+    total_client_extras_paise: int     # packaging + handling + other (revenue) — visible
+    # Agency fee is REVENUE we charge the client (not a cost, not sensitive) — visible to all.
+    agency_fee_computed_paise: int     # resolved fee (percent-of-entire-client-billing or fixed)
+    total_with_agency_paise: int       # entire client billing + agency = full revenue
     created_at: datetime
 
 
@@ -197,7 +237,7 @@ class BulkUploadOut(BaseModel):
 
 # ---------------------------------------------------------------- serializers
 
-def _line_out(line: Any) -> POLineOut:
+def _line_out(line: Any, *, can_see_actuals: bool) -> POLineOut:
     product = line.product
     return POLineOut(
         id=line.id,
@@ -209,8 +249,14 @@ def _line_out(line: Any) -> POLineOut:
         uom=line.uom,
         ordered_qty=str(line.ordered_qty),
         cost_price_paise=line.cost_price_paise,
-        sell_price_paise=line.sell_price_paise,
-        freight_paise=line.freight_paise,
+        original_cost_price_paise=line.original_cost_price_paise,
+        client_sell_price_paise=line.client_sell_price_paise,
+        vendor_sell_price_paise=line.vendor_sell_price_paise,
+        # ADMIN-ONLY actuals: masked to None for a non-admin so the margin never leaks.
+        sell_price_paise=line.sell_price_paise if can_see_actuals else None,
+        client_freight_paise=line.client_freight_paise,
+        vendor_freight_paise=line.vendor_freight_paise,
+        freight_paise=line.freight_paise if can_see_actuals else None,
         packaging_paise=line.packaging_paise,
         handling_paise=line.handling_paise,
         other_paise=line.other_paise,
@@ -221,7 +267,9 @@ def _line_out(line: Any) -> POLineOut:
     )
 
 
-def _summary_out(po: PurchaseOrder, labels: po_service.POLabels) -> POSummaryOut:
+def _summary_out(
+    po: PurchaseOrder, labels: po_service.POLabels, *, can_see_actuals: bool
+) -> POSummaryOut:
     return POSummaryOut(
         id=po.id,
         po_number=po.po_number,
@@ -232,14 +280,27 @@ def _summary_out(po: PurchaseOrder, labels: po_service.POLabels) -> POSummaryOut
         po_date=po.po_date,
         expected_procurement_date=po.expected_procurement_date,
         status=po.status,
+        agency_fee_type=po.agency_fee_type,
+        agency_fee_percent=(
+            float(po.agency_fee_percent) if po.agency_fee_percent is not None else None
+        ),
+        agency_fee_amount_paise=po.agency_fee_amount_paise,
         line_count=len(po.lines),
-        total_sell_paise=po_service.po_total_sell_paise(po),
+        # ACTUAL aggregate masked for non-admins; the client-sell total is always visible.
+        total_sell_paise=po_service.po_total_sell_paise(po) if can_see_actuals else None,
+        total_client_sell_paise=po_service.po_total_client_sell_paise(po),
+        total_client_freight_paise=po_service.po_total_client_freight_paise(po),
+        total_client_extras_paise=po_service.po_total_client_extras_paise(po),
+        agency_fee_computed_paise=po_service.agency_fee_paise(po),
+        total_with_agency_paise=po_service.po_total_with_agency_paise(po),
         created_at=po.created_at,
     )
 
 
-def _detail_out(po: PurchaseOrder, labels: po_service.POLabels) -> PODetailOut:
-    summary = _summary_out(po, labels)
+def _detail_out(
+    po: PurchaseOrder, labels: po_service.POLabels, *, can_see_actuals: bool
+) -> PODetailOut:
+    summary = _summary_out(po, labels, can_see_actuals=can_see_actuals)
     soft_copy: SoftCopyOut | None = None
     if po.soft_copy_file_id is not None:
         filename = labels.files.get(po.soft_copy_file_id)
@@ -254,16 +315,16 @@ def _detail_out(po: PurchaseOrder, labels: po_service.POLabels) -> PODetailOut:
         notes=po.notes,
         soft_copy_file=soft_copy,
         amendments_count=len(po.amendments),
-        lines=[_line_out(line) for line in po.lines],
+        lines=[_line_out(line, can_see_actuals=can_see_actuals) for line in po.lines],
     )
 
 
-def _load_detail(db: Session, po_id: int) -> PODetailOut:
+def _load_detail(db: Session, po_id: int, *, can_see_actuals: bool) -> PODetailOut:
     try:
         po = po_service.get_po_detail(db, po_id)
     except po_service.PONotFound as err:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(err)) from err
-    return _detail_out(po, po_service.label_maps(db, [po]))
+    return _detail_out(po, po_service.label_maps(db, [po]), can_see_actuals=can_see_actuals)
 
 
 # ------------------------------------------------------------------- create
@@ -275,6 +336,7 @@ def create_purchase_order(
     db: Annotated[Session, Depends(get_db)],
 ) -> PODetailOut:
     rbac.require_level(user, rbac.SALES_ORDERS, Level.OPERATE)
+    can_actuals = _can_see_actuals(user)
     try:
         po = po_service.create_po(
             db,
@@ -287,12 +349,16 @@ def create_purchase_order(
             expected_procurement_date=body.expected_procurement_date,
             notes=body.notes,
             soft_copy_file_id=body.soft_copy_file_id,
+            agency_fee_type=body.agency_fee_type,
+            agency_fee_percent=body.agency_fee_percent,
+            agency_fee_amount_paise=body.agency_fee_amount_paise,
+            can_set_actuals=can_actuals,
             actor_uid=user.firebase_uid,
         )
     except po_service.POError as err:
         raise _map_error(err) from err
     db.commit()
-    return _load_detail(db, po.id)
+    return _load_detail(db, po.id, can_see_actuals=can_actuals)
 
 
 # ------------------------------------------------------------------- upload
@@ -357,11 +423,12 @@ def list_purchase_orders(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[POSummaryOut]:
     _require_module(user)
+    can_actuals = _can_see_actuals(user)
     pos = po_service.list_pos(
         db, client_id=client_id, project_id=project_id,
         status=status_filter, q=q, limit=limit, offset=offset)
     labels = po_service.label_maps(db, pos)
-    return [_summary_out(po, labels) for po in pos]
+    return [_summary_out(po, labels, can_see_actuals=can_actuals) for po in pos]
 
 
 @router.get("/purchase-orders/{po_id}", response_model=PODetailOut)
@@ -371,7 +438,7 @@ def get_purchase_order(
     db: Annotated[Session, Depends(get_db)],
 ) -> PODetailOut:
     _require_module(user)
-    return _load_detail(db, po_id)
+    return _load_detail(db, po_id, can_see_actuals=_can_see_actuals(user))
 
 
 # -------------------------------------------------------------------- amend
@@ -384,6 +451,7 @@ def amend_purchase_order(
     db: Annotated[Session, Depends(get_db)],
 ) -> PODetailOut:
     rbac.require_level(user, rbac.SALES_ORDERS, Level.OPERATE)
+    can_actuals = _can_see_actuals(user)
     try:
         po = po_service.get_po_detail(db, po_id)
     except po_service.PONotFound as err:
@@ -393,14 +461,14 @@ def amend_purchase_order(
     try:
         po_service.amend_po(
             db, po, header=header, lines=lines, summary=body.summary,
-            actor_uid=user.firebase_uid)
+            can_set_actuals=can_actuals, actor_uid=user.firebase_uid)
     except po_service.POValidationError as err:
         # A blocked amend (CANCELLED/CLOSED, empty line replacement) is 422.
         raise _map_error(err, validation_status=422) from err
     except po_service.POError as err:
         raise _map_error(err) from err
     db.commit()
-    return _load_detail(db, po_id)
+    return _load_detail(db, po_id, can_see_actuals=can_actuals)
 
 
 # ------------------------------------------------------------------- confirm
@@ -424,7 +492,7 @@ def confirm_purchase_order(
     except po_service.POError as err:
         raise _map_error(err) from err
     db.commit()
-    return _load_detail(db, po_id)
+    return _load_detail(db, po_id, can_see_actuals=_can_see_actuals(user))
 
 
 # --------------------------------------------------------------- short-close
@@ -447,7 +515,7 @@ def short_close_purchase_order(
     except po_service.POError as err:
         raise _map_error(err) from err
     db.commit()
-    return _load_detail(db, po_id)
+    return _load_detail(db, po_id, can_see_actuals=_can_see_actuals(user))
 
 
 # --------------------------------------------------------------------- void
@@ -468,4 +536,4 @@ def void_purchase_order(
     except po_service.POError as err:
         raise _map_error(err) from err
     db.commit()
-    return _load_detail(db, po_id)
+    return _load_detail(db, po_id, can_see_actuals=_can_see_actuals(user))

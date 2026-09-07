@@ -118,11 +118,15 @@ def _po(
 
 def _line(
     db: Session, *, po_id: int, product_id: int, ordered: str, sell_paise: int,
-    short_closed: str = "0",
+    short_closed: str = "0", client_sell_paise: int | None = None,
 ) -> POLineItem:
+    # A real line always carries the client-quoted sell (the visible/required figure). When a
+    # caller does not override it, it mirrors the actual sell (the production backfill state).
     line = POLineItem(
         po_id=po_id, product_id=product_id, description="Widget", uom="NOS",
         ordered_qty=Decimal(ordered), cost_price_paise=1000, sell_price_paise=sell_paise,
+        client_sell_price_paise=(client_sell_paise if client_sell_paise is not None
+                                 else sell_paise),
         short_closed_qty=Decimal(short_closed))
     db.add(line)
     db.flush()
@@ -263,6 +267,29 @@ def test_invoicing_due_membership_and_math(
     # PO-SMALL: open 10; value 10 × 5000.
     assert by_po[ids["po_small"]].uninvoiced_qty == Decimal("10")
     assert by_po[ids["po_small"]].uninvoiced_value_paise == 50000
+
+
+def test_invoicing_due_value_uses_client_sell_not_actual(
+    env: tuple[TestClient, sessionmaker[Session], dict[str, int]]
+) -> None:
+    """The uninvoiced VALUE is a client-facing figure: it must use the CLIENT-quoted sell,
+    NOT the admin-only actual sell. A line whose actual sell (9999) diverges from its client
+    sell (5000) contributes 10 × 5000 = 50000, proving the re-point off the actual."""
+    _client, TestSession, ids = env
+    db = TestSession()
+    widget_id = db.execute(select(Product.id).where(Product.code == "WID-1")).scalar_one()
+    po = _po(db, number="PO-DIVERGE", client_id=ids["acm"], project_id=ids["proj"],
+             expected=None)
+    # actual sell 9999 (admin-only) vs client sell 5000 — value must follow the client sell.
+    line = POLineItem(
+        po_id=po.id, product_id=widget_id, description="Widget", uom="NOS",
+        ordered_qty=Decimal("10"), cost_price_paise=1000, sell_price_paise=9999,
+        client_sell_price_paise=5000, short_closed_qty=Decimal("0"))
+    db.add(line)
+    db.flush()
+    rows = {r.po_id: r for r in service.invoicing_due(db)}
+    db.close()
+    assert rows[po.id].uninvoiced_value_paise == 50000  # 10 × client 5000, not 9999
 
 
 def test_invoicing_due_ordered_by_value_desc(

@@ -54,23 +54,32 @@ def _seed_price_book(db: Session) -> None:
     db.add_all([po_old, po_new, po_canc])
     db.flush()
 
+    # Each line carries an ADMIN-ONLY `sell_price_paise` (actual) DISTINCT from the
+    # visible `client_sell_price_paise` (client-quoted), so the masking + the client-price
+    # budget filter are both provable: a leak would show the actual, not the client price.
     db.add_all([
-        # Oldest PO: one Widget line, margin (10000-8000)/10000 = 20%.
+        # Oldest PO: one Widget line, actual margin (10000-8000)/10000 = 20%; client 11000.
         POLineItem(po_id=po_old.id, product_id=widget.id, description="Widget unit",
                    uom="PCS", ordered_qty=Decimal("10"), cost_price_paise=8000,
-                   sell_price_paise=10000, tax_rate=Decimal("18")),
-        # Newest PO: a pricier Widget line, margin (12000-9000)/12000 = 25%.
+                   sell_price_paise=10000, client_sell_price_paise=11000,
+                   tax_rate=Decimal("18")),
+        # Newest PO: a pricier Widget line, actual margin (12000-9000)/12000 = 25%; client 13000.
+        # Its ACTUAL freight (800) DIVERGES from the visible client freight (500) so the
+        # freight masking is provable — a leak would show the actual freight, not the client.
         POLineItem(po_id=po_new.id, product_id=widget.id, description="Widget premium",
                    uom="PCS", ordered_qty=Decimal("5"), cost_price_paise=9000,
-                   sell_price_paise=12000, tax_rate=Decimal("18")),
-        # Newest PO: a giveaway Gadget line (sell 0) -> margin must be null.
+                   sell_price_paise=12000, client_sell_price_paise=13000,
+                   freight_paise=800, client_freight_paise=500,
+                   tax_rate=Decimal("18")),
+        # Newest PO: a giveaway Gadget line (actual sell 0) -> margin must be null; client 0.
         POLineItem(po_id=po_new.id, product_id=gadget.id, description="Gadget sample",
                    uom="PCS", ordered_qty=Decimal("2"), cost_price_paise=5000,
-                   sell_price_paise=0, tax_rate=Decimal("18")),
+                   sell_price_paise=0, client_sell_price_paise=0, tax_rate=Decimal("18")),
         # CANCELLED PO: an absurd line that must never appear in any result.
         POLineItem(po_id=po_canc.id, product_id=widget.id, description="Widget cancelled",
                    uom="PCS", ordered_qty=Decimal("100"), cost_price_paise=1,
-                   sell_price_paise=999999, tax_rate=Decimal("18")),
+                   sell_price_paise=999999, client_sell_price_paise=999999,
+                   tax_rate=Decimal("18")),
     ])
     db.commit()
 
@@ -148,7 +157,8 @@ def test_multi_token_keyword_is_anded(client: TestClient) -> None:
     r = client.get("/api/v1/quote-search", params={"q": "premium widget"})
     assert r.status_code == 200
     assert len(r.json()) == 1
-    assert r.json()[0]["sell_price_paise"] == 12000
+    # Viewer sees the client-quoted price (the actual sell is masked to null).
+    assert r.json()[0]["client_sell_price_paise"] == 13000
 
 
 def test_category_filter(client: TestClient) -> None:
@@ -160,11 +170,17 @@ def test_category_filter(client: TestClient) -> None:
     assert len(r2.json()) == 2
 
 
-def test_budget_band_filters_on_unit_sell(client: TestClient) -> None:
+def test_budget_band_filters_on_client_price(client: TestClient) -> None:
     _as(client, "viewer")
-    r = client.get("/api/v1/quote-search", params={"budget_min_paise": 11000})
+    # The budget band now bounds the CLIENT-quoted price, not the admin-only actual.
+    # client prices are {11000, 13000, 0}; >= 12000 keeps only the 13000 line.
+    r = client.get("/api/v1/quote-search", params={"budget_min_paise": 12000})
     assert r.status_code == 200
-    assert [row["sell_price_paise"] for row in r.json()] == [12000]
+    assert [row["client_sell_price_paise"] for row in r.json()] == [13000]
+    # Proof it is NOT filtering on the actual sell: that line's actual is 12000, so a
+    # band of >= 12500 (above the actual, below the client price) must still keep it.
+    r2 = client.get("/api/v1/quote-search", params={"budget_min_paise": 12500})
+    assert [row["client_sell_price_paise"] for row in r2.json()] == [13000]
 
 
 def test_date_range_filter(client: TestClient) -> None:
@@ -191,7 +207,8 @@ def test_recency_ordering_and_cancelled_excluded(client: TestClient) -> None:
 
 
 def test_margin_pct_math_including_sell_zero(client: TestClient) -> None:
-    _as(client, "viewer")
+    # Margin is over the ADMIN-ONLY actual sell, so it is only visible to an IAM admin.
+    _as(client, "admin")
     rows = client.get("/api/v1/quote-search").json()
     margins = {row["sell_price_paise"]: row["margin_pct"] for row in rows}
     assert margins[10000] == 20.0
@@ -218,6 +235,59 @@ def test_ordered_qty_serialized_as_decimal_string(client: TestClient) -> None:
     row = rows[0]
     assert Decimal(row["ordered_qty"]) == Decimal("5")
     assert Decimal(row["tax_rate"]) == Decimal("18")
+
+
+def test_admin_sees_actual_sell_and_margin(client: TestClient) -> None:
+    _as(client, "admin")
+    rows = client.get("/api/v1/quote-search", params={"q": "premium widget"}).json()
+    assert len(rows) == 1
+    row = rows[0]
+    # An IAM admin sees the actual sell, its true margin, the actual freight, AND the
+    # client-quoted price + client freight.
+    assert row["sell_price_paise"] == 12000
+    assert row["margin_pct"] == 25.0
+    assert row["client_sell_price_paise"] == 13000
+    assert row["freight_paise"] == 800          # ACTUAL freight — admin sees it
+    assert row["client_freight_paise"] == 500   # client freight — visible
+
+
+def test_non_admin_masks_actual_sell_margin_and_freight(client: TestClient) -> None:
+    _as(client, "viewer")
+    rows = client.get("/api/v1/quote-search").json()
+    assert rows, "viewer should still get the (client-priced) rows"
+    for row in rows:
+        # The actual sell, true margin AND actual freight are masked; the client-quoted
+        # price + client freight are returned. (Freight leak was the auth-audit HIGH.)
+        assert row["sell_price_paise"] is None
+        assert row["margin_pct"] is None
+        assert row["freight_paise"] is None
+        assert isinstance(row["client_sell_price_paise"], int)
+        assert isinstance(row["client_freight_paise"], int)
+    # And the divergent actual freight (800) never appears anywhere in a viewer's payload.
+    premium = next(r for r in rows if r["client_sell_price_paise"] == 13000)
+    assert premium["client_freight_paise"] == 500
+    assert 800 not in {row["freight_paise"] for row in rows}
+
+
+def test_trend_masks_actual_sell_for_non_admin(client: TestClient) -> None:
+    _as(client, "admin")
+    product_id = client.get(
+        "/api/v1/quote-search", params={"q": "WX-100"}
+    ).json()[0]["product_id"]
+
+    admin_pts = client.get(
+        "/api/v1/quote-search/trend", params={"product_id": product_id}
+    ).json()
+    assert [p["sell_price_paise"] for p in admin_pts] == [10000, 12000]
+    assert [p["client_sell_price_paise"] for p in admin_pts] == [11000, 13000]
+
+    _as(client, "viewer")
+    view_pts = client.get(
+        "/api/v1/quote-search/trend", params={"product_id": product_id}
+    ).json()
+    # Non-admin: actual sell masked, client price still visible.
+    assert all(p["sell_price_paise"] is None for p in view_pts)
+    assert [p["client_sell_price_paise"] for p in view_pts] == [11000, 13000]
 
 
 def test_rbac_denies_user_without_sales_orders(client: TestClient) -> None:

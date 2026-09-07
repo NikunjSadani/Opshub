@@ -8,6 +8,7 @@ import {
   Loading,
   Modal,
   PageHeader,
+  SelectField,
   StatePanel,
   Table,
   Td,
@@ -21,15 +22,18 @@ import {
 import { ApiError, useApi } from '../../api/client';
 import { usePermissions } from '../../auth/AuthProvider';
 import {
+  AGENCY_FEE_LABEL,
   LINE_STATUS_LABEL,
   LINE_STATUS_TONE,
   PO_STATUS_LABEL,
   PO_STATUS_TONE,
+  rupeesToPaise,
   useAmendPurchaseOrder,
   useConfirmPurchaseOrder,
   usePurchaseOrderQuery,
   useShortClosePO,
   useVoidPO,
+  type AgencyFeeType,
   type LineStatus,
   type PODetail as PODetailType,
   type POStatus,
@@ -40,6 +44,28 @@ function errorMessage(err: unknown): string {
   if (err instanceof ApiError) return err.message;
   if (err instanceof Error) return err.message;
   return 'Something went wrong.';
+}
+
+/** Format paise as ₹, or a dash for a null/masked value (e.g. admin-only actuals). */
+function rupeesOrDash(paise: number | null | undefined): string {
+  return paise == null ? '—' : rupees(paise);
+}
+
+/** A human summary of a PO's header agency fee, including the resolved rupee amount. Agency
+ * fee is REVENUE charged to the client — visible to everyone. */
+function agencyFeeLabel(po: PODetailType): string {
+  if (po.agency_fee_type === 'PERCENT') {
+    return `${AGENCY_FEE_LABEL.PERCENT} — ${po.agency_fee_percent ?? 0}% (${rupees(po.agency_fee_computed_paise)})`;
+  }
+  if (po.agency_fee_type === 'FIXED') {
+    return `${AGENCY_FEE_LABEL.FIXED} — ${rupees(po.agency_fee_computed_paise)}`;
+  }
+  return AGENCY_FEE_LABEL.NONE;
+}
+
+/** A displayable PO title — the number, or a placeholder when one hasn't been added yet. */
+function poTitle(po: { po_number: string | null }): string {
+  return po.po_number ? `PO ${po.po_number}` : 'PO (no number)';
 }
 
 /** Format a plain YYYY-MM-DD as DD/MM/YYYY without a timezone-shifting parse. */
@@ -66,6 +92,9 @@ export function PODetail() {
 
   const canOperate = perms.atLeast('sales_orders', 'OPERATE');
   const canManage = perms.atLeast('sales_orders', 'MANAGE');
+  // Only admins (platform IAM) may see the "actual" sell + freight — the API masks
+  // them (null) for everyone else. Matches the backend has_platform(IAM) gate.
+  const isAdmin = perms.hasPlatform('iam');
 
   const query = usePurchaseOrderQuery(id || null);
   const po = query.data;
@@ -74,19 +103,30 @@ export function PODetail() {
   if (query.isError) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   if (!po) return <StatePanel title="Not found">This purchase order does not exist.</StatePanel>;
 
-  return <PODetailBody po={po} canOperate={canOperate} canManage={canManage} download={download} toast={toast} />;
+  return (
+    <PODetailBody
+      po={po}
+      canOperate={canOperate}
+      canManage={canManage}
+      isAdmin={isAdmin}
+      download={download}
+      toast={toast}
+    />
+  );
 }
 
 function PODetailBody({
   po,
   canOperate,
   canManage,
+  isAdmin,
   download,
   toast,
 }: {
   po: PODetailType;
   canOperate: boolean;
   canManage: boolean;
+  isAdmin: boolean;
   download: (fileId: number, fallbackName?: string) => Promise<void>;
   toast: ReturnType<typeof useToast>;
 }) {
@@ -162,7 +202,7 @@ function PODetailBody({
   return (
     <div>
       <PageHeader
-        title={`PO ${po.po_number}`}
+        title={poTitle(po)}
         subtitle={po.client_name ?? undefined}
         actions={
           <div className="flex flex-wrap items-center gap-2">
@@ -172,6 +212,13 @@ function PODetailBody({
             >
               Back to register
             </Link>
+            {/* No PO number yet — a prominent affordance to add one later (OPERATE),
+                via the same header amend flow (opens the modal focused on the number). */}
+            {canOperate && !terminal && !po.po_number && (
+              <Button variant="primary" size="sm" onClick={() => setAmendOpen(true)}>
+                Add PO number
+              </Button>
+            )}
             {/* Confirm — OPERATE, only while the PO is still a DRAFT. Non-destructive:
                 a single click (no ConfirmDialog). Server 422s if it isn't DRAFT. */}
             {canOperate && po.status === 'DRAFT' && (
@@ -197,7 +244,7 @@ function PODetailBody({
                 size="sm"
                 onClick={() => {
                   setScReason('');
-                  setScTarget({ label: `whole PO ${po.po_number}` });
+                  setScTarget({ label: `whole ${poTitle(po)}` });
                 }}
               >
                 Short-close PO
@@ -241,7 +288,20 @@ function PODetailBody({
           </DefItem>
           <DefItem label="Client GSTIN">{po.client_gstin ?? '—'}</DefItem>
           <DefItem label="Lines">{po.line_count}</DefItem>
-          <DefItem label="Total sell">{rupees(po.total_sell_paise)}</DefItem>
+          {/* Client-quoted revenue components — all visible to everyone. */}
+          <DefItem label="Client sell total">{rupees(po.total_client_sell_paise)}</DefItem>
+          <DefItem label="Client freight total">{rupees(po.total_client_freight_paise)}</DefItem>
+          <DefItem label="Packaging/handling/other">
+            {rupees(po.total_client_extras_paise)}
+          </DefItem>
+          <DefItem label="Agency fee">{agencyFeeLabel(po)}</DefItem>
+          {/* Full client revenue = entire billing (sell + freight + extras) + agency fee. */}
+          <DefItem label="Total client revenue">
+            {rupees(po.total_with_agency_paise)}
+          </DefItem>
+          {/* ACTUAL sell total is ADMIN-ONLY: the API returns null for non-admins, rendered
+              as a dash so the margin never leaks. */}
+          <DefItem label="Actual sell total">{rupeesOrDash(po.total_sell_paise)}</DefItem>
           <DefItem label="Amendments">{po.amendments_count}</DefItem>
           <DefItem label="Soft copy">
             {po.soft_copy_file ? (
@@ -283,9 +343,14 @@ function PODetailBody({
               <Th>Description</Th>
               <Th>UOM</Th>
               <Th className="text-right">Qty</Th>
-              <Th className="text-right">Cost</Th>
-              <Th className="text-right">Sell</Th>
-              <Th className="text-right">Freight</Th>
+              <Th className="text-right">Orig CP</Th>
+              <Th className="text-right">Our CP</Th>
+              <Th className="text-right">Client sell</Th>
+              <Th className="text-right">Vendor sell</Th>
+              {isAdmin && <Th className="text-right">Actual sell 🔒</Th>}
+              <Th className="text-right">Client frt</Th>
+              <Th className="text-right">Vendor frt</Th>
+              {isAdmin && <Th className="text-right">Actual frt 🔒</Th>}
               <Th className="text-right">Packaging</Th>
               <Th className="text-right">Handling</Th>
               <Th className="text-right">Other</Th>
@@ -304,13 +369,34 @@ function PODetailBody({
                 <Td>{line.description || '—'}</Td>
                 <Td>{line.uom || '—'}</Td>
                 <Td className="text-right tabular-nums">{line.ordered_qty}</Td>
-                <Td className="text-right tabular-nums">{rupees(line.cost_price_paise)}</Td>
-                <Td className="text-right tabular-nums">{rupees(line.sell_price_paise)}</Td>
                 <Td className="text-right tabular-nums text-slate-500">
-                  {rupees(line.freight_paise)}
+                  {rupeesOrDash(line.original_cost_price_paise)}
+                </Td>
+                <Td className="text-right tabular-nums">{rupees(line.cost_price_paise)}</Td>
+                <Td className="text-right tabular-nums">
+                  {rupees(line.client_sell_price_paise)}
                 </Td>
                 <Td className="text-right tabular-nums text-slate-500">
-                  {rupees(line.packaging_paise)}
+                  {rupeesOrDash(line.vendor_sell_price_paise)}
+                </Td>
+                {isAdmin && (
+                  <Td className="text-right tabular-nums">
+                    {rupeesOrDash(line.sell_price_paise)}
+                  </Td>
+                )}
+                <Td className="text-right tabular-nums text-slate-500">
+                  {rupeesOrDash(line.client_freight_paise)}
+                </Td>
+                <Td className="text-right tabular-nums text-slate-500">
+                  {rupeesOrDash(line.vendor_freight_paise)}
+                </Td>
+                {isAdmin && (
+                  <Td className="text-right tabular-nums">
+                    {rupeesOrDash(line.freight_paise)}
+                  </Td>
+                )}
+                <Td className="text-right tabular-nums text-slate-500">
+                  {rupeesOrDash(line.packaging_paise)}
                 </Td>
                 <Td className="text-right tabular-nums text-slate-500">
                   {rupees(line.handling_paise)}
@@ -421,7 +507,7 @@ function PODetailBody({
         message={
           <div>
             <p className="mb-2">
-              Void PO <span className="font-semibold">{po.po_number}</span>? It is soft-cancelled
+              Void <span className="font-semibold">{poTitle(po)}</span>? It is soft-cancelled
               (nothing is deleted) but can no longer be amended or short-closed.
             </p>
             <TextArea
@@ -451,21 +537,32 @@ function AmendModal({
   onClose: () => void;
   busy: boolean;
   onSubmit: (body: {
-    po_number?: string;
+    po_number?: string | null;
     po_date?: string;
     expected_procurement_date?: string | null;
     notes?: string | null;
     soft_copy_file_id?: string | null;
+    agency_fee_type?: AgencyFeeType;
+    agency_fee_percent?: number;
+    agency_fee_amount_paise?: number;
     summary?: string;
   }) => void;
 }) {
   const toast = useToast();
   const { postForm } = useApi();
-  const [poNumber, setPoNumber] = useState(po.po_number);
+  const [poNumber, setPoNumber] = useState(po.po_number ?? '');
   const [poDate, setPoDate] = useState(po.po_date);
   const [expectedDate, setExpectedDate] = useState(po.expected_procurement_date ?? '');
   const [notes, setNotes] = useState(po.notes ?? '');
   const [summary, setSummary] = useState('');
+  // Agency fee (header) — seeded from the PO; the value input is conditional on the type.
+  const [agencyFeeType, setAgencyFeeType] = useState<AgencyFeeType>(po.agency_fee_type);
+  const [agencyFeePercent, setAgencyFeePercent] = useState(
+    po.agency_fee_percent != null ? String(po.agency_fee_percent) : '',
+  );
+  const [agencyFeeAmount, setAgencyFeeAmount] = useState(
+    po.agency_fee_amount_paise != null ? (po.agency_fee_amount_paise / 100).toFixed(2) : '',
+  );
   // Soft copy: seeded from the PO's current attachment. Removing it clears the link
   // on save (amend sends soft_copy_file_id: null); attaching uploads then links a new id.
   const [softCopy, setSoftCopy] = useState<{ id: string; filename: string } | null>(
@@ -493,12 +590,24 @@ function AmendModal({
     }
   }
 
-  const valid = poNumber.trim() !== '' && poDate !== '' && !uploadingSoftCopy;
+  const agencyPercentNum = Number(agencyFeePercent.trim());
+  const agencyPercentValid =
+    agencyFeePercent.trim() !== '' &&
+    Number.isFinite(agencyPercentNum) &&
+    agencyPercentNum >= 0 &&
+    agencyPercentNum <= 100;
+  const agencyFeeValid =
+    agencyFeeType === 'NONE' ||
+    (agencyFeeType === 'PERCENT' && agencyPercentValid) ||
+    (agencyFeeType === 'FIXED' && rupeesToPaise(agencyFeeAmount) != null);
+
+  // PO number is OPTIONAL now — a PO can stay without one, or have one added here.
+  const valid = poDate !== '' && agencyFeeValid && !uploadingSoftCopy;
 
   return (
     <Modal
       open
-      title={`Amend PO ${po.po_number}`}
+      title={`Amend ${poTitle(po)}`}
       onClose={onClose}
       busy={busy}
       footer={
@@ -509,11 +618,16 @@ function AmendModal({
           <Button
             onClick={() =>
               onSubmit({
-                po_number: poNumber.trim(),
+                po_number: poNumber.trim() || null,
                 po_date: poDate,
                 expected_procurement_date: expectedDate || null,
                 notes: notes.trim() || null,
                 soft_copy_file_id: softCopy?.id ?? null,
+                agency_fee_type: agencyFeeType,
+                agency_fee_percent:
+                  agencyFeeType === 'PERCENT' ? agencyPercentNum : undefined,
+                agency_fee_amount_paise:
+                  agencyFeeType === 'FIXED' ? (rupeesToPaise(agencyFeeAmount) as number) : undefined,
                 summary: summary.trim() || undefined,
               })
             }
@@ -530,12 +644,50 @@ function AmendModal({
           Editing the PO header. Line items are unchanged by this form.
         </p>
         <TextField
-          label="PO number"
-          required
+          label="PO number (optional)"
           value={poNumber}
           onChange={(e) => setPoNumber(e.target.value)}
           maxLength={64}
+          autoFocus={!po.po_number}
+          hint="Optional — add or change the PO number here."
         />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <SelectField
+            label="Agency fee"
+            value={agencyFeeType}
+            onChange={(e) => setAgencyFeeType(e.target.value as AgencyFeeType)}
+          >
+            {(Object.keys(AGENCY_FEE_LABEL) as AgencyFeeType[]).map((t) => (
+              <option key={t} value={t}>
+                {AGENCY_FEE_LABEL[t]}
+              </option>
+            ))}
+          </SelectField>
+          {agencyFeeType === 'PERCENT' && (
+            <TextField
+              label="Agency fee %"
+              required
+              inputMode="decimal"
+              value={agencyFeePercent}
+              onChange={(e) => setAgencyFeePercent(e.target.value)}
+              error={agencyFeePercent.trim() !== '' && !agencyPercentValid ? '0–100' : undefined}
+            />
+          )}
+          {agencyFeeType === 'FIXED' && (
+            <TextField
+              label="Agency fee ₹"
+              required
+              inputMode="decimal"
+              value={agencyFeeAmount}
+              onChange={(e) => setAgencyFeeAmount(e.target.value)}
+              error={
+                agencyFeeAmount.trim() !== '' && rupeesToPaise(agencyFeeAmount) == null
+                  ? 'Invalid amount'
+                  : undefined
+              }
+            />
+          )}
+        </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <TextField
             label="PO date"

@@ -16,6 +16,7 @@ import {
   Td,
 } from '../../ui';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
+import { usePermissions } from '../../auth/AuthProvider';
 import { useClientsQuery } from '../../api/projects';
 import { rupees } from './salesOrdersFormat';
 import {
@@ -48,12 +49,18 @@ function MarginBadge({ pct }: { pct: number | null }) {
 /**
  * Quote / price-book search — the pitch-speed lookup tool. A keyword box + facets
  * (category, client, date range, budget in ₹) over priced PO lines, showing
- * cost / sell / margin and the freight/packaging/handling adders. Clicking a row
+ * cost / client price and the freight/packaging/handling adders. Clicking a row
  * opens that product's price history so inflation over time is visible.
  *
- * VIEW-gated: the `sales_orders` module route already guards access.
+ * VIEW-gated: the `sales_orders` module route already guards access. Only IAM admins
+ * see the ACTUAL sell + true margin; the API masks both (null) for everyone else, so
+ * the extra columns are rendered only when `hasPlatform('iam')`. Everyone sees the
+ * client-quoted price, and the budget facet filters on that client price.
  */
 export function QuoteSearchPage() {
+  // Only admins (platform IAM) may see the "actual" sell + margin — the API masks them
+  // (null) for everyone else. Matches the backend has_platform(IAM) gate.
+  const isAdmin = usePermissions().hasPlatform('iam');
   const [q, setQ] = useState('');
   const [category, setCategory] = useState('');
   const [clientId, setClientId] = useState('');
@@ -126,7 +133,7 @@ export function QuoteSearchPage() {
         </SelectField>
         <div className="grid grid-cols-2 gap-2">
           <TextField
-            label="Budget min (₹)"
+            label="Client price min (₹)"
             type="number"
             inputMode="decimal"
             min={0}
@@ -135,7 +142,7 @@ export function QuoteSearchPage() {
             placeholder="0"
           />
           <TextField
-            label="Budget max (₹)"
+            label="Client price max (₹)"
             type="number"
             inputMode="decimal"
             min={0}
@@ -181,9 +188,11 @@ export function QuoteSearchPage() {
                   <Th>Date</Th>
                   <Th className="text-right">Qty</Th>
                   <Th className="text-right">Cost</Th>
-                  <Th className="text-right">Sell</Th>
-                  <Th className="text-right">Margin</Th>
+                  <Th className="text-right">Client price</Th>
+                  {isAdmin && <Th className="text-right">Actual sell</Th>}
+                  {isAdmin && <Th className="text-right">Margin</Th>}
                   <Th className="text-right">Freight</Th>
+                  {isAdmin && <Th className="text-right">Actual frt</Th>}
                   <Th className="text-right">Packaging</Th>
                   <Th className="text-right">Handling</Th>
                   <Th className="text-right">Trend</Th>
@@ -209,13 +218,28 @@ export function QuoteSearchPage() {
                       {row.ordered_qty} {row.uom}
                     </Td>
                     <Td className="text-right tabular-nums">{rupees(row.cost_price_paise)}</Td>
-                    <Td className="text-right tabular-nums">{rupees(row.sell_price_paise)}</Td>
-                    <Td className="text-right">
-                      <MarginBadge pct={row.margin_pct} />
+                    <Td className="text-right tabular-nums">
+                      {rupees(row.client_sell_price_paise)}
                     </Td>
+                    {isAdmin && (
+                      <Td className="text-right tabular-nums">
+                        {row.sell_price_paise == null ? '—' : rupees(row.sell_price_paise)}
+                      </Td>
+                    )}
+                    {isAdmin && (
+                      <Td className="text-right">
+                        <MarginBadge pct={row.margin_pct} />
+                      </Td>
+                    )}
+                    {/* VISIBLE client freight for everyone; the ACTUAL freight is admin-only. */}
                     <Td className="text-right tabular-nums text-slate-500">
-                      {rupees(row.freight_paise)}
+                      {rupees(row.client_freight_paise)}
                     </Td>
+                    {isAdmin && (
+                      <Td className="text-right tabular-nums text-slate-500">
+                        {row.freight_paise == null ? '—' : rupees(row.freight_paise)}
+                      </Td>
+                    )}
                     <Td className="text-right tabular-nums text-slate-500">
                       {rupees(row.packaging_paise)}
                     </Td>
@@ -271,7 +295,8 @@ export function QuoteSearchPage() {
                   <Th>Client</Th>
                   <Th className="text-right">Qty</Th>
                   <Th className="text-right">Cost</Th>
-                  <Th className="text-right">Sell</Th>
+                  <Th className="text-right">Client price</Th>
+                  {isAdmin && <Th className="text-right">Actual sell</Th>}
                 </Tr>
               </THead>
               <tbody>
@@ -284,7 +309,14 @@ export function QuoteSearchPage() {
                     <Td className="whitespace-nowrap">{p.client_name}</Td>
                     <Td className="text-right tabular-nums">{p.ordered_qty}</Td>
                     <Td className="text-right tabular-nums">{rupees(p.cost_price_paise)}</Td>
-                    <Td className="text-right tabular-nums">{rupees(p.sell_price_paise)}</Td>
+                    <Td className="text-right tabular-nums">
+                      {rupees(p.client_sell_price_paise)}
+                    </Td>
+                    {isAdmin && (
+                      <Td className="text-right tabular-nums">
+                        {p.sell_price_paise == null ? '—' : rupees(p.sell_price_paise)}
+                      </Td>
+                    )}
                   </Tr>
                 ))}
               </tbody>

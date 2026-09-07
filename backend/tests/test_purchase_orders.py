@@ -125,7 +125,7 @@ def _create_body(seeded: dict[str, int], **over: object) -> dict[str, object]:
         "po_date": "2026-08-20",
         "lines": [
             {"product_id": seeded["p1"], "ordered_qty": "10",
-             "cost_price_paise": 3000, "sell_price_paise": 5000, "tax_rate": "18"},
+             "cost_price_paise": 3000, "client_sell_price_paise": 5000, "tax_rate": "18"},
         ],
     }
     body.update(over)
@@ -165,13 +165,18 @@ def test_create_po_with_lines(client: TestClient, seeded: dict[str, int]) -> Non
     assert body["project_code"] == "ACM-001"
     assert body["client_gstin"] == "27AAPFU0939F1ZV"
     assert body["line_count"] == 1
-    assert body["total_sell_paise"] == 10 * 5000  # ordered_qty * per-unit sell
+    # The operator is a NON-admin: the client-sell total is visible; the ACTUAL sell total
+    # is masked to None. client_sell = 5000 (the required visible figure).
+    assert body["total_client_sell_paise"] == 10 * 5000  # ordered_qty * per-unit client sell
+    assert body["total_sell_paise"] is None
     line = body["lines"][0]
     assert line["product_name"] == "Widget" and line["brand"] == "Acme"
     assert line["description"] == "Widget"  # snapshot the product name when omitted
     assert line["uom"] == "PCS"  # snapshot the product uom when omitted
     assert line["ordered_qty"] == "10.000" and line["tax_rate"] == "18.00"
     assert line["line_status"] == "OPEN"
+    assert line["client_sell_price_paise"] == 5000
+    assert line["sell_price_paise"] is None  # ACTUAL masked for a non-admin
 
 
 def test_duplicate_client_po_number_is_409(client: TestClient, seeded: dict[str, int]) -> None:
@@ -198,7 +203,7 @@ def test_inactive_product_400(client: TestClient, seeded: dict[str, int]) -> Non
     _as(client, "operator")
     r = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
         {"product_id": seeded["p3_inactive"], "ordered_qty": "1",
-         "cost_price_paise": 100, "sell_price_paise": 200}]))
+         "cost_price_paise": 100, "client_sell_price_paise": 200}]))
     assert r.status_code == 400, r.text
 
 
@@ -245,7 +250,7 @@ def test_amend_snapshots_version_and_replaces_lines(
         "notes": "revised",
         "lines": [
             {"product_id": seeded["p2"], "ordered_qty": "4",
-             "cost_price_paise": 1000, "sell_price_paise": 2500},
+             "cost_price_paise": 1000, "client_sell_price_paise": 2500},
         ],
         "summary": "swapped the line",
     })
@@ -255,7 +260,45 @@ def test_amend_snapshots_version_and_replaces_lines(
     assert body["notes"] == "revised"
     assert body["line_count"] == 1
     assert body["lines"][0]["product_name"] == "Gadget"  # line replaced
-    assert body["total_sell_paise"] == 4 * 2500
+    assert body["total_client_sell_paise"] == 4 * 2500  # operator: client-sell total visible
+
+
+def test_non_admin_amend_preserves_admin_actual(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    # An IAM admin records an ACTUAL sell that diverges from the client-quoted sell.
+    _as(client, "admin")
+    pid = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        {"product_id": seeded["p1"], "ordered_qty": "10", "cost_price_paise": 3000,
+         "client_sell_price_paise": 5000, "sell_price_paise": 6000, "tax_rate": "18"},
+    ])).json()["id"]
+    assert client.get(f"/api/v1/purchase-orders/{pid}").json()["lines"][0][
+        "sell_price_paise"] == 6000  # admin sees the actual
+
+    # A NON-admin operator amends (full line replacement) editing qty, WITHOUT the actual.
+    _as(client, "operator")
+    r = client.patch(f"/api/v1/purchase-orders/{pid}", json={"lines": [
+        {"product_id": seeded["p1"], "ordered_qty": "20", "cost_price_paise": 3000,
+         "client_sell_price_paise": 5000, "tax_rate": "18"},
+    ]})
+    assert r.status_code == 200, r.text
+
+    # The admin's ACTUAL must be PRESERVED (carried forward by same product+position),
+    # NOT silently reset to the client figure (5000).
+    _as(client, "admin")
+    line = client.get(f"/api/v1/purchase-orders/{pid}").json()["lines"][0]
+    assert line["sell_price_paise"] == 6000, "admin actual must survive a non-admin edit"
+    assert line["client_sell_price_paise"] == 5000
+
+    # A genuinely NEW product line from a non-admin has no old actual to carry -> client.
+    _as(client, "operator")
+    assert client.patch(f"/api/v1/purchase-orders/{pid}", json={"lines": [
+        {"product_id": seeded["p2"], "ordered_qty": "3", "cost_price_paise": 1000,
+         "client_sell_price_paise": 2500, "tax_rate": "18"},
+    ]}).status_code == 200
+    _as(client, "admin")
+    assert client.get(f"/api/v1/purchase-orders/{pid}").json()["lines"][0][
+        "sell_price_paise"] == 2500  # new product -> defaults to client
 
 
 def test_amend_blocked_on_cancelled_is_422(
@@ -277,9 +320,9 @@ def test_short_close_one_line(client: TestClient, seeded: dict[str, int]) -> Non
     _as(client, "operator")
     detail = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
         {"product_id": seeded["p1"], "ordered_qty": "10",
-         "cost_price_paise": 100, "sell_price_paise": 200},
+         "cost_price_paise": 100, "client_sell_price_paise": 200},
         {"product_id": seeded["p2"], "ordered_qty": "5",
-         "cost_price_paise": 100, "sell_price_paise": 200}])).json()
+         "cost_price_paise": 100, "client_sell_price_paise": 200}])).json()
     pid, line_id = detail["id"], detail["lines"][0]["id"]
     _as(client, "admin")  # short-close is MANAGE
     r = client.post(f"/api/v1/purchase-orders/{pid}/short-close",
@@ -378,7 +421,9 @@ def test_bulk_upload_happy_path(client: TestClient, seeded: dict[str, int]) -> N
     # BULK-1 has two lines; money parsed rupees -> paise (25.50 -> 2550).
     listing = {p["po_number"]: p for p in client.get("/api/v1/purchase-orders").json()}
     assert listing["BULK-1"]["line_count"] == 2
-    assert listing["BULK-1"]["total_sell_paise"] == 3 * 2550 + 2 * 900
+    # bulk maps the sell column to client_sell; the operator sees the client-sell total.
+    assert listing["BULK-1"]["total_client_sell_paise"] == 3 * 2550 + 2 * 900
+    assert listing["BULK-1"]["total_sell_paise"] is None  # ACTUAL masked for the operator
 
 
 def test_bulk_upload_dedup_skip(client: TestClient, seeded: dict[str, int]) -> None:
@@ -494,3 +539,371 @@ def test_bulk_upload_honours_po_date_column(
     assert {s["po_number"] for s in out["skipped"]} == {"BADDATE"}
     listing = {p["po_number"]: p for p in client.get("/api/v1/purchase-orders").json()}
     assert listing["DATED-1"]["po_date"] == "2026-01-15"
+
+
+# ------------------------------------------- pricing tiers + actual/RBAC masking
+
+def _tier_line(seeded: dict[str, int], **over: object) -> dict[str, object]:
+    line: dict[str, object] = {
+        "product_id": seeded["p1"], "ordered_qty": "10",
+        "cost_price_paise": 3000, "original_cost_price_paise": 3200,
+        "client_sell_price_paise": 5000, "vendor_sell_price_paise": 4800,
+        "client_freight_paise": 50,
+    }
+    line.update(over)
+    return line
+
+
+def test_create_with_all_tiers_admin_sets_and_sees_actuals(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """An ADMIN may set the ACTUAL sell/freight (diverging from the client figure) and sees
+    every tier back, including the actuals and the actual sell total."""
+    _as(client, "admin")
+    r = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        _tier_line(seeded, sell_price_paise=6000, freight_paise=99)]))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    line = body["lines"][0]
+    assert line["cost_price_paise"] == 3000
+    assert line["original_cost_price_paise"] == 3200
+    assert line["client_sell_price_paise"] == 5000
+    assert line["vendor_sell_price_paise"] == 4800
+    assert line["client_freight_paise"] == 50
+    assert line["sell_price_paise"] == 6000   # ACTUAL — admin set it, diverges from client
+    assert line["freight_paise"] == 99        # ACTUAL freight — admin set it
+    assert body["total_sell_paise"] == 10 * 6000        # actual aggregate visible to admin
+    assert body["total_client_sell_paise"] == 10 * 5000  # client aggregate
+
+
+def test_actuals_masked_for_non_admin(client: TestClient, seeded: dict[str, int]) -> None:
+    """An admin creates a PO with a diverging actual; a non-admin OPERATE user reads it and
+    gets None for the actual sell/freight (line + summary), while every client tier shows."""
+    _as(client, "admin")
+    pid = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        _tier_line(seeded, sell_price_paise=6000, freight_paise=99)])).json()["id"]
+    _as(client, "operator")
+    body = client.get(f"/api/v1/purchase-orders/{pid}").json()
+    line = body["lines"][0]
+    assert line["sell_price_paise"] is None   # ACTUAL masked
+    assert line["freight_paise"] is None      # ACTUAL freight masked
+    assert line["client_sell_price_paise"] == 5000  # client tier visible
+    assert line["vendor_sell_price_paise"] == 4800
+    assert line["client_freight_paise"] == 50
+    assert body["total_sell_paise"] is None            # actual aggregate masked
+    assert body["total_client_sell_paise"] == 10 * 5000
+    # And in the list serializer too.
+    row = {p["id"]: p for p in client.get("/api/v1/purchase-orders").json()}[pid]
+    assert row["total_sell_paise"] is None
+    assert row["total_client_sell_paise"] == 10 * 5000
+
+
+def test_non_admin_cannot_set_actual_defaults_to_client(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """A NON-admin who sends an actual sell/freight diverging from the client figure has it
+    IGNORED — the stored actual defaults to the client value (verified by reading as admin)."""
+    _as(client, "operator")
+    pid = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        _tier_line(seeded, sell_price_paise=9999, freight_paise=7777)])).json()["id"]
+    _as(client, "admin")  # only an admin can see the stored actual
+    line = client.get(f"/api/v1/purchase-orders/{pid}").json()["lines"][0]
+    assert line["sell_price_paise"] == 5000   # defaulted to client_sell, NOT 9999
+    assert line["freight_paise"] == 50        # defaulted to client_freight, NOT 7777
+
+
+def test_client_sell_price_is_required(client: TestClient, seeded: dict[str, int]) -> None:
+    _as(client, "operator")
+    r = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        {"product_id": seeded["p1"], "ordered_qty": "1", "cost_price_paise": 100}]))
+    assert r.status_code == 422, r.text  # pydantic: client_sell_price_paise missing
+
+
+# ------------------------------------------------------- optional po_number
+
+def test_create_without_po_number_succeeds(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    _as(client, "operator")
+    r = client.post("/api/v1/purchase-orders", json=_create_body(seeded, po_number=None))
+    assert r.status_code == 201, r.text
+    assert r.json()["po_number"] is None
+
+
+def test_two_null_number_pos_same_client_both_ok(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """The partial unique index excludes NULLs — two numberless POs for one client persist."""
+    _as(client, "operator")
+    assert client.post("/api/v1/purchase-orders",
+                       json=_create_body(seeded, po_number=None)).status_code == 201
+    assert client.post("/api/v1/purchase-orders",
+                       json=_create_body(seeded, po_number=None)).status_code == 201
+
+
+def test_add_po_number_later_via_amend_and_dup_409(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """A numberless PO can get its number via amend; a number already used in-client 409s."""
+    _as(client, "operator")
+    # An existing PO holds the number "AMD-1".
+    assert client.post("/api/v1/purchase-orders",
+                       json=_create_body(seeded, po_number="AMD-1")).status_code == 201
+    # A numberless PO; amend it to a FREE number -> OK.
+    null_pid = client.post("/api/v1/purchase-orders",
+                           json=_create_body(seeded, po_number=None)).json()["id"]
+    ok = client.patch(f"/api/v1/purchase-orders/{null_pid}", json={"po_number": "AMD-2"})
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["po_number"] == "AMD-2"
+    # Amend it again to a number already taken in this client -> 409.
+    dup = client.patch(f"/api/v1/purchase-orders/{null_pid}", json={"po_number": "AMD-1"})
+    assert dup.status_code == 409, dup.text
+
+
+# ------------------------------------------------------------- agency fee
+
+def test_agency_fee_percent_happy(client: TestClient, seeded: dict[str, int]) -> None:
+    _as(client, "operator")
+    r = client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="PERCENT", agency_fee_percent="5.5"))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["agency_fee_type"] == "PERCENT"
+    # On the wire the percent is a JSON number (FE consumes it as `number`), not a string.
+    assert body["agency_fee_percent"] == 5.5
+    assert body["agency_fee_amount_paise"] is None
+    # Agency fee is REVENUE: 5.5% of the client-sell order value (10*5000 = 50000 paise) =
+    # 2750 paise, and the full client-facing revenue = 50000 + 2750. Visible to the operator
+    # (non-admin) — it is not a sensitive/actual figure.
+    assert body["total_client_sell_paise"] == 50000
+    assert body["agency_fee_computed_paise"] == 2750
+    assert body["total_with_agency_paise"] == 52750
+
+
+def test_agency_fee_fixed_happy(client: TestClient, seeded: dict[str, int]) -> None:
+    _as(client, "operator")
+    r = client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="FIXED", agency_fee_amount_paise=250000))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["agency_fee_type"] == "FIXED"
+    assert body["agency_fee_amount_paise"] == 250000
+    assert body["agency_fee_percent"] is None
+    # FIXED fee is the flat amount; full revenue = client-sell total + the fixed fee.
+    assert body["agency_fee_computed_paise"] == 250000
+    assert body["total_with_agency_paise"] == 50000 + 250000
+
+
+def test_agency_fee_none_default(client: TestClient, seeded: dict[str, int]) -> None:
+    _as(client, "operator")
+    body = client.post("/api/v1/purchase-orders", json=_create_body(seeded)).json()
+    assert body["agency_fee_type"] == "NONE"
+    assert body["agency_fee_percent"] is None and body["agency_fee_amount_paise"] is None
+    # No fee -> computed 0, and the with-agency total equals the plain client-sell total.
+    assert body["agency_fee_computed_paise"] == 0
+    assert body["total_with_agency_paise"] == body["total_client_sell_paise"] == 50000
+
+
+def test_agency_fee_rejections(client: TestClient, seeded: dict[str, int]) -> None:
+    _as(client, "operator")
+    # PERCENT with amount ALSO set -> 400 (service rule).
+    assert client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="PERCENT", agency_fee_percent="5",
+        agency_fee_amount_paise=1000)).status_code == 400
+    # PERCENT with NO percent -> 400.
+    assert client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="PERCENT")).status_code == 400
+    # FIXED with NO amount -> 400.
+    assert client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="FIXED")).status_code == 400
+    # FIXED with percent set -> 400.
+    assert client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="FIXED", agency_fee_amount_paise=1000,
+        agency_fee_percent="5")).status_code == 400
+    # NONE with a percent -> 400.
+    assert client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="NONE", agency_fee_percent="5")).status_code == 400
+    # percent out of 0..100 -> 422 at pydantic (Field le=100).
+    assert client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="PERCENT", agency_fee_percent="150")).status_code == 422
+
+
+def test_agency_fee_amend(client: TestClient, seeded: dict[str, int]) -> None:
+    """Amend can set and later clear the agency fee (validated as a trio)."""
+    _as(client, "operator")
+    pid = client.post("/api/v1/purchase-orders", json=_create_body(seeded)).json()["id"]
+    set_pct = client.patch(f"/api/v1/purchase-orders/{pid}", json={
+        "agency_fee_type": "PERCENT", "agency_fee_percent": "3.25"})
+    assert set_pct.status_code == 200, set_pct.text
+    assert set_pct.json()["agency_fee_percent"] == 3.25
+    # Changing type to PERCENT without a percent is rejected (422 -> blocked amend).
+    bad = client.patch(f"/api/v1/purchase-orders/{pid}", json={
+        "agency_fee_type": "FIXED"})
+    assert bad.status_code == 422, bad.text
+    # Clear back to NONE.
+    clear = client.patch(f"/api/v1/purchase-orders/{pid}", json={"agency_fee_type": "NONE"})
+    assert clear.status_code == 200, clear.text
+    assert clear.json()["agency_fee_type"] == "NONE"
+    assert clear.json()["agency_fee_percent"] is None
+
+
+# --------------------------------------------- totals net of short-close / void
+
+def test_void_zeroes_client_total_and_agency(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """A VOIDED (CANCELLED) PO carries NO revenue: the client-sell total, the client freight,
+    the agency fee, the total revenue AND the admin actual total all collapse to 0
+    (audit HIGH-1)."""
+    _as(client, "admin")
+    detail = client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="PERCENT", agency_fee_percent="5",
+        lines=[_tier_line(seeded, sell_price_paise=6000)])).json()
+    pid = detail["id"]
+    # Before: 10*5000 = 50000 goods; client freight 50 (flat, per line); 5% agency on the
+    # ENTIRE billing (50000 + 50 = 50050) = 2502.5 -> 2503 HALF-UP; total revenue = 52553.
+    assert detail["total_client_sell_paise"] == 50000
+    assert detail["total_client_freight_paise"] == 50
+    assert detail["total_client_extras_paise"] == 0
+    assert detail["agency_fee_computed_paise"] == 2503
+    assert detail["total_with_agency_paise"] == 52553
+    assert detail["total_sell_paise"] == 10 * 6000  # admin actual aggregate
+    body = client.post(f"/api/v1/purchase-orders/{pid}/void",
+                       json={"reason": "duplicate PO"}).json()
+    assert body["status"] == "CANCELLED"
+    assert body["total_client_sell_paise"] == 0
+    assert body["total_client_freight_paise"] == 0
+    assert body["agency_fee_computed_paise"] == 0
+    assert body["total_with_agency_paise"] == 0
+    assert body["total_sell_paise"] == 0  # actual aggregate also zeroed
+
+
+def test_short_close_nets_out_of_client_total_and_agency(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """A short-close retires the un-invoiced quantity, so that line drops out of the client
+    total AND the PERCENT agency base — the fee is charged only on what stays invoiceable
+    (audit HIGH-2)."""
+    _as(client, "admin")
+    detail = client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="PERCENT", agency_fee_percent="10", lines=[
+            {"product_id": seeded["p1"], "ordered_qty": "10",
+             "cost_price_paise": 100, "client_sell_price_paise": 5000},
+            {"product_id": seeded["p2"], "ordered_qty": "4",
+             "cost_price_paise": 100, "client_sell_price_paise": 2500}])).json()
+    pid = detail["id"]
+    line1_id = detail["lines"][0]["id"]
+    # Before: (10*5000)+(4*2500) = 60000 client; 10% agency = 6000; with-agency 66000.
+    assert detail["total_client_sell_paise"] == 60000
+    assert detail["agency_fee_computed_paise"] == 6000
+    # Short-close line 1 (unbilled DRAFT → retires all 10 units → nets to 0).
+    body = client.post(f"/api/v1/purchase-orders/{pid}/short-close",
+                       json={"line_id": line1_id, "reason": "vendor shortfall"}).json()
+    assert body["lines"][0]["line_status"] == "SHORT_CLOSED"
+    # Only line 2 remains invoiceable: 4*2500 = 10000; 10% agency = 1000; with-agency 11000.
+    assert body["total_client_sell_paise"] == 10000
+    assert body["agency_fee_computed_paise"] == 1000
+    assert body["total_with_agency_paise"] == 11000
+
+
+def test_client_freight_is_revenue_and_nets_on_full_short_close(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """Client freight is REVENUE we bill the client: it counts toward the total revenue AND
+    the agency-fee base (agency is charged on the ENTIRE client billing = goods + freight). A
+    FULLY short-closed line (nothing ships) drops its flat freight too."""
+    _as(client, "admin")
+    detail = client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="PERCENT", agency_fee_percent="10", lines=[
+            {"product_id": seeded["p1"], "ordered_qty": "10", "cost_price_paise": 100,
+             "client_sell_price_paise": 5000, "client_freight_paise": 300},
+            {"product_id": seeded["p2"], "ordered_qty": "4", "cost_price_paise": 100,
+             "client_sell_price_paise": 2500, "client_freight_paise": 200}])).json()
+    pid = detail["id"]
+    line1_id = detail["lines"][0]["id"]
+    # goods 60000; freight 300+200 = 500; agency 10% of the ENTIRE billing (60500) = 6050;
+    # total revenue = 60000 + 500 + 6050 = 66550.
+    assert detail["total_client_sell_paise"] == 60000
+    assert detail["total_client_freight_paise"] == 500
+    assert detail["agency_fee_computed_paise"] == 6050
+    assert detail["total_with_agency_paise"] == 66550
+    # Fully short-close line 1 → its goods AND its flat freight both drop out.
+    body = client.post(f"/api/v1/purchase-orders/{pid}/short-close",
+                       json={"line_id": line1_id, "reason": "vendor shortfall"}).json()
+    # Only line 2 ships: goods 10000; freight 200; agency 10% of (10000+200) = 1020;
+    # total revenue = 10000 + 200 + 1020 = 11220.
+    assert body["total_client_sell_paise"] == 10000
+    assert body["total_client_freight_paise"] == 200
+    assert body["agency_fee_computed_paise"] == 1020
+    assert body["total_with_agency_paise"] == 11220
+
+
+def test_packaging_handling_other_count_as_billing_and_agency_base(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """Packaging / handling / other are CLIENT charges: they count toward the total revenue
+    AND the agency-fee base (the agency % is on the ENTIRE client billing = goods + freight +
+    packaging + handling + other)."""
+    _as(client, "admin")
+    detail = client.post("/api/v1/purchase-orders", json=_create_body(
+        seeded, agency_fee_type="PERCENT", agency_fee_percent="10", lines=[
+            {"product_id": seeded["p1"], "ordered_qty": "10", "cost_price_paise": 100,
+             "client_sell_price_paise": 5000, "client_freight_paise": 300,
+             "packaging_paise": 100, "handling_paise": 200, "other_paise": 50}])).json()
+    # goods 50000; freight 300; extras 100+200+50 = 350; billing = 50000+300+350 = 50650;
+    # agency 10% of 50650 = 5065; total revenue = 50650 + 5065 = 55715.
+    assert detail["total_client_sell_paise"] == 50000
+    assert detail["total_client_freight_paise"] == 300
+    assert detail["total_client_extras_paise"] == 350
+    assert detail["agency_fee_computed_paise"] == 5065
+    assert detail["total_with_agency_paise"] == 55715
+
+
+# --------------------------------------- amend carries admin actuals (by product)
+
+def test_amend_reorder_preserves_admin_actuals(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """A non-admin amend that REORDERS the lines must keep each admin-set actual — the carry
+    matches by PRODUCT, not list position, so a reorder no longer wipes the margin
+    (audit MED-3)."""
+    _as(client, "admin")
+    detail = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        {"product_id": seeded["p1"], "ordered_qty": "10",
+         "cost_price_paise": 100, "client_sell_price_paise": 5000, "sell_price_paise": 6000},
+        {"product_id": seeded["p2"], "ordered_qty": "5",
+         "cost_price_paise": 100, "client_sell_price_paise": 2500,
+         "sell_price_paise": 3000}])).json()
+    pid = detail["id"]
+    _as(client, "operator")  # non-admin amends, sending the two lines REVERSED, no actuals
+    r = client.patch(f"/api/v1/purchase-orders/{pid}", json={"lines": [
+        {"product_id": seeded["p2"], "ordered_qty": "6",
+         "cost_price_paise": 100, "client_sell_price_paise": 2500},
+        {"product_id": seeded["p1"], "ordered_qty": "11",
+         "cost_price_paise": 100, "client_sell_price_paise": 5000}]})
+    assert r.status_code == 200, r.text
+    _as(client, "admin")  # only an admin can read the stored actuals back
+    lines = {ln["product_id"]: ln for ln in
+             client.get(f"/api/v1/purchase-orders/{pid}").json()["lines"]}
+    assert lines[seeded["p1"]]["sell_price_paise"] == 6000  # preserved despite reorder
+    assert lines[seeded["p2"]]["sell_price_paise"] == 3000  # preserved despite reorder
+
+
+def test_admin_amend_omitting_actual_preserves_margin(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """An ADMIN amend that edits a quantity WITHOUT re-sending the actual must keep the prior
+    actual, not silently reset it to the client figure (audit MED-4)."""
+    _as(client, "admin")
+    pid = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        {"product_id": seeded["p1"], "ordered_qty": "10",
+         "cost_price_paise": 100, "client_sell_price_paise": 5000,
+         "sell_price_paise": 6000}])).json()["id"]
+    # Admin fixes only the quantity; omits sell_price_paise.
+    r = client.patch(f"/api/v1/purchase-orders/{pid}", json={"lines": [
+        {"product_id": seeded["p1"], "ordered_qty": "20",
+         "cost_price_paise": 100, "client_sell_price_paise": 5000}]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["lines"][0]["ordered_qty"] == "20.000"
+    assert body["lines"][0]["sell_price_paise"] == 6000  # preserved, NOT reset to 5000

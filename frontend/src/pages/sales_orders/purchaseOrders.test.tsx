@@ -82,8 +82,27 @@ const PO_ROW = {
   expected_procurement_date: null,
   status: 'DRAFT',
   line_count: 2,
+  // Admin caller (MANAGE → platform iam) — the ACTUAL sell total is present. A non-admin
+  // caller would receive `total_sell_paise: null` (see PO_ROW_MASKED).
   total_sell_paise: 2500000,
+  total_client_sell_paise: 2500000,
+  total_client_freight_paise: 0,
+  total_client_extras_paise: 0,
+  agency_fee_type: 'NONE',
+  agency_fee_percent: null,
+  agency_fee_amount_paise: null,
+  agency_fee_computed_paise: 0,
+  total_with_agency_paise: 2500000,
   created_at: '2026-05-10T00:00:00Z',
+};
+
+// The same row as a NON-admin sees it: the ACTUAL sell total is masked to null; the
+// client-facing order value is still present so the register never renders ₹0.00.
+const PO_ROW_MASKED = {
+  ...PO_ROW,
+  total_sell_paise: null,
+  total_client_sell_paise: 2400000,
+  total_with_agency_paise: 2400000,
 };
 
 const PO_DETAIL = {
@@ -103,8 +122,14 @@ const PO_DETAIL = {
       uom: 'PCS',
       ordered_qty: '10.000',
       cost_price_paise: 100000,
-      sell_price_paise: 125000,
-      freight_paise: 0,
+      original_cost_price_paise: 90000,
+      client_sell_price_paise: 125000,
+      vendor_sell_price_paise: 110000,
+      // Actual sell/freight are admin-only — masked (null) for a non-admin caller.
+      sell_price_paise: null,
+      client_freight_paise: 0,
+      vendor_freight_paise: 0,
+      freight_paise: null,
       packaging_paise: 0,
       handling_paise: 0,
       other_paise: 0,
@@ -121,6 +146,15 @@ async function selectByOption(optionText: RegExp, value: string) {
   const opt = await screen.findByRole('option', { name: optionText });
   const select = opt.closest('select') as HTMLSelectElement;
   fireEvent.change(select, { target: { value } });
+}
+
+/** Pick an option from the searchable product combobox (open → type → click the match). */
+async function selectProduct(match: RegExp, type?: string) {
+  const combo = screen.getByRole('combobox', { name: /product/i });
+  fireEvent.focus(combo);
+  if (type) fireEvent.change(combo, { target: { value: type } });
+  const opt = await screen.findByRole('option', { name: match });
+  fireEvent.mouseDown(opt);
 }
 
 afterEach(() => {
@@ -147,7 +181,7 @@ describe('PO Register', () => {
     renderWithProviders(<PurchaseOrdersPage />);
 
     expect(await screen.findByText('PO-2026-001')).toBeInTheDocument();
-    // total_sell_paise (2500000) renders in rupees.
+    // The register "Order value" column renders total_with_agency_paise (2500000) in rupees.
     expect(screen.getByText('₹25,000.00')).toBeInTheDocument();
     const row = screen.getByText('PO-2026-001').closest('tr') as HTMLElement;
     expect(within(row).getByText('Draft')).toBeInTheDocument();
@@ -160,69 +194,186 @@ describe('PO Register', () => {
       ),
     );
   });
-});
 
-describe('PO create form', () => {
-  it('submits a PO with one line, converting rupee inputs to integer paise', async () => {
-    let postedBody: Record<string, unknown> | null = null;
+  it('a NON-admin sees the client-facing order value, never ₹0.00 for the masked actual', async () => {
+    // OPERATE → no platform perms → non-admin: the API masks total_sell_paise to null.
+    // Regression guard for the HIGH the E2E audit caught — the register must render the
+    // client-facing order value (total_with_agency_paise), not a ₹0.00 from the null actual.
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
-        const method = (init?.method ?? 'GET').toUpperCase();
         if (url.endsWith('/me')) return meResponse('OPERATE');
-        if (/\/projects\/clients\/\d+/.test(url)) return json(CLIENT_DETAIL);
         if (url.includes('/projects/clients')) return json(CLIENTS);
         if (url.includes('/projects')) return json(PROJECTS);
-        if (url.includes('/products')) return json(PRODUCTS);
-        if (url.includes('/purchase-orders') && method === 'POST') {
-          postedBody = JSON.parse(String(init?.body));
-          return json({ ...PO_DETAIL }, 201);
-        }
-        throw new Error(`Unexpected fetch: ${method} ${url}`);
+        if (url.includes('/purchase-orders')) return json([PO_ROW_MASKED]);
+        throw new Error(`Unexpected fetch: ${url}`);
       }),
     );
 
+    renderWithProviders(<PurchaseOrdersPage />);
+
+    expect(await screen.findByText('PO-2026-001')).toBeInTheDocument();
+    const row = screen.getByText('PO-2026-001').closest('tr') as HTMLElement;
+    // The order-value cell shows ₹24,000.00 (total_with_agency_paise), NOT ₹0.00.
+    expect(within(row).getByText('₹24,000.00')).toBeInTheDocument();
+    expect(within(row).queryByText('₹0.00')).not.toBeInTheDocument();
+  });
+});
+
+/** Stub the create-form's supporting GETs for the given /me level; returns captured state. */
+function stubCreateForm(level: Level) {
+  const state: { postedBody: Record<string, unknown> | null; urls: string[] } = {
+    postedBody: null,
+    urls: [],
+  };
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      state.urls.push(url);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/me')) return meResponse(level);
+      if (/\/projects\/clients\/\d+/.test(url)) return json(CLIENT_DETAIL);
+      if (url.includes('/projects/clients')) return json(CLIENTS);
+      if (url.includes('/projects')) return json(PROJECTS);
+      if (url.includes('/products')) return json(PRODUCTS);
+      if (url.includes('/purchase-orders') && method === 'POST') {
+        state.postedBody = JSON.parse(String(init?.body));
+        return json({ ...PO_DETAIL }, 201);
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    }),
+  );
+  return state;
+}
+
+/** Fill the header (client + project + date) plus one valid line's required money. */
+async function fillMinimalValidForm() {
+  await selectByOption(/BRI — Britannia/, '10');
+  await selectByOption(/BRI-001 — Q3 Trade Rewards/, '20');
+  fireEvent.change(screen.getByLabelText(/^po date/i), { target: { value: '2026-05-10' } });
+  await selectProduct(/Widget/);
+  fireEvent.change(screen.getByLabelText(/ordered qty/i), { target: { value: '2' } });
+  fireEvent.change(screen.getByLabelText(/our cp/i), { target: { value: '100.50' } });
+  fireEvent.change(screen.getByLabelText(/client sell/i), { target: { value: '250' } });
+}
+
+describe('PO create form', () => {
+  it('submits the full pricing set (original CP, client/vendor/actual sell, freight, agency fee) as paise', async () => {
+    // MANAGE → platform ['iam'] → admin, so the Actual sell/freight inputs render.
+    const state = stubCreateForm('MANAGE');
     renderWithProviders(<POForm />);
 
-    // PO number.
-    fireEvent.change(await screen.findByLabelText(/po number/i), {
-      target: { value: 'PO-NEW-1' },
-    });
-    // Client → enables the project picker.
-    await selectByOption(/BRI — Britannia/, '10');
-    await selectByOption(/BRI-001 — Q3 Trade Rewards/, '20');
-    // PO date (required).
-    fireEvent.change(screen.getByLabelText(/^po date/i), { target: { value: '2026-05-10' } });
-    // Line: product + qty + cost/sell in rupees.
-    await selectByOption(/Widget/, '5');
-    fireEvent.change(screen.getByLabelText(/ordered qty/i), { target: { value: '2' } });
-    fireEvent.change(screen.getByLabelText(/cost price/i), { target: { value: '100.50' } });
-    fireEvent.change(screen.getByLabelText(/sell price/i), { target: { value: '250' } });
+    fireEvent.change(await screen.findByLabelText(/po number/i), { target: { value: 'PO-NEW-1' } });
+    await fillMinimalValidForm();
+
+    fireEvent.change(screen.getByLabelText(/original cp/i), { target: { value: '90' } });
+    fireEvent.change(screen.getByLabelText(/vendor sell/i), { target: { value: '200' } });
+    fireEvent.change(screen.getByLabelText(/actual sell/i), { target: { value: '240' } });
+    fireEvent.change(screen.getByLabelText(/client freight/i), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText(/vendor freight/i), { target: { value: '8' } });
+    fireEvent.change(screen.getByLabelText(/actual freight/i), { target: { value: '9' } });
+
+    // Agency fee: fixed ₹5000.
+    fireEvent.change(screen.getByLabelText(/^agency fee$/i), { target: { value: 'FIXED' } });
+    fireEvent.change(screen.getByLabelText(/agency fee ₹/i), { target: { value: '5000' } });
 
     const submit = screen.getByRole('button', { name: /create purchase order/i });
     await waitFor(() => expect(submit).toBeEnabled());
     fireEvent.click(submit);
 
-    await waitFor(() => expect(postedBody).not.toBeNull());
-    const body = postedBody as unknown as {
+    await waitFor(() => expect(state.postedBody).not.toBeNull());
+    const body = state.postedBody as unknown as {
       po_number: string;
-      client_id: string;
-      project_id: string;
-      lines: Array<{
-        product_id: string;
-        ordered_qty: string;
-        cost_price_paise: number;
-        sell_price_paise: number;
-      }>;
+      agency_fee_type: string;
+      agency_fee_amount_paise: number;
+      lines: Array<Record<string, number | string>>;
     };
     expect(body.po_number).toBe('PO-NEW-1');
-    expect(body.client_id).toBe('10');
-    expect(body.project_id).toBe('20');
-    // ₹100.50 → 10050 paise; ₹250 → 25000 paise.
-    expect(body.lines[0].cost_price_paise).toBe(10050);
-    expect(body.lines[0].sell_price_paise).toBe(25000);
-    expect(body.lines[0].product_id).toBe('5');
+    const line = body.lines[0];
+    expect(line.product_id).toBe('5');
+    expect(line.cost_price_paise).toBe(10050); // Our CP ₹100.50
+    expect(line.original_cost_price_paise).toBe(9000); // ₹90
+    expect(line.client_sell_price_paise).toBe(25000); // ₹250
+    expect(line.vendor_sell_price_paise).toBe(20000); // ₹200
+    expect(line.sell_price_paise).toBe(24000); // Actual sell ₹240 (admin)
+    expect(line.client_freight_paise).toBe(1000); // ₹10
+    expect(line.vendor_freight_paise).toBe(800); // ₹8
+    expect(line.freight_paise).toBe(900); // Actual freight ₹9 (admin)
+    expect(body.agency_fee_type).toBe('FIXED');
+    expect(body.agency_fee_amount_paise).toBe(500000); // ₹5000
+  });
+
+  it('an ADMIN sees the Actual sell/freight inputs; a non-admin does NOT', async () => {
+    // Admin (MANAGE → platform iam).
+    stubCreateForm('MANAGE');
+    const { unmount } = renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+    expect(screen.getByLabelText(/actual sell/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/actual freight/i)).toBeInTheDocument();
+    unmount();
+
+    // Non-admin (OPERATE → no platform perms).
+    stubCreateForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+    expect(screen.queryByLabelText(/actual sell/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/actual freight/i)).not.toBeInTheDocument();
+    // The visible sell/freight fields are still there.
+    expect(screen.getByLabelText(/client sell/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/vendor freight/i)).toBeInTheDocument();
+  });
+
+  it('"Compute from 50%" sets Our CP = Original CP + (Vendor sell − Original CP) / 2', async () => {
+    stubCreateForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+
+    // Helper is disabled until both Original CP and Vendor sell are present.
+    const computeBtn = screen.getByRole('button', { name: /compute from 50%/i });
+    expect(computeBtn).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/original cp/i), { target: { value: '100' } });
+    fireEvent.change(screen.getByLabelText(/vendor sell/i), { target: { value: '200' } });
+    expect(computeBtn).toBeEnabled();
+    fireEvent.click(computeBtn);
+
+    // 100 + (200 − 100)/2 = 150.
+    expect((screen.getByLabelText(/our cp/i) as HTMLInputElement).value).toBe('150.00');
+  });
+
+  it('creates a PO WITHOUT a po_number (optional now)', async () => {
+    const state = stubCreateForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+
+    // Leave PO number blank; fill everything else required.
+    await fillMinimalValidForm();
+
+    const submit = screen.getByRole('button', { name: /create purchase order/i });
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(state.postedBody).not.toBeNull());
+    const body = state.postedBody as unknown as { po_number?: string | null };
+    // Blank number is omitted (undefined) — not sent as an empty string.
+    expect(body.po_number).toBeUndefined();
+  });
+
+  it('the product picker issues a server-side search query on typing', async () => {
+    const state = stubCreateForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+
+    const combo = screen.getByRole('combobox', { name: /product/i });
+    fireEvent.focus(combo);
+    fireEvent.change(combo, { target: { value: 'wid' } });
+
+    // Debounced fetch hits /products with the typed query.
+    await waitFor(() =>
+      expect(state.urls.some((u) => u.includes('/products') && u.includes('q=wid'))).toBe(true),
+    );
   });
 });
 
@@ -548,6 +699,52 @@ describe('PO detail live-updates after a mutation (E2)', () => {
   });
 });
 
+describe('PO detail — add PO number later', () => {
+  it('a PO created without a number shows "Add PO number" and PATCHes the amend endpoint', async () => {
+    const PO_NO_NUMBER = { ...PO_DETAIL, id: 1, po_number: null };
+    let patchUrl: string | null = null;
+    let patchBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        if (/\/purchase-orders\/\d+$/.test(url) && method === 'PATCH') {
+          patchUrl = url;
+          patchBody = JSON.parse(String(init?.body));
+          return json({ ...PO_NO_NUMBER, po_number: 'PO-LATER-9' });
+        }
+        if (/\/purchase-orders\/\d+$/.test(url)) return json(PO_NO_NUMBER);
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/sales_orders/:id" element={<PODetail />} />
+      </Routes>,
+      ['/m/sales_orders/1'],
+    );
+
+    // The title shows the no-number placeholder and the add affordance appears.
+    expect(await screen.findByText(/PO \(no number\)/i)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: /add po number/i }));
+
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/po number/i), {
+      target: { value: 'PO-LATER-9' },
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: /save amendment/i }));
+
+    await waitFor(() => expect(patchUrl).not.toBeNull());
+    expect(patchUrl).toMatch(/\/purchase-orders\/1$/);
+    expect((patchBody as unknown as { po_number: string }).po_number).toBe('PO-LATER-9');
+    // The refreshed detail reflects the newly-added number.
+    expect(await screen.findByText(/PO PO-LATER-9/)).toBeInTheDocument();
+  });
+});
+
 describe('PO create form — projects fetch error (M2)', () => {
   it('surfaces a load error (not a false "No active projects") when projects fail', async () => {
     vi.stubGlobal(
@@ -607,10 +804,10 @@ describe('PO create form — soft copy attachment (M4)', () => {
     await selectByOption(/BRI — Britannia/, '10');
     await selectByOption(/BRI-001 — Q3 Trade Rewards/, '20');
     fireEvent.change(screen.getByLabelText(/^po date/i), { target: { value: '2026-05-10' } });
-    await selectByOption(/Widget/, '5');
+    await selectProduct(/Widget/);
     fireEvent.change(screen.getByLabelText(/ordered qty/i), { target: { value: '2' } });
-    fireEvent.change(screen.getByLabelText(/cost price/i), { target: { value: '100' } });
-    fireEvent.change(screen.getByLabelText(/sell price/i), { target: { value: '250' } });
+    fireEvent.change(screen.getByLabelText(/our cp/i), { target: { value: '100' } });
+    fireEvent.change(screen.getByLabelText(/client sell/i), { target: { value: '250' } });
 
     // Attach the soft copy → it uploads, then the filename is shown.
     const fileInput = document.getElementById('po-soft-copy') as HTMLInputElement;

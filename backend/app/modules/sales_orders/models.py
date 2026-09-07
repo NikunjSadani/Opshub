@@ -107,16 +107,29 @@ class PurchaseOrder(Base):
     __tablename__ = "purchase_order"
     __table_args__ = (
         # A client's PO number is unique within that client (two clients may reuse
-        # the same external number; one client may not).
-        UniqueConstraint("client_id", "po_number", name="uq_purchase_order_client_number"),
+        # the same external number; one client may not) — but a PO number is now
+        # OPTIONAL, so the uniqueness is a PARTIAL unique index scoped to rows that
+        # actually carry a number. Two NULL-number POs for one client both persist
+        # (NULLs are excluded from the index); a duplicate NON-null number still
+        # collides. Declared here identically to the migration so `alembic check` agrees.
+        Index(
+            "uq_po_client_number_present", "client_id", "po_number", unique=True,
+            sqlite_where=text("po_number IS NOT NULL"),
+            postgresql_where=text("po_number IS NOT NULL"),
+        ),
         CheckConstraint(
             "status in ('DRAFT', 'CONFIRMED', 'IN_PROGRESS', 'CLOSED', 'CANCELLED')",
             name="ck_purchase_order_status",
         ),
+        CheckConstraint(
+            "agency_fee_type in ('NONE', 'PERCENT', 'FIXED')",
+            name="ck_purchase_order_agency_fee_type",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    po_number: Mapped[str] = mapped_column(String(64), index=True)  # client-supplied
+    # Client-supplied — now OPTIONAL (a PO may be captured before its number arrives).
+    po_number: Mapped[str | None] = mapped_column(String(64), index=True)
     # Cross-module FKs (projects/files modules) — NO ORM relationship; resolve by join.
     client_id: Mapped[int] = mapped_column(ForeignKey("project_client.id"), index=True)
     client_gstin_id: Mapped[int | None] = mapped_column(
@@ -135,6 +148,14 @@ class PurchaseOrder(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # PO-level agency fee: NONE (no fee), PERCENT (agency_fee_percent, 0..100) or FIXED
+    # (agency_fee_amount_paise). The CHECK above pins the type; the service enforces the
+    # matching field is set and the other is null.
+    agency_fee_type: Mapped[str] = mapped_column(
+        String(8), default="NONE", server_default=text("'NONE'")
+    )
+    agency_fee_percent: Mapped[Decimal | None] = mapped_column(Numeric(6, 3))
+    agency_fee_amount_paise: Mapped[int | None] = mapped_column(BigInteger)
 
     lines: Mapped[list["POLineItem"]] = relationship(
         back_populates="po", cascade="all, delete-orphan"
@@ -166,9 +187,20 @@ class POLineItem(Base):
     description: Mapped[str] = mapped_column(String(500))  # snapshot at PO time
     uom: Mapped[str] = mapped_column(String(20), default="PCS")
     ordered_qty: Mapped[Decimal] = mapped_column(Numeric(18, 3))
-    cost_price_paise: Mapped[int] = mapped_column(BigInteger)   # per unit
-    sell_price_paise: Mapped[int] = mapped_column(BigInteger)   # per unit
-    freight_paise: Mapped[int] = mapped_column(BigInteger, default=0)      # per line
+    # --- cost tier (per unit) ---
+    cost_price_paise: Mapped[int] = mapped_column(BigInteger)   # Our CP (billed to us), visible
+    # Original CP, visible, optional
+    original_cost_price_paise: Mapped[int | None] = mapped_column(BigInteger)
+    # --- sell tiers (per unit) ---
+    # client-quoted sell (visible, required at validation); vendor sell (visible, optional)
+    client_sell_price_paise: Mapped[int | None] = mapped_column(BigInteger)
+    vendor_sell_price_paise: Mapped[int | None] = mapped_column(BigInteger)
+    sell_price_paise: Mapped[int] = mapped_column(BigInteger)   # ACTUAL sell — ADMIN-ONLY
+    # --- freight tiers (per line) ---
+    # client freight (visible, default 0); vendor freight (visible, optional)
+    client_freight_paise: Mapped[int | None] = mapped_column(BigInteger, default=0)
+    vendor_freight_paise: Mapped[int | None] = mapped_column(BigInteger)
+    freight_paise: Mapped[int] = mapped_column(BigInteger, default=0)  # ACTUAL freight — ADMIN-ONLY
     packaging_paise: Mapped[int] = mapped_column(BigInteger, default=0)    # per line
     handling_paise: Mapped[int] = mapped_column(BigInteger, default=0)     # per line
     other_paise: Mapped[int] = mapped_column(BigInteger, default=0)        # per line

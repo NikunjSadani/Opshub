@@ -66,8 +66,8 @@ def search(
       * ``category`` — exact (case-insensitive) product category.
       * ``client_id`` — the PO's client.
       * ``date_from`` / ``date_to`` — inclusive bounds on the PO date.
-      * ``budget_min_paise`` / ``budget_max_paise`` — inclusive bounds on per-unit
-        ``sell_price_paise``.
+      * ``budget_min_paise`` / ``budget_max_paise`` — inclusive bounds on the per-unit
+        CLIENT-QUOTED price (``client_sell_price_paise``), never the admin-only actual.
 
     Lines on a CANCELLED PO are always excluded.
     """
@@ -88,7 +88,9 @@ def search(
             POLineItem.ordered_qty.label("ordered_qty"),
             POLineItem.cost_price_paise.label("cost_price_paise"),
             POLineItem.sell_price_paise.label("sell_price_paise"),
+            POLineItem.client_sell_price_paise.label("client_sell_price_paise"),
             POLineItem.freight_paise.label("freight_paise"),
+            POLineItem.client_freight_paise.label("client_freight_paise"),
             POLineItem.packaging_paise.label("packaging_paise"),
             POLineItem.handling_paise.label("handling_paise"),
             POLineItem.other_paise.label("other_paise"),
@@ -122,9 +124,9 @@ def search(
     if date_to is not None:
         stmt = stmt.where(PurchaseOrder.po_date <= date_to)
     if budget_min_paise is not None:
-        stmt = stmt.where(POLineItem.sell_price_paise >= budget_min_paise)
+        stmt = stmt.where(POLineItem.client_sell_price_paise >= budget_min_paise)
     if budget_max_paise is not None:
-        stmt = stmt.where(POLineItem.sell_price_paise <= budget_max_paise)
+        stmt = stmt.where(POLineItem.client_sell_price_paise <= budget_max_paise)
 
     stmt = stmt.limit(limit).offset(offset)
     return list(db.execute(stmt).all())
@@ -141,6 +143,7 @@ def price_trend(db: Session, product_id: int, limit: int = 20) -> list[Row[Any]]
             POLineItem.ordered_qty.label("ordered_qty"),
             POLineItem.cost_price_paise.label("cost_price_paise"),
             POLineItem.sell_price_paise.label("sell_price_paise"),
+            POLineItem.client_sell_price_paise.label("client_sell_price_paise"),
         )
         .join(PurchaseOrder, POLineItem.po_id == PurchaseOrder.id)
         .join(ProjectClient, PurchaseOrder.client_id == ProjectClient.id)

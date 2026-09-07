@@ -60,6 +60,9 @@ class _Candidate:
     code: str | None
     hsn: str | None
     text: str            # product name/brand/model + PO line description, lower-cased
+    # The CLIENT-quoted sell (client_sell_price_paise) — the price a client invoice actually
+    # carries. The admin-only ACTUAL sell (sell_price_paise) is a margin figure and is NEVER
+    # the basis for matching an incoming client invoice line.
     sell_price_paise: int | None
     ordered_qty: Decimal | None
 
@@ -154,7 +157,9 @@ def _candidate_from(po_line: POLineItem, product: Product) -> _Candidate:
         text=" ".join(filter(None, (
             product.name, product.brand, product.model_number, po_line.description,
         ))),
-        sell_price_paise=po_line.sell_price_paise,
+        # Score against the CLIENT-quoted sell (what the client invoice will show), not the
+        # admin-only actual sell.
+        sell_price_paise=po_line.client_sell_price_paise,
         ordered_qty=po_line.ordered_qty,
     )
 

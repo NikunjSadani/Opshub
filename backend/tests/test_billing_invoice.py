@@ -197,12 +197,16 @@ def client(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestCl
         po_date=date(2026, 6, 1), status="CONFIRMED")
     seed.add(po)
     seed.flush()
+    # client_sell mirrors the actual sell (production-backfill state); the matcher scores
+    # against the client-quoted sell, so a real line must carry it.
     widget_line = POLineItem(
         po_id=po.id, product_id=widget.id, description="Widget WID-1", uom="NOS",
-        ordered_qty=Decimal("10"), cost_price_paise=80000, sell_price_paise=100000)
+        ordered_qty=Decimal("10"), cost_price_paise=80000, sell_price_paise=100000,
+        client_sell_price_paise=100000)
     gadget_line = POLineItem(
         po_id=po.id, product_id=gadget.id, description="Gadget GAD-2", uom="NOS",
-        ordered_qty=Decimal("5"), cost_price_paise=40000, sell_price_paise=50000)
+        ordered_qty=Decimal("5"), cost_price_paise=40000, sell_price_paise=50000,
+        client_sell_price_paise=50000)
     seed.add_all([widget_line, gadget_line])
     seed.commit()
     client_id, po_id = seed_client.id, po.id
