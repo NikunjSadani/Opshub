@@ -56,7 +56,7 @@ register_module(ModuleSpec(
 # (expense_router at /api/v1). Same empty-router pattern as the modules above.
 register_module(ModuleSpec(
     key="expense_invoice",
-    title="Expense & Invoice",
+    title="Expenses",
     router=APIRouter(),
     nav_group="Operations",
 ))

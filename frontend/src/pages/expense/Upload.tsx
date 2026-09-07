@@ -175,7 +175,7 @@ export function Upload() {
   return (
     <div>
       <PageHeader
-        title="Upload invoices"
+        title="Upload expenses"
         subtitle="Upload one or more vendor GST invoice PDFs. Each is extracted and added to the register; low-confidence fields are flagged for review."
       />
 

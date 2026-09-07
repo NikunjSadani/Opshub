@@ -5,7 +5,7 @@ import type { ModuleDescriptor } from './types/modules';
 
 const MODULES: ModuleDescriptor[] = [
   { key: 'delivery-challan', title: 'Delivery Challan', nav_group: 'Modules', coming_soon: false },
-  { key: 'expense-invoice', title: 'Expense & Invoice', nav_group: 'Modules', coming_soon: true },
+  { key: 'expense-invoice', title: 'Expenses', nav_group: 'Modules', coming_soon: true },
   { key: 'user-management', title: 'User Management', nav_group: 'Platform', coming_soon: false },
 ];
 
