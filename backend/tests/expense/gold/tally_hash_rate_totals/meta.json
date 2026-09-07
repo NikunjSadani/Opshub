@@ -1,0 +1,23 @@
+{
+  "fixture_id": "tally_hash_rate_totals",
+  "supply_type": "inter",
+  "n_lines": 2,
+  "page_count": 1,
+  "needs_ocr": false,
+  "review_needed": false,
+  "column_order": [
+    "sl",
+    "description",
+    "hsn",
+    "rate",
+    "qty",
+    "taxable",
+    "sgst_rate",
+    "cgst_rate",
+    "igst_rate",
+    "amount"
+  ],
+  "notes": "Tally 'Tax Invoice' that falls through the Tally router into the generic engine: a bare '#' invoice-number label, SGST/CGST/IGST columns carrying tax RATES (0/0/18%) not amounts, a DOUBLED trailing 'Amount' = the inclusive line total, and only a bare 'TOTAL:' line — so both totals are DERIVED from the line items (Σ taxable, Σ line total) and the arithmetic cross-checks corroborate them.",
+  "generator": "app.modules.expense.eval.synth.build_hash_rate_invoice_pdf (rl_config.invariant)",
+  "schema_version": "gst_invoice/1.0.0"
+}

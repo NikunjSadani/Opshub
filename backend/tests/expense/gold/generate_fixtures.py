@@ -20,8 +20,11 @@ from app.modules.expense.eval.synth import (
     GSTIN_BUYER_MH,
     GSTIN_SUPPLIER_GJ,
     GSTIN_SUPPLIER_MH,
+    HashRateInvoiceSpec,
+    HashRateLine,
     InvoiceSpec,
     LineSpec,
+    build_hash_rate_invoice_pdf,
     build_invoice_pdf,
 )
 
@@ -203,6 +206,31 @@ def _m6_amount_total_columns() -> InvoiceSpec:
     )
 
 
+def _tally_hash_rate_totals() -> HashRateInvoiceSpec:
+    # A Tally "Tax Invoice" that FALLS THROUGH the Tally router into the generic engine: a bare
+    # "#" invoice-number label, SGST/CGST/IGST columns that carry tax RATES (0 / 0 / 18%) not
+    # amounts, a DOUBLED trailing "Amount" = the inclusive line total, and only a bare "TOTAL:"
+    # line (no labelled taxable / grand total). Doc-exact only when the extractor reads the
+    # bare-"#" number, maps the rate columns → gst_rate + the trailing Amount → line total, and
+    # DERIVES both totals from the line items. Fictional data (no real names / GSTINs).
+    return HashRateInvoiceSpec(
+        supplier_name="Northwind Traders Private Limited",
+        supplier_gstin=GSTIN_SUPPLIER_GJ,
+        supplier_address="Plot 22 GIDC, Vapi, Gujarat 396195",
+        buyer_name="Southern Retail Pvt Ltd",
+        buyer_gstin=GSTIN_BUYER_KA,
+        buyer_address="45 MG Road, Bengaluru, Karnataka 560001",
+        invoice_number="NW/2026/0451",
+        invoice_date=date(2026, 3, 30),
+        place_of_supply="Karnataka (29)",
+        po_ref="PO-45021",
+        lines=[
+            HashRateLine("Ceramic heater 2kW", "85162900", Decimal("42"), 219500, Decimal("18")),
+            HashRateLine("Freight and handling", "996511", Decimal("1"), 695000, Decimal("18")),
+        ],
+    )
+
+
 _FIXTURES: dict[str, InvoiceSpec] = {
     "intra_single_line": _intra_single_line(),
     "inter_multi_line": _inter_multi_line(),
@@ -212,6 +240,11 @@ _FIXTURES: dict[str, InvoiceSpec] = {
     "h2_borderless_right_aligned": _h2_borderless_right_aligned(),
     "m3_accounting_negative_round_off": _m3_accounting_negative_round_off(),
     "m6_amount_total_columns": _m6_amount_total_columns(),
+}
+
+# Fixtures built by the dedicated hash/rate/bare-TOTAL builder (their own spec + gold shape).
+_HASH_RATE_FIXTURES: dict[str, HashRateInvoiceSpec] = {
+    "tally_hash_rate_totals": _tally_hash_rate_totals(),
 }
 
 
@@ -251,7 +284,30 @@ _NOTES: dict[str, str] = {
     "m6_amount_total_columns": (
         "M6 guard: pre-tax column headed 'Amount' beside a gross 'Total'; synonym resolution "
         "must route 'Amount'→taxable and 'Total'→line_total without colliding."),
+    "tally_hash_rate_totals": (
+        "Tally 'Tax Invoice' that falls through the Tally router into the generic engine: a "
+        "bare '#' invoice-number label, SGST/CGST/IGST columns carrying tax RATES (0/0/18%) not "
+        "amounts, a DOUBLED trailing 'Amount' = the inclusive line total, and only a bare "
+        "'TOTAL:' line — so both totals are DERIVED from the line items (Σ taxable, Σ line "
+        "total) and the arithmetic cross-checks corroborate them."),
 }
+
+
+def _hash_rate_meta(fixture_id: str, gold: dict[str, object]) -> dict[str, object]:
+    return {
+        "fixture_id": fixture_id,
+        "supply_type": "inter",
+        "n_lines": len(gold["lines"]) if isinstance(gold["lines"], list) else 0,
+        "page_count": gold["page_count"],
+        "needs_ocr": gold["needs_ocr"],
+        "review_needed": gold["review_needed"],
+        "column_order": ["sl", "description", "hsn", "rate", "qty", "taxable",
+                         "sgst_rate", "cgst_rate", "igst_rate", "amount"],
+        "notes": _NOTES[fixture_id],
+        "generator": (
+            "app.modules.expense.eval.synth.build_hash_rate_invoice_pdf (rl_config.invariant)"),
+        "schema_version": gold["schema_version"],
+    }
 
 
 def main() -> None:
@@ -265,6 +321,18 @@ def main() -> None:
             encoding="utf-8")
         (out / "meta.json").write_text(
             json.dumps(_meta(fixture_id, spec, gold), indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        print(f"wrote {fixture_id}: {len(pdf_bytes)} bytes, {len(gold['lines'])} lines")  # type: ignore[arg-type]
+    for fixture_id, hr_spec in _HASH_RATE_FIXTURES.items():
+        pdf_bytes, gold = build_hash_rate_invoice_pdf(hr_spec)
+        out = GOLD_DIR / fixture_id
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "source.pdf").write_bytes(pdf_bytes)
+        (out / "expected.json").write_text(
+            json.dumps(gold, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8")
+        (out / "meta.json").write_text(
+            json.dumps(_hash_rate_meta(fixture_id, gold), indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8")
         print(f"wrote {fixture_id}: {len(pdf_bytes)} bytes, {len(gold['lines'])} lines")  # type: ignore[arg-type]
 

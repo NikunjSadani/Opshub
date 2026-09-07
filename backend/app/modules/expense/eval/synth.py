@@ -566,3 +566,229 @@ def build_invoice_pdf(spec: InvoiceSpec) -> tuple[bytes, dict[str, object]]:
 
     gold = _build_gold(spec, lines, totals, page_count=page_count)
     return buf.getvalue(), gold
+
+
+# ---------------------------------------------------------------------------
+# Tally-style "Tax Invoice" with a bare "#" number label, tax-RATE columns and a bare
+# "TOTAL:" line (no labelled totals) — the real-world shape that falls THROUGH the Tally
+# router into the generic text-layer engine. Self-contained (no coupling to the knob-driven
+# builder above) so it can never perturb the other committed fixtures.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class HashRateLine:
+    description: str
+    hsn_sac: str
+    quantity: Decimal
+    unit_rate_paise: int
+    gst_rate: Decimal            # COMBINED percent, carried in the IGST rate column (e.g. 18)
+
+
+@dataclass
+class HashRateInvoiceSpec:
+    """A single-column masthead + a ruled item grid whose SGST/CGST/IGST columns print RATES
+    (``0``/``0``/``18%``) not amounts, a DOUBLED trailing ``Amount`` = the inclusive line total,
+    a bare ``#`` invoice-number label, and only a bare ``TOTAL:`` line (no labelled totals)."""
+
+    supplier_name: str
+    supplier_gstin: str
+    supplier_address: str
+    buyer_name: str
+    buyer_gstin: str
+    buyer_address: str
+    invoice_number: str
+    invoice_date: date
+    place_of_supply: str
+    po_ref: str
+    lines: list[HashRateLine]
+
+
+# Column layout as VERTICAL-RULE boundaries in PDF points (11 boundaries → 10 columns). Text
+# anchors are DERIVED from these boundaries so every value sits inside its own cell (a value
+# drawn outside its ruled cell is what splits/truncates a column when pdfplumber re-reads the
+# grid). Money columns are right-aligned to their right rule; text columns left-aligned to
+# their left rule.
+_HR_BOUNDS: list[float] = [51, 68, 190, 238, 278, 306, 374, 400, 426, 456, 544]
+_HR_HEADERS: list[tuple[str, str, bool]] = [   # (key, label, right_aligned)
+    ("sl", "#", False),
+    ("desc", "Item & Description", False),
+    ("hsn", "HSN/SAC", False),
+    ("rate", "Rate", True),
+    ("qty", "Qty", True),
+    ("taxable", "Taxable Amount", True),
+    ("sgst", "SGST", True),
+    ("cgst", "CGST", True),
+    ("igst", "IGST", True),
+    ("amount", "Amount", True),
+]
+_HR_KEY_IDX: dict[str, int] = {h[0]: i for i, h in enumerate(_HR_HEADERS)}
+_HR_ROW_H = 6 * mm
+
+
+def _hr_anchor(key: str, ralign: bool) -> float:
+    """Left rule + inset (left-aligned) or right rule − inset (right-aligned) for a column."""
+    j = _HR_KEY_IDX[key]
+    return (_HR_BOUNDS[j + 1] - 3.0) if ralign else (_HR_BOUNDS[j] + 2.0)
+
+
+@dataclass
+class _HRComputed:
+    line_no: int
+    description: str
+    hsn_sac: str
+    quantity: Decimal
+    unit_rate_paise: int
+    taxable_paise: int
+    gst_rate: Decimal
+    line_total_paise: int
+
+
+def _hr_compute(spec: HashRateInvoiceSpec) -> tuple[list[_HRComputed], int, int]:
+    """Compute each row's paise (taxable, inter-state IGST, inclusive line total) by
+    construction, plus the two derived totals (Σ taxable, Σ line total)."""
+    rows: list[_HRComputed] = []
+    total_taxable = 0
+    grand = 0
+    for i, ls in enumerate(spec.lines, start=1):
+        taxable = _q0(ls.quantity * Decimal(ls.unit_rate_paise))
+        igst = _q0(Decimal(taxable) * ls.gst_rate / Decimal(100))
+        line_total = taxable + igst
+        total_taxable += taxable
+        grand += line_total
+        rows.append(_HRComputed(
+            line_no=i, description=ls.description, hsn_sac=ls.hsn_sac, quantity=ls.quantity,
+            unit_rate_paise=ls.unit_rate_paise, taxable_paise=taxable, gst_rate=ls.gst_rate,
+            line_total_paise=line_total))
+    return rows, total_taxable, grand
+
+
+def build_hash_rate_invoice_pdf(spec: HashRateInvoiceSpec) -> tuple[bytes, dict[str, object]]:
+    """Render ``spec`` and return ``(pdf_bytes, gold)`` in the scorer gold shape. The two
+    totals are DERIVED by the extractor from the line items (no labelled totals are printed)."""
+    rows, total_taxable, grand = _hr_compute(spec)
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    c.setTitle("Tax Invoice")
+
+    # ---- single-column masthead (predictable positional name/address extraction) ----
+    y = _PAGE_H - _MARGIN
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(_MARGIN, y, spec.supplier_name)
+    y -= 5 * mm
+    c.setFont("Helvetica", 9)
+    c.drawString(_MARGIN, y, spec.supplier_address)
+    y -= 5 * mm
+    c.drawString(_MARGIN, y, f"GST: {spec.supplier_gstin}")
+    y -= 7 * mm
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(_MARGIN, y, "TAX INVOICE")
+    y -= 7 * mm
+    c.setFont("Helvetica", 9)
+    c.drawString(_MARGIN, y, f"Bill To: {spec.buyer_name}")
+    y -= 5 * mm
+    c.drawString(_MARGIN, y, spec.buyer_address)
+    y -= 5 * mm
+    c.drawString(_MARGIN, y, f"GST: {spec.buyer_gstin}")
+    y -= 7 * mm
+    # A BARE "#" invoice-number label (no "Invoice No"), the exact Tally shape that forces the
+    # generic extractor's bare-"#" fallback.
+    c.drawString(_MARGIN, y, f"# : {spec.invoice_number}")
+    y -= 5 * mm
+    c.drawString(_MARGIN, y, f"Date : {spec.invoice_date.strftime('%d-%m-%Y')}")
+    y -= 5 * mm
+    c.drawString(_MARGIN, y, f"Place of Supply: {spec.place_of_supply}")
+    y -= 5 * mm
+    c.drawString(_MARGIN, y, f"PO No. : {spec.po_ref}")
+    y -= 8 * mm
+
+    # ---- ruled item grid (SGST/CGST/IGST columns carry RATES; trailing Amount = line total) --
+    n_rows = 1 + len(rows)
+    y_top = y
+    bottom = y_top - n_rows * _HR_ROW_H
+    c.setLineWidth(0.5)
+    for i in range(n_rows + 1):
+        yy = y_top - i * _HR_ROW_H
+        c.line(_HR_BOUNDS[0], yy, _HR_BOUNDS[-1], yy)
+    for x in _HR_BOUNDS:
+        c.line(x, y_top, x, bottom)
+
+    def _put(key: str, label: str, ralign: bool, base_y: float, font: str, size: float) -> None:
+        c.setFont(font, size)
+        if ralign:
+            c.drawRightString(_hr_anchor(key, True), base_y, label)
+        else:
+            c.drawString(_hr_anchor(key, False), base_y, label)
+
+    hbase = y_top - _HR_ROW_H + 1.8 * mm
+    for key, label, ralign in _HR_HEADERS:
+        _put(key, label, ralign, hbase, "Helvetica-Bold", 7)
+
+    for ri, row in enumerate(rows, start=1):
+        base = y_top - (ri + 1) * _HR_ROW_H + 1.8 * mm
+        _put("sl", str(row.line_no), False, base, "Helvetica", 7)
+        _put("desc", row.description, False, base, "Helvetica", 7)
+        _put("hsn", row.hsn_sac, False, base, "Helvetica", 7)
+        _put("rate", _rupees(row.unit_rate_paise), True, base, "Helvetica", 7)
+        _put("qty", _dec_str(row.quantity), True, base, "Helvetica", 7)
+        _put("taxable", _rupees(row.taxable_paise), True, base, "Helvetica", 7)
+        _put("sgst", "0", True, base, "Helvetica", 7)                       # SGST RATE 0%
+        _put("cgst", "0", True, base, "Helvetica", 7)                       # CGST RATE 0%
+        _put("igst", f"{_dec_str(row.gst_rate)}%", True, base, "Helvetica", 7)
+        _put("amount", _rupees(row.line_total_paise), True, base, "Helvetica", 7)
+
+    # ---- a bare "TOTAL:" line (no labelled taxable / grand total → both must be DERIVED) ----
+    y = bottom - 6 * mm
+    c.setFont("Helvetica-Bold", 9)
+    c.drawRightString(_hr_anchor("igst", True), y, "TOTAL:")
+    c.drawRightString(_hr_anchor("amount", True), y, _rupees(grand))
+    c.showPage()
+    c.save()
+
+    gold_lines: list[dict[str, object]] = [
+        {
+            "line_no": row.line_no,
+            "description": row.description,
+            "hsn_sac": row.hsn_sac,
+            "quantity": _dec_str(row.quantity),
+            "unit": None,                 # this layout has no Unit column
+            "unit_rate_paise": row.unit_rate_paise,
+            "taxable_paise": row.taxable_paise,
+            "gst_rate": _dec_str(row.gst_rate),
+            "cgst_paise": None,           # rate-only layout: no printed tax AMOUNTS
+            "sgst_paise": None,
+            "igst_paise": None,
+            "line_total_paise": row.line_total_paise,
+        }
+        for row in rows
+    ]
+    gold: dict[str, object] = {
+        "schema_version": CANONICAL_SCHEMA_VERSION,
+        "doc_type": "gst_invoice",
+        "page_count": 1,
+        "needs_ocr": False,
+        "review_needed": False,
+        "header": {
+            "supplier_name": spec.supplier_name,
+            "supplier_gstin": spec.supplier_gstin,
+            "supplier_address": spec.supplier_address,
+            "buyer_name": spec.buyer_name,
+            "buyer_gstin": spec.buyer_gstin,
+            "buyer_address": spec.buyer_address,
+            "invoice_number": spec.invoice_number,
+            "invoice_date": spec.invoice_date.isoformat(),
+            "place_of_supply": spec.place_of_supply,
+            "po_ref": spec.po_ref,
+        },
+        "totals": {
+            "total_taxable_paise": total_taxable,
+            "total_cgst_paise": None,
+            "total_sgst_paise": None,
+            "total_igst_paise": None,
+            "round_off_paise": None,
+            "grand_total_paise": grand,
+            "amount_in_words": None,
+        },
+        "lines": gold_lines,
+    }
+    return buf.getvalue(), gold

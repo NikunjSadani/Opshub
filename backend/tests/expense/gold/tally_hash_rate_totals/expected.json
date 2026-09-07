@@ -1,0 +1,58 @@
+{
+  "doc_type": "gst_invoice",
+  "header": {
+    "buyer_address": "45 MG Road, Bengaluru, Karnataka 560001",
+    "buyer_gstin": "29AAECS4321L1Z5",
+    "buyer_name": "Southern Retail Pvt Ltd",
+    "invoice_date": "2026-03-30",
+    "invoice_number": "NW/2026/0451",
+    "place_of_supply": "Karnataka (29)",
+    "po_ref": "PO-45021",
+    "supplier_address": "Plot 22 GIDC, Vapi, Gujarat 396195",
+    "supplier_gstin": "24AAACG1234H1Z6",
+    "supplier_name": "Northwind Traders Private Limited"
+  },
+  "lines": [
+    {
+      "cgst_paise": null,
+      "description": "Ceramic heater 2kW",
+      "gst_rate": "18",
+      "hsn_sac": "85162900",
+      "igst_paise": null,
+      "line_no": 1,
+      "line_total_paise": 10878420,
+      "quantity": "42",
+      "sgst_paise": null,
+      "taxable_paise": 9219000,
+      "unit": null,
+      "unit_rate_paise": 219500
+    },
+    {
+      "cgst_paise": null,
+      "description": "Freight and handling",
+      "gst_rate": "18",
+      "hsn_sac": "996511",
+      "igst_paise": null,
+      "line_no": 2,
+      "line_total_paise": 820100,
+      "quantity": "1",
+      "sgst_paise": null,
+      "taxable_paise": 695000,
+      "unit": null,
+      "unit_rate_paise": 695000
+    }
+  ],
+  "needs_ocr": false,
+  "page_count": 1,
+  "review_needed": false,
+  "schema_version": "gst_invoice/1.0.0",
+  "totals": {
+    "amount_in_words": null,
+    "grand_total_paise": 11698520,
+    "round_off_paise": null,
+    "total_cgst_paise": null,
+    "total_igst_paise": null,
+    "total_sgst_paise": null,
+    "total_taxable_paise": 9914000
+  }
+}

@@ -308,6 +308,14 @@ def _find_last(lines: list[_Line], pattern: re.Pattern[str]) -> tuple[str, _Line
 _INV_NO_RE = re.compile(
     r"Invoice\s*(?:No|Number|Num|#)\b\.?\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-/]*)",
     re.IGNORECASE)
+# Bare "#" used as the invoice-number label (Tally "Tax Invoice": `# : TI2025/10175`). The "#"
+# must be the FIRST token of its visual line, followed by a COLON and a value carrying a DIGIT.
+# Anchoring to line-start + requiring ':' is what keeps this off an address/reference/phone hash
+# ("Shop #-12", "PO # : 4500123", "Contact # : 98300…") — none of which lead their line with "#"
+# and a colon — as well as off the item-table banner ("# Item & Description …", no colon) and a
+# lone "#" column header. Used ONLY as a fallback when the explicit "Invoice No/#" label is absent.
+_INV_NO_HASH_RE = re.compile(
+    r"^\s*#\s*:\s*([A-Za-z0-9][A-Za-z0-9/\-]*[0-9][A-Za-z0-9/\-]*)")
 _INV_DATE_RE = re.compile(
     r"(?:Invoice\s*Date|Inv\.?\s*Date|Dated|Date)\b\.?\s*[:\-]?\s*"
     r"([0-9]{1,2}[-/.\s][A-Za-z0-9]{1,9}[-/.\s][0-9]{2,4}|[0-9]{4}-[0-9]{2}-[0-9]{2})",
@@ -403,12 +411,36 @@ def _map_headers(header: list[str]) -> dict[str, int]:
             continue
         mapping[canonical] = idx
         used.add(idx)
+
+    # Doubled "Amount"/"Value" header: when a MORE-SPECIFIC header ("Taxable Amount" /
+    # "Taxable Value") already claims the taxable column, a SECOND, still-unclaimed bare
+    # "Amount"/"Value" column to its RIGHT is the INCLUSIVE line total (a common Tally-style
+    # layout: … | Taxable Amount | SGST | CGST | IGST | Amount). Only fires when line_total is
+    # otherwise unmapped, so a single lone "Amount" column still resolves to taxable as before.
+    if "line_total_paise" not in mapping and "taxable_paise" in mapping:
+        tax_idx = mapping["taxable_paise"]
+        for idx, key in enumerate(keys):
+            if idx in used or idx <= tax_idx or not key:
+                continue
+            if key in ("amount", "value"):
+                mapping["line_total_paise"] = idx
+                used.add(idx)
+                break
     return mapping
 
 
 def _looks_like_header(row: list[str]) -> bool:
     """A header row maps ≥3 canonical columns (used to detect a multi-page continuation)."""
     return len(_map_headers(row)) >= 3
+
+
+def _looks_like_item_header(row: list[str]) -> bool:
+    """A STRICTER item-table header test for the below-row-0 scan: ≥3 mapped columns AND a
+    genuine item-table anchor (an HSN/SAC or a Quantity column). A prose notes/terms row can
+    coincidentally map three generic money synonyms (rate/amount/total) but never carries an
+    HSN or Quantity column, so this keeps it from being mistaken for the header."""
+    mapping = _map_headers(row)
+    return len(mapping) >= 3 and ("hsn_sac" in mapping or "quantity" in mapping)
 
 
 def _cell(row: list[str], mapping: dict[str, int], canonical: str) -> str | None:
@@ -470,15 +502,48 @@ def _parse_tables(tables: list[list[list[str]]]) -> list[_RawLine]:
         rows = [[("" if c is None else str(c)) for c in row] for row in table if row]
         if not rows:
             continue
-        start = 0
+        # The header row is not assumed to be row 0. A single ruled table can carry a
+        # single-column masthead / meta / address block ABOVE the item grid (e.g. a Tally
+        # "Tax Invoice" whose whole page is one bordered table), so when row 0 is not itself a
+        # header AND we have no mapping yet, scan for the FIRST row that maps ≥3 canonical
+        # columns. A header-less table AFTER a mapping was found stays a continuation (M-page).
+        hdr_idx: int | None = None
         if _looks_like_header(rows[0]):
-            mapping = _map_headers(rows[0])
-            start = 1
-        if not mapping:
+            hdr_idx = 0
+        elif not mapping:
+            # Scanning BELOW row 0 (a masthead/meta block sits above the grid): demand a genuine
+            # item-table anchor (HSN or Quantity), not merely ≥3 mapped synonyms — else a
+            # notes/terms row ("Rate contract | Service order | Total due") could be mistaken for
+            # the header and shift every column. Row 0 keeps the looser test (backwards compatible).
+            hdr_idx = next(
+                (i for i, r in enumerate(rows) if _looks_like_item_header(r)), None)
+        if hdr_idx is not None:
+            mapping = _map_headers(rows[hdr_idx])
+            start = hdr_idx + 1
+        elif mapping:
+            start = 0
+        else:
             continue  # a table we can't map to canonical columns (e.g. a stray layout table)
         for row in rows[start:]:
             if all(not str(c).strip() for c in row):
                 continue
+            c_cgst = _cell(row, mapping, "cgst_paise")
+            c_sgst = _cell(row, mapping, "sgst_paise")
+            c_igst = _cell(row, mapping, "igst_paise")
+            gst_rate = _num_or_none(_cell(row, mapping, "gst_rate"))
+            cgst = _money_to_paise(c_cgst)
+            sgst = _money_to_paise(c_sgst)
+            igst = _money_to_paise(c_igst)
+            # Tax-RATE columns: some layouts print the RATE (e.g. "0", "0", "18%") under the
+            # SGST/CGST/IGST headers instead of tax AMOUNTS. A literal "%" in any of those cells
+            # is the unambiguous tell — read the (max) rate as the line's gst_rate and leave the
+            # tax-AMOUNT fields MISSING (they were never amounts). Never fires on a normal amount
+            # table (no "%"), so existing amount-column layouts are untouched.
+            if gst_rate is None and any("%" in (c or "") for c in (c_cgst, c_sgst, c_igst)):
+                rate_vals = [_num_or_none(c) for c in (c_cgst, c_sgst, c_igst)]
+                present = [v for v in rate_vals if v is not None]
+                gst_rate = max(present) if present else None
+                cgst = sgst = igst = None
             r = _RawLine(
                 raw={"row": " | ".join(str(c) for c in row)},
                 description=_cell(row, mapping, "description"),
@@ -487,13 +552,16 @@ def _parse_tables(tables: list[list[list[str]]]) -> list[_RawLine]:
                 unit=_cell(row, mapping, "unit"),
                 unit_rate=_money_to_paise(_cell(row, mapping, "unit_rate_paise")),
                 taxable=_money_to_paise(_cell(row, mapping, "taxable_paise")),
-                gst_rate=_num_or_none(_cell(row, mapping, "gst_rate")),
-                cgst=_money_to_paise(_cell(row, mapping, "cgst_paise")),
-                sgst=_money_to_paise(_cell(row, mapping, "sgst_paise")),
-                igst=_money_to_paise(_cell(row, mapping, "igst_paise")),
+                gst_rate=gst_rate,
+                cgst=cgst,
+                sgst=sgst,
+                igst=igst,
                 line_total=_money_to_paise(_cell(row, mapping, "line_total_paise")),
             )
-            first = row[0] if row else ""
+            # The lead label is the FIRST NON-EMPTY cell — a bare summary row ("TOTAL:" landing
+            # in a middle column with the value in the last) has an empty serial/description
+            # cell, so keying off row[0] alone would misread it as an item.
+            first = next((str(c) for c in row if str(c).strip()), "")
             if _is_item_row(first, r):
                 out.append(r)
     return out
@@ -824,6 +892,34 @@ class TextLayerExtractor:
         round_off = _money_to_paise(ro_hit[0]) if ro_hit else None
         grand_total = _money_to_paise(gt_hit[0]) if gt_hit else None
 
+        # ---- totals fallback: DERIVE a still-missing taxable/grand total from the parsed line
+        # items (only when the label-anchored value is absent — never override a printed label).
+        # Σ line-taxable gives the taxable total; Σ line-total (when EVERY line carries an
+        # inclusive amount) gives the grand total, else taxable + taxes + round-off. The
+        # arithmetic cross-checks below run on these effective values and corroborate them —
+        # so a Tally invoice that prints only a bare "TOTAL:" line still resolves both totals.
+        # Derive ONLY when EVERY item line carries the figure — a single unparsed line would
+        # silently UNDERSTATE the derived total (and the Σ-lines arithmetic check, which reuses
+        # this sum, would trivially pass), so a partial parse must stay MISSING → review, never
+        # a clean-looking wrong number.
+        all_taxables_present = bool(raw_lines) and all(r.taxable is not None for r in raw_lines)
+        line_totals = [r.line_total for r in raw_lines]
+        line_total_sum = (
+            sum(t for t in line_totals if t is not None)
+            if line_totals and all(t is not None for t in line_totals) else None)
+
+        taxable_derived = total_taxable is None and all_taxables_present
+        if taxable_derived:
+            total_taxable = sum(r.taxable or 0 for r in raw_lines)
+        grand_derived = False
+        if grand_total is None:
+            if line_total_sum is not None:
+                grand_total, grand_derived = line_total_sum, True
+            elif total_taxable is not None:
+                grand_total = (total_taxable + (total_cgst or 0) + (total_sgst or 0)
+                               + (total_igst or 0) + (round_off or 0))
+                grand_derived = True
+
         # ---- arithmetic cross-checks (integer paise) ---------------------------------
         arithmetic, corrob = _run_arithmetic(
             raw_lines, total_taxable, total_cgst, total_sgst, total_igst, round_off,
@@ -837,7 +933,8 @@ class TextLayerExtractor:
         invoice_lines = _build_lines(raw_lines, arithmetic, corrob)
         totals = _build_totals(tt_hit, cg_hit, sg_hit, ig_hit, ro_hit, gt_hit, words_hit,
                                total_taxable, total_cgst, total_sgst, total_igst, round_off,
-                               grand_total, arithmetic, corrob)
+                               grand_total, arithmetic, corrob,
+                               taxable_derived=taxable_derived, grand_derived=grand_derived)
 
         # ---- review gate (collect ALL reasons) ---------------------------------------
         reasons = _review_reasons(header, totals, invoice_lines, supplier_c, buyer_c, arithmetic)
@@ -939,7 +1036,7 @@ def _build_header(lines: list[_Line], supplier_c: _Gstin | None, buyer_c: _Gstin
     supplier_gstin = _gstin_field(supplier_c, supply_ok, ambiguous=supplier_ambiguous)
     buyer_gstin = _gstin_field(buyer_c, supply_ok, ambiguous=buyer_ambiguous)
 
-    inv_no_hit = _find_first(lines, _INV_NO_RE)
+    inv_no_hit = _find_first(lines, _INV_NO_RE) or _find_first(lines, _INV_NO_HASH_RE)
     invoice_number: TextField = (
         _mk(inv_no_hit[0], inv_no_hit[0], _CONF_OK, FieldStatus.OK, inv_no_hit[1])
         if inv_no_hit else _missing())
@@ -1118,7 +1215,9 @@ def _build_totals(tt_hit: tuple[str, _Line] | None, cg_hit: tuple[str, _Line] | 
                   words_hit: tuple[str, _Line] | None,
                   total_taxable: int | None, total_cgst: int | None, total_sgst: int | None,
                   total_igst: int | None, round_off: int | None, grand_total: int | None,
-                  arith: ArithmeticChecks, corrob: _Corrob) -> InvoiceTotals:
+                  arith: ArithmeticChecks, corrob: _Corrob, *,
+                  taxable_derived: bool = False,
+                  grand_derived: bool = False) -> InvoiceTotals:
     # Each total earns the top band only when its corroborating check passed AND ran (M5):
     # the taxable total is corroborated by the Σ-lines check, the tax heads by the per-line
     # tax check, and grand-total / round-off by the totals-add-up check.
@@ -1127,21 +1226,30 @@ def _build_totals(tt_hit: tuple[str, _Line] | None, cg_hit: tuple[str, _Line] | 
     tax_split_ok = arith.per_line_tax_consistent and corrob.per_line_ran
 
     return InvoiceTotals(
-        total_taxable_paise=_total_field(tt_hit, total_taxable, taxable_ok),
+        total_taxable_paise=_total_field(tt_hit, total_taxable, taxable_ok,
+                                         derived=taxable_derived),
         total_cgst_paise=_total_field(cg_hit, total_cgst, tax_split_ok),
         total_sgst_paise=_total_field(sg_hit, total_sgst, tax_split_ok),
         total_igst_paise=_total_field(ig_hit, total_igst, tax_split_ok),
         round_off_paise=_total_field(ro_hit, round_off, grand_ok),
-        grand_total_paise=_total_field(gt_hit, grand_total, grand_ok),
+        grand_total_paise=_total_field(gt_hit, grand_total, grand_ok, derived=grand_derived),
         amount_in_words=(_mk(collapse_ws(words_hit[0]), words_hit[0], _CONF_OK,
                              FieldStatus.OK, words_hit[1]) if words_hit else _missing()),
     )
 
 
 def _total_field(hit: tuple[str, _Line] | None, value: int | None,
-                 corroborated: bool) -> MoneyField:
-    if hit is None or value is None:
+                 corroborated: bool, *, derived: bool = False) -> MoneyField:
+    if value is None:
         return _missing()
+    if hit is None:
+        if not derived:
+            return _missing()
+        # No printed label — the value was DERIVED from the line items. It is a real, usable
+        # total (medium confidence), so it is OK (not MISSING/LOW), and the arithmetic
+        # cross-checks that corroborate it run exactly as for a label-anchored total.
+        return _mk(value, f"(derived from line items: {value} paise)", _CONF_OK,
+                   FieldStatus.OK, None)
     conf = _CONF_STRONG if corroborated else _CONF_OK
     return _mk(value, hit[0], conf, FieldStatus.OK, hit[1])
 
@@ -1169,9 +1277,14 @@ def _run_arithmetic(raw_lines: list[_RawLine], total_taxable: int | None,
     for r in raw_lines:
         if r.taxable is None or r.gst_rate is None:
             continue
-        per_line_ran = True
         expected = int((Decimal(r.taxable) * r.gst_rate / Decimal(100)).to_integral_value())
-        got = (r.cgst or 0) + (r.sgst or 0) + (r.igst or 0)
+        if any(h is not None for h in (r.cgst, r.sgst, r.igst)):
+            got = (r.cgst or 0) + (r.sgst or 0) + (r.igst or 0)   # explicit tax amounts
+        elif r.line_total is not None:
+            got = r.line_total - r.taxable    # tax IMPLIED by an inclusive line total (rate-only)
+        else:
+            continue                          # a bare rate with no amount to corroborate against
+        per_line_ran = True
         d = abs(expected - got)
         deltas.append(d)
         if d > LINE_TAX_TOL_PAISE:
@@ -1182,6 +1295,16 @@ def _run_arithmetic(raw_lines: list[_RawLine], total_taxable: int | None,
         computed = ((total_taxable or 0) + (total_cgst or 0) + (total_sgst or 0)
                     + (total_igst or 0) + (round_off or 0))
         d = abs(computed - (grand_total or 0))
+        # The Σ-line-total path corroborates the grand total ONLY when the tax-head totals are
+        # ABSENT (a rate-only layout: taxable + no printed taxes cannot reconstruct grand, yet
+        # Σ line_total == grand does). When tax heads ARE printed, the taxable+taxes+round-off
+        # equation is the real check and must NOT be masked by Σ line_total == grand — otherwise
+        # a wrong printed CGST/SGST (e.g. a 10x typo) would pass unflagged.
+        tax_heads_present = any(
+            t is not None for t in (total_cgst, total_sgst, total_igst))
+        if (not tax_heads_present and raw_lines
+                and all(r.line_total is not None for r in raw_lines)):
+            d = min(d, abs(sum(r.line_total or 0 for r in raw_lines) - (grand_total or 0)))
         deltas.append(d)
         totals_ok = d <= TOTALS_TOL_PAISE
     else:

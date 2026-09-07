@@ -27,17 +27,23 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 from app.modules.expense.canonical import FieldStatus
 from app.modules.expense.eval.synth import (
+    GSTIN_BUYER_KA,
     GSTIN_BUYER_MH,
     GSTIN_SUPPLIER_GJ,
     GSTIN_SUPPLIER_MH,
+    HashRateInvoiceSpec,
+    HashRateLine,
     InvoiceSpec,
     LineSpec,
+    build_hash_rate_invoice_pdf,
     build_invoice_pdf,
 )
 from app.modules.expense.text_layer import (
     InvoiceExtractionError,
     TextLayerExtractor,
+    _map_headers,
     _money_to_paise,
+    _parse_tables,
     _words_of_page,
 )
 from app.modules.masterdata.normalize import _gstin_check_char
@@ -662,3 +668,211 @@ def test_assign_gstins_ordinary_supplier_first_is_confident() -> None:
     sup, buy, supplier_ambiguous, buyer_ambiguous = _assign_gstins([supplier, buyer], billto)
     assert sup is supplier and buy is buyer
     assert supplier_ambiguous is False and buyer_ambiguous is False
+
+
+# =========================================================================== TALLY-STYLE
+# A real Tally "Tax Invoice" that the Tally router does NOT recognize (its banner uses "Qty"
+# not "Quantity" and has no "Total" word) falls through to this generic engine. It carries a
+# bare "#" invoice-number label, SGST/CGST/IGST columns that hold tax RATES (0/0/18%) not
+# amounts, a DOUBLED trailing "Amount" = the inclusive line total, and only a bare "TOTAL:"
+# line. The generic engine must still resolve every required field. Each test below FAILS on
+# the pre-fix extractor.
+
+
+def _hash_rate_pdf() -> bytes:
+    spec = HashRateInvoiceSpec(
+        supplier_name="Northwind Traders Private Limited",
+        supplier_gstin=GSTIN_SUPPLIER_GJ,
+        supplier_address="Plot 22 GIDC, Vapi, Gujarat 396195",
+        buyer_name="Southern Retail Pvt Ltd",
+        buyer_gstin=GSTIN_BUYER_KA,
+        buyer_address="45 MG Road, Bengaluru, Karnataka 560001",
+        invoice_number="NW/2026/0451",
+        invoice_date=date(2026, 3, 30),
+        place_of_supply="Karnataka (29)",
+        po_ref="PO-45021",
+        lines=[
+            HashRateLine("Ceramic heater 2kW", "85162900", Decimal("42"), 219500, Decimal("18")),
+            HashRateLine("Freight and handling", "996511", Decimal("1"), 695000, Decimal("18")),
+        ],
+    )
+    pdf, _ = build_hash_rate_invoice_pdf(spec)
+    return pdf
+
+
+def test_tally_hash_rate_end_to_end_is_extracted() -> None:
+    """Bare '#' number + rate-only tax columns + a doubled 'Amount' + a bare 'TOTAL:' line:
+    every required field resolves, both totals are DERIVED from the lines, the arithmetic
+    cross-checks corroborate them, and the doc is EXTRACTED (no review)."""
+    result = EX.extract(_hash_rate_pdf())
+
+    h = result.header
+    assert h.invoice_number.value_normalized == "NW/2026/0451"     # bare-"#" label read
+    assert h.invoice_number.status is FieldStatus.OK
+    assert h.supplier_gstin.value_normalized == GSTIN_SUPPLIER_GJ
+    assert h.buyer_gstin.value_normalized == GSTIN_BUYER_KA
+
+    t = result.totals
+    assert t.total_taxable_paise.value_normalized == 9_914_000     # Σ line taxable, DERIVED
+    assert t.total_taxable_paise.status is FieldStatus.OK
+    assert t.grand_total_paise.value_normalized == 11_698_520      # Σ line total, DERIVED
+    assert t.grand_total_paise.status is FieldStatus.OK
+
+    assert len(result.lines) == 2
+    l1 = result.lines[0]
+    assert l1.taxable_paise.value_normalized == 9_219_000
+    assert l1.gst_rate.value_normalized is not None and int(l1.gst_rate.value_normalized) == 18
+    assert l1.line_total_paise.value_normalized == 10_878_420      # trailing "Amount" = total
+    # rate columns are RATES, not amounts → the tax-AMOUNT fields stay MISSING (never 0-guessed)
+    assert l1.cgst_paise.status is FieldStatus.MISSING
+    assert l1.sgst_paise.status is FieldStatus.MISSING
+    assert l1.igst_paise.status is FieldStatus.MISSING
+
+    a = result.arithmetic
+    assert a.lines_sum_matches_taxable is True
+    assert a.per_line_tax_consistent is True     # via implied tax = line_total − taxable
+    assert a.totals_add_to_grand is True         # via Σ line_total == grand
+    assert a.supply_type_consistent is True
+
+    assert result.review_needed is False
+    assert result.review_reasons == []
+
+
+def test_parse_tables_finds_header_below_a_masthead_row() -> None:
+    """The item header is NOT at row 0: a single ruled table carries a masthead + meta block
+    ABOVE the item grid (real Tally geometry). The header must be found by scan, and the
+    rate-only tax columns + the doubled trailing 'Amount' resolved."""
+    tables = [[
+        ["ACME WIDGETS LIMITED  GST: 27AAPFU0939F1ZV", "", "", "", "", "", "", "", "", ""],
+        ["# : ACM/2026/0007", "", "Place of Supply Karnataka (29)", "", "", "", "", "", "", ""],
+        ["Bill To", "", "Ship To", "", "", "", "", "", "", ""],
+        ["#", "Item & Description", "HSN/SAC", "Rate", "Qty", "Taxable Amount",
+         "SGST", "CGST", "IGST", "Amount"],
+        ["1", "Widget", "8471", "100.00", "2", "200.00", "0", "0", "18%", "236.00"],
+        ["", "", "TOTAL:", "", "", "", "", "", "", "236.00"],
+    ]]
+    rows = _parse_tables(tables)
+    assert len(rows) == 1                        # only the item row (masthead + TOTAL skipped)
+    r = rows[0]
+    assert r.description == "Widget"
+    assert r.hsn == "8471"
+    assert r.taxable == 20_000                               # "Taxable Amount" → taxable
+    assert r.line_total == 23_600                            # trailing "Amount" → line total
+    assert r.gst_rate is not None and int(r.gst_rate) == 18  # IGST column carried the RATE
+    assert r.cgst is None and r.sgst is None and r.igst is None   # rate columns, no amounts
+
+
+def test_map_headers_doubled_amount_maps_second_to_line_total() -> None:
+    """A more-specific 'Taxable Amount' claims taxable; the SECOND, trailing bare 'Amount'
+    column maps to the inclusive line total (not left unmapped, not stealing taxable)."""
+    header = ["#", "Item & Description", "HSN/SAC", "Rate", "Qty", "Taxable Amount",
+              "SGST", "CGST", "IGST", "Amount"]
+    mapping = _map_headers(header)
+    assert mapping["taxable_paise"] == 5
+    assert mapping["line_total_paise"] == 9
+
+
+def test_map_headers_lone_amount_still_maps_to_taxable() -> None:
+    """A SINGLE lone 'Amount' column (no more-specific taxable header) still resolves to the
+    taxable column — the doubled-amount fallback must not hijack it to line_total."""
+    header = ["Description", "HSN/SAC", "Qty", "Rate", "Amount"]
+    mapping = _map_headers(header)
+    assert mapping["taxable_paise"] == 4
+    assert "line_total_paise" not in mapping
+
+
+def test_bare_hash_invoice_regex_guards_banner_and_lone_hash() -> None:
+    """The bare-'#' invoice-number label must lead its visual line and be followed by a COLON +
+    a digit-bearing value, so it reads the meta line but NEVER an address/PO/phone hash, the
+    item-table banner, or a lone '#'. (Regression guard — audit Finding 1: a whitespace-anchored
+    '#' silently stole 'Shop #-12' / 'PO # : 4500123' / 'Contact # : 98…' as the invoice no.)"""
+    from app.modules.expense.text_layer import _INV_NO_HASH_RE
+
+    m = _INV_NO_HASH_RE.search("# : TI2025/10175 Place of Supply Madhya Pradesh (23)")
+    assert m is not None and m.group(1) == "TI2025/10175"
+    # NONE of these lead with "#:" — an address, a PO number, a phone, a door number, the item
+    # banner (no colon), and a lone "#" must all fail to match.
+    for text in (
+        "Shop #-12, Industrial Estate, Pune",
+        "PO # : 4500123",
+        "Contact # : 9830011252",
+        "Door #: 45 Brigade Road",
+        "# Item & Description HSN/SAC Rate Qty Amount",
+        "#  ",
+    ):
+        assert _INV_NO_HASH_RE.search(text) is None, text
+
+
+def _raw_line(taxable: int | None, *, line_total: int | None = None,
+              gst_rate: int | None = 18, cgst: int | None = None,
+              sgst: int | None = None, igst: int | None = None) -> object:
+    """A minimal `_RawLine` for the pure-function arithmetic tests."""
+    from app.modules.expense.text_layer import _RawLine
+
+    return _RawLine(
+        raw={}, description="Item", hsn="8471", quantity=Decimal("1"), unit="NOS",
+        unit_rate=None, taxable=taxable,
+        gst_rate=(Decimal(gst_rate) if gst_rate is not None else None),
+        cgst=cgst, sgst=sgst, igst=igst, line_total=line_total)
+
+
+def test_derived_taxable_stays_missing_when_a_line_taxable_is_unparsed() -> None:
+    """DERIVING the taxable total from the line items must require EVERY line's taxable to have
+    parsed — one unparsed line would silently understate the total and the Σ-lines check would
+    trivially pass. A partial parse stays MISSING → review, never a clean-looking wrong number.
+    (Regression guard — audit Finding 2.)"""
+    # Line 2's taxable is a European-format cell ("1.234,50") → `_money_to_paise` returns None.
+    tables = [[
+        ["Description", "HSN/SAC", "Qty", "Rate", "Taxable"],
+        ["Widget A", "8471", "2", "100.00", "200.00"],
+        ["Widget B", "8471", "3", "400.00", "1.234,50"],
+    ]]
+    rows = _parse_tables(tables)
+    assert len(rows) == 2 and rows[1].taxable is None  # the bad cell did not parse
+    # No total label anywhere (empty words), so the total would be DERIVED — and must NOT be,
+    # because a line taxable is missing.
+    result = EX._build(1, "Widget A\nWidget B", [], tables)
+    assert result.totals.total_taxable_paise.status is FieldStatus.MISSING
+    assert result.totals.total_taxable_paise.value_normalized is None
+
+
+def test_grand_total_check_not_masked_when_tax_heads_are_printed() -> None:
+    """When the tax-head totals ARE printed, a wrong one (e.g. a 10x CGST typo) must fail the
+    totals-add-to-grand check — the Σ-line-total corroboration only applies when NO tax heads
+    are printed (a rate-only layout). (Regression guard — audit Finding 3.)"""
+    from app.modules.expense.text_layer import _run_arithmetic
+
+    # One line: taxable 20000, inclusive line total 23600 (18% GST). Grand total 23600 is right.
+    line = _raw_line(20000, line_total=23600, cgst=1800, sgst=1800)
+    # WRONG printed CGST total (90000 instead of 1800); SGST correct.
+    checks, _ = _run_arithmetic(
+        [line], 20000, 90000, 1800, None, None, 23600,
+        pos_code="29", supplier_code="29", buyer_code="29")
+    assert checks.totals_add_to_grand is False  # the 10x CGST is NOT hidden by Σ line_total
+
+    # Control: with NO tax-head totals printed (rate-only), Σ line_total == grand corroborates.
+    checks2, _ = _run_arithmetic(
+        [line], 20000, None, None, None, None, 23600,
+        pos_code="29", supplier_code="29", buyer_code="29")
+    assert checks2.totals_add_to_grand is True
+
+
+def test_header_scan_ignores_a_prose_row_without_an_item_anchor() -> None:
+    """The below-row-0 header scan must demand a real item-table anchor (HSN or Qty) — a prose
+    notes/terms row that coincidentally maps three generic money synonyms must NOT be taken as
+    the header (which would shift every column). (Regression guard — audit Finding 4.)"""
+    tables = [[
+        ["NORTHWIND TRADERS  GST: 27AAPFU0939F1ZV", "", "", "", "", ""],
+        # Decoy prose row: maps rate/description/total but carries NO hsn/qty column.
+        ["Rate contract", "Service order", "Terms", "Total due on delivery", "", ""],
+        # The REAL item header (has HSN + Qty).
+        ["Description", "HSN/SAC", "Qty", "Rate", "Taxable", "Amount"],
+        ["Widget", "8471", "2", "100.00", "200.00", "236.00"],
+    ]]
+    rows = _parse_tables(tables)
+    assert len(rows) == 1
+    r = rows[0]
+    # Columns resolved off the REAL header, not the decoy: a proper HSN + taxable + line total.
+    assert r.hsn == "8471"
+    assert r.taxable == 20_000
+    assert r.line_total == 23_600
