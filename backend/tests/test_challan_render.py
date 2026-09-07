@@ -6,6 +6,7 @@ HTML builder + zip/merge helpers.
 from __future__ import annotations
 
 import io
+import re
 import zipfile
 from types import SimpleNamespace
 
@@ -13,7 +14,12 @@ import pytest
 import segno
 from pypdf import PdfReader, PdfWriter
 
-from app.modules.challan.render import build_challan_html, zip_files
+from app.modules.challan.render import (
+    build_challan_html,
+    merge_2up,
+    render_fitted_challan,
+    zip_files,
+)
 from app.modules.challan.schema import (
     ChallanView,
     ConsigneeView,
@@ -85,12 +91,13 @@ def test_project_id_is_never_printed() -> None:
     assert "BRI-001" not in html
 
 
-def test_page_is_a5_landscape() -> None:
-    # The template designs for the half-A4 canvas so merge_2up stacks two per A4
-    # sheet at 100% (no shrink-to-fit). The @page rule must target A5 landscape.
+def test_page_is_wide_half_landscape_a4() -> None:
+    # The template designs for the wide half-of-landscape-A4 canvas (842pt x 297.5pt)
+    # so merge_2up stacks two full-width challans per LANDSCAPE-A4 sheet at 100% (no
+    # shrink-to-fit). The @page rule must target that compact wide half-sheet.
     html = build_challan_html(_view())
-    assert "size: A5 landscape" in html
-    assert "size: A4" not in html
+    assert "size: 842pt 297.5pt" in html
+    assert "A5 landscape" not in html
 
 
 def test_html_escapes_untrusted_values() -> None:
@@ -164,7 +171,7 @@ def test_zip_files_round_trips() -> None:
 
 def _blank_pdf() -> bytes:
     w = PdfWriter()
-    w.add_blank_page(width=595, height=421)  # A5-landscape half-A4
+    w.add_blank_page(width=842, height=297.5)  # wide half-of-landscape-A4
     buf = io.BytesIO()
     w.write(buf)
     return buf.getvalue()
@@ -191,14 +198,96 @@ def test_zip_stream_matches_zip_files() -> None:
     }
 
 
+def _pdf_of(width: float, height: float, count: int = 1) -> bytes:
+    """A PDF of `count` blank pages, each `width` x `height` points."""
+    w = PdfWriter()
+    for _ in range(count):
+        w.add_blank_page(width=width, height=height)
+    buf = io.BytesIO()
+    w.write(buf)
+    return buf.getvalue()
+
+
+def _sheet_sizes(merged: bytes) -> list[tuple[float, float]]:
+    return [(float(p.mediabox.width), float(p.mediabox.height))
+            for p in PdfReader(io.BytesIO(merged)).pages]
+
+
+def test_bin_pack_two_shorts_stack_on_one_landscape_sheet() -> None:
+    # Two short (842x297.5) challans pair 2-up onto ONE landscape-A4 sheet.
+    merged = merge_2up([_pdf_of(842.0, 297.5), _pdf_of(842.0, 297.5)])
+    assert _sheet_sizes(merged) == [(842.0, 595.0)]
+
+
+def test_bin_pack_single_tall_takes_a_whole_sheet() -> None:
+    # A tall (842x595) challan occupies a whole landscape-A4 sheet on its own.
+    merged = merge_2up([_pdf_of(842.0, 595.0)])
+    assert _sheet_sizes(merged) == [(842.0, 595.0)]
+
+
+def test_bin_pack_short_then_tall_never_share_a_sheet() -> None:
+    # A short then a tall: the short must NOT be shrunk to share the tall's sheet — it
+    # gets its own sheet (alone), and the tall gets its own. TWO sheets (if they shared,
+    # it would be one) — both full landscape-A4.
+    merged = merge_2up([_pdf_of(842.0, 297.5), _pdf_of(842.0, 595.0)])
+    assert _sheet_sizes(merged) == [(842.0, 595.0), (842.0, 595.0)]
+
+
+def test_bin_pack_three_shorts_make_two_sheets() -> None:
+    # Three shorts -> a paired sheet (2 shorts) + a lone short (1) = 2 landscape sheets.
+    merged = merge_2up([_pdf_of(842.0, 297.5)] * 3)
+    assert _sheet_sizes(merged) == [(842.0, 595.0), (842.0, 595.0)]
+
+
+class _HeightRenderer:
+    """A fake `Renderer` that inspects the @page height in the html and emits ONE page
+    at/above `fits_at`, else TWO (a challan that overflows the shorter page)."""
+
+    def __init__(self, fits_at: float) -> None:
+        self.fits_at = fits_at
+        self.calls = 0
+
+    def render_pdf(self, html: str) -> bytes:
+        self.calls += 1
+        m = re.search(r"size: 842pt ([0-9.]+)pt", html)
+        assert m, "the @page size must carry the requested height"
+        height = float(m.group(1))
+        pages = 1 if height >= self.fits_at else 2
+        return _pdf_of(842.0, height, pages)
+
+
+def test_render_fitted_challan_keeps_short_when_it_fits() -> None:
+    # Fits at 297.5 -> one render, a single 297.5-tall page.
+    renderer = _HeightRenderer(fits_at=297.5)
+    out = render_fitted_challan(renderer, _view())
+    reader = PdfReader(io.BytesIO(out))
+    assert len(reader.pages) == 1
+    assert float(reader.pages[0].mediabox.height) == 297.5
+    assert renderer.calls == 1
+
+
+def test_render_fitted_challan_promotes_to_tall_when_short_overflows() -> None:
+    # Overflows 297.5 (2 pages) but fits 595 (1 page) -> a single 595-tall page (own sheet).
+    renderer = _HeightRenderer(fits_at=595.0)
+    out = render_fitted_challan(renderer, _view())
+    reader = PdfReader(io.BytesIO(out))
+    assert len(reader.pages) == 1
+    assert float(reader.pages[0].mediabox.height) == 595.0
+    assert renderer.calls == 2
+
+
 def test_merge_2up_stream_matches_merge_2up() -> None:
     # Streaming 2-up merge from file handles == the byte-based merge_2up (same page count).
     import tempfile
 
     from app.modules.challan.render import merge_2up, merge_2up_stream
 
-    pdfs = [_blank_pdf(), _blank_pdf(), _blank_pdf()]  # 3 half-A4 pages -> 2 A4 sheets
-    ref_pages = len(PdfReader(io.BytesIO(merge_2up(pdfs))).pages)
+    pdfs = [_blank_pdf(), _blank_pdf(), _blank_pdf()]  # 3 wide half-sheets -> 2 landscape-A4 sheets
+    ref = PdfReader(io.BytesIO(merge_2up(pdfs)))
+    ref_pages = len(ref.pages)
+    # Output sheet is LANDSCAPE A4: 842 wide x 595 tall.
+    box = ref.pages[0].mediabox
+    assert (float(box.width), float(box.height)) == (842.0, 595.0)
     with tempfile.NamedTemporaryFile() as out:
         merge_2up_stream([io.BytesIO(p) for p in pdfs], out)
         out.seek(0)

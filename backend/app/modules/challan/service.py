@@ -736,7 +736,10 @@ def _generate_inner(
             if challan is None:
                 challan = _persist_challan(db, batch, pc, alloc_id, threshold_paise,
                                            actor_uid, choice_map, uploaded_map, merged_by_gstin)
-                pdf = renderer.render_pdf(render.build_challan_html(_build_view(challan)))
+                # Fit each STORED challan to a GUARANTEED single page at its natural
+                # short/tall size, so a long challan is never split across pages (which
+                # would break the height-aware 2-up compositor). 1-3 renderer calls.
+                pdf = render.render_fitted_challan(renderer, _build_view(challan))
                 stored = _store(db, storage, pdf, f"{_safe(challan.number)}.pdf",
                                 "challan-pdf", actor_uid, "application/pdf")
                 challan.pdf_file_id = stored.id

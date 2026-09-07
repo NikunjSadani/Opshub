@@ -78,7 +78,7 @@ class RaisingRenderer:
 
 def _blank_pdf() -> bytes:
     w = PdfWriter()
-    w.add_blank_page(width=200, height=200)
+    w.add_blank_page(width=842, height=297.5)  # wide half-of-landscape-A4 (a real challan page)
     buf = io.BytesIO()
     w.write(buf)
     return buf.getvalue()
@@ -217,6 +217,16 @@ def test_happy_path_reserves_before_render_and_issues(env: tuple[Session, str]) 
     assert merged_sf is not None
     merged_bytes = get_storage().open(merged_sf.storage_ref).read()
     assert len(PdfReader(io.BytesIO(merged_bytes)).pages) == 1
+
+    # Every STORED challan PDF is a guaranteed SINGLE page at its short 842x297.5 size
+    # (render_fitted_challan), so the 2-up compositor never splits/misaligns a challan.
+    for ch in challans:
+        assert ch.pdf_file_id is not None
+        sf = db.get(StoredFile, ch.pdf_file_id)
+        assert sf is not None
+        pages = PdfReader(io.BytesIO(get_storage().open(sf.storage_ref).read())).pages
+        assert len(pages) == 1
+        assert (float(pages[0].mediabox.width), float(pages[0].mediabox.height)) == (842.0, 297.5)
 
 
 def test_generation_mints_unique_access_token(env: tuple[Session, str]) -> None:

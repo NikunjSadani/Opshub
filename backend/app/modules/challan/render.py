@@ -1,10 +1,10 @@
 """Render + packaging layer for delivery challans.
 
 Turns a fully-resolved, ORM-free `ChallanView` (see `schema.py`) into a faithful
-half-A4 (A5-landscape) business-document HTML, then into PDF bytes, and packages
+wide half-landscape-A4 business-document HTML, then into PDF bytes, and packages
 many of those into a single ZIP or a merged PDF for a batch download. Designing on
-the half-A4 canvas lets `merge_2up` stack two challans per A4 sheet at 100% (no
-shrink-to-fit), so the printed text stays full size.
+the wide half-of-landscape-A4 canvas lets `merge_2up` stack two full-width challans
+per LANDSCAPE-A4 sheet at 100% (no shrink-to-fit), so the printed text stays full size.
 
 SECURITY — every string in a `ChallanView` originates from an untrusted Excel
 upload. `build_challan_html` binds each value through `markupsafe.escape`, so a
@@ -113,11 +113,16 @@ def _qr_markup(access_token: str) -> Markup:
     return Markup(f"<div class='qr'>{svg}</div>")
 
 
-def build_challan_html(view: ChallanView) -> str:
-    """Build a complete standalone half-A4 (A5-landscape) HTML document for one
-    challan (faithful to the `L/433` layout, re-fitted to the half-page canvas).
-    Pure function, no I/O; every interpolated value is HTML-escaped, so untrusted
-    Excel cell text renders as inert data."""
+def build_challan_html(view: ChallanView, *, page_height_pt: float = 297.5) -> str:
+    """Build a complete standalone wide half-of-landscape-A4 (842pt x <page_height_pt>)
+    HTML document for one challan (faithful to the `L/433` layout, re-fitted to fill the
+    compact wide half-sheet). Pure function, no I/O; every interpolated value is
+    HTML-escaped, so untrusted Excel cell text renders as inert data.
+
+    The page WIDTH is fixed at 842pt; only the HEIGHT is parametrized. The default
+    297.5pt is the short half-of-landscape-A4 canvas (two stack per landscape sheet).
+    `render_fitted_challan` re-renders a taller challan at a larger `page_height_pt`
+    so a single challan is NEVER split across pages by WeasyPrint's pagination."""
     rows = Markup("").join(_line_row(line, view.show_amount) for line in view.lines)
     qr = _qr_markup(view.access_token)
     total_amount = escape(view.total_amount) if view.show_amount else Markup("")
@@ -139,7 +144,7 @@ def build_challan_html(view: ChallanView) -> str:
 <meta charset="utf-8">
 <title>Delivery Challan {number}</title>
 <style>
-  @page {{ size: A5 landscape; margin: 8mm; }}
+  @page {{ size: 842pt {page_height}pt; margin: 5mm 8mm; }}
   * {{ box-sizing: border-box; }}
   body {{ font-family: Arial, "Helvetica Neue", sans-serif; font-size: 9px;
          color: #111; margin: 0; }}
@@ -218,6 +223,7 @@ def build_challan_html(view: ChallanView) -> str:
 </body>
 </html>"""
     ).format(
+        page_height=page_height_pt,
         number=escape(view.number),
         qr=qr,
         invoice=invoice,
@@ -278,7 +284,7 @@ class StubRenderer:
         from pypdf import PdfWriter  # lazy, but always installed (used by merge_2up)
 
         writer = PdfWriter()
-        writer.add_blank_page(width=595, height=421)  # A5 landscape (half-A4) points
+        writer.add_blank_page(width=842, height=297.5)  # wide half-of-landscape-A4 points
         buf = io.BytesIO()
         writer.write(buf)
         return buf.getvalue()
@@ -294,6 +300,42 @@ def get_renderer() -> Renderer:
     if settings.env == "local" and settings.stub_render:
         return StubRenderer()
     return WeasyPrintRenderer()
+
+
+# Candidate @page heights (pt) for the single-page fit ladder. A "short" challan fits
+# the compact 297.5pt half-sheet (pairs 2-up); a "tall" one needs the full 595pt sheet
+# (its own sheet); an extreme "monster" gets a generous n*595pt page so it is one page,
+# and the compositor scales it down to fit one sheet (never split).
+_SHORT_PAGE_H_PT = 297.5
+_TALL_PAGE_H_PT = 595.0
+
+
+def render_fitted_challan(renderer: Renderer, view: ChallanView) -> bytes:
+    """Render one challan to a GUARANTEED single-page PDF at its natural size, so a
+    long challan is NEVER paginated (split) across pages by WeasyPrint.
+
+    Renders at increasing @page heights until the output is exactly one page:
+      1. 297.5pt (short) — the common case; pairs 2-up with another short.
+      2. 595pt (tall)    — a longer challan; will take its own landscape-A4 sheet.
+      3. n*595pt (monster) — pathologically long; sized so it is one page, and the
+         compositor scales it down to fit a single sheet.
+    Calls the renderer 1-3 times at most; the Renderer Protocol is unchanged."""
+    from pypdf import PdfReader  # lazy, always installed
+
+    def _pages(pdf: bytes) -> int:
+        return len(PdfReader(io.BytesIO(pdf)).pages)
+
+    short = renderer.render_pdf(build_challan_html(view, page_height_pt=_SHORT_PAGE_H_PT))
+    if _pages(short) == 1:
+        return short
+    tall = renderer.render_pdf(build_challan_html(view, page_height_pt=_TALL_PAGE_H_PT))
+    n = _pages(tall)
+    if n == 1:
+        return tall
+    # Generous: a single page n times the tall height comfortably holds content that
+    # needed n tall pages, so it renders as exactly one (very long) page.
+    return renderer.render_pdf(
+        build_challan_html(view, page_height_pt=_TALL_PAGE_H_PT * n))
 
 
 def zip_files(named: list[tuple[str, bytes]]) -> bytes:
@@ -323,8 +365,8 @@ def merge_2up_stream(sources: Sequence[IO[bytes]], out: IO[bytes]) -> None:
     """``merge_2up`` reading from file handles and writing to `out` instead of round-tripping
     bytes. pypdf reads each source lazily from its handle (which must stay open until this
     returns) and the composed sheet is written straight to `out`, so neither the full source
-    set nor the full output is held as an extra in-RAM bytes copy. Same 2-up layout as
-    ``merge_2up``. Raises on an empty list."""
+    set nor the full output is held as an extra in-RAM bytes copy. Same height-aware
+    bin-packed layout as ``merge_2up`` (via ``_compose_2up``). Raises on an empty list."""
     if not sources:
         raise ValueError("merge_2up_stream requires at least one PDF")
 
@@ -337,40 +379,79 @@ def merge_2up_stream(sources: Sequence[IO[bytes]], out: IO[bytes]) -> None:
 
 
 def _compose_2up(src_pages: list[PageObject], writer: PdfWriter) -> None:
-    """The SINGLE 2-up layout core, shared by ``merge_2up`` (bytes) and
-    ``merge_2up_stream`` (handles) so every merged-PDF surface produces identical output.
-    Lays already-parsed source pages two per portrait-A4 sheet — each uniformly scaled to
-    fit its top/bottom half slot and centred; an odd final page takes the top slot with a
-    blank bottom (never dropped)."""
+    """The SINGLE height-aware BIN-PACKING layout core, shared by ``merge_2up`` (bytes)
+    and ``merge_2up_stream`` (handles) so every merged-PDF surface produces identical
+    output. Each source page is ONE whole (already single-page) challan; it is packed by
+    HEIGHT onto LANDSCAPE-A4 sheets (842x595) so a challan is NEVER split:
+
+      * a "short" page (height <= ``_SHORT_MAX``) fits a full-width half-slot and PAIRS
+        with the next short — 1st short in the TOP half, 2nd in the BOTTOM half;
+      * a "full" page (taller) takes a WHOLE sheet to itself. Before emitting it, any
+        lone buffered short is FLUSHED first onto its own sheet (top half, empty bottom)
+        so a short is never silently merged with an unrelated full.
+
+    Greedy and ORDER-PRESERVING; any lone buffered short is flushed at the end. Each slot
+    reuses the same fit-and-centre transform, so a "monster" page taller than the sheet
+    scales down to fit one sheet (never split); pages that already fit sit at 100%."""
     from pypdf import PageObject, Transformation  # lazy
 
-    slot_h = _A4_H_PT / 2  # two stacked half-A4 slots per portrait sheet
-    for i in range(0, len(src_pages), 2):
-        sheet = PageObject.create_blank_page(width=_A4_W_PT, height=_A4_H_PT)
-        for j, src in enumerate(src_pages[i:i + 2]):
-            sw = float(src.mediabox.width) or _A4_W_PT
-            sh = float(src.mediabox.height) or _A4_H_PT
-            scale = min(_A4_W_PT / sw, slot_h / sh)  # fit the slot, preserve aspect
-            slot_bottom = _A4_H_PT - slot_h * (j + 1)  # j=0 -> top half, j=1 -> bottom half
-            tx = (_A4_W_PT - sw * scale) / 2
-            ty = slot_bottom + (slot_h - sh * scale) / 2
-            sheet.merge_transformed_page(src, Transformation().scale(scale).translate(tx, ty))
-        writer.add_page(sheet)
+    slot_w = _SHEET_W_PT  # full sheet width (842)
+    half_h = _SHEET_H_PT / 2  # a full-width half-slot (297.5) — top or bottom of a sheet
+
+    def _draw(sheet: PageObject, src: PageObject, slot_bottom: float, slot_h: float) -> None:
+        sw = float(src.mediabox.width) or slot_w
+        sh = float(src.mediabox.height) or slot_h
+        scale = min(slot_w / sw, slot_h / sh)  # fit the slot, preserve aspect (no split)
+        tx = (slot_w - sw * scale) / 2
+        ty = slot_bottom + (slot_h - sh * scale) / 2
+        sheet.merge_transformed_page(src, Transformation().scale(scale).translate(tx, ty))
+
+    pending: PageObject | None = None  # a lone buffered short awaiting a partner
+
+    def _flush_short() -> None:
+        nonlocal pending
+        if pending is not None:
+            sheet = PageObject.create_blank_page(width=_SHEET_W_PT, height=_SHEET_H_PT)
+            _draw(sheet, pending, half_h, half_h)  # top half-slot, empty bottom
+            writer.add_page(sheet)
+            pending = None
+
+    for src in src_pages:
+        if (float(src.mediabox.height) or half_h) <= _SHORT_MAX:  # a "short" challan
+            if pending is None:
+                pending = src  # buffer, hope for a partner
+            else:
+                sheet = PageObject.create_blank_page(width=_SHEET_W_PT, height=_SHEET_H_PT)
+                _draw(sheet, pending, half_h, half_h)  # 1st short -> TOP half
+                _draw(sheet, src, 0.0, half_h)         # 2nd short -> BOTTOM half
+                writer.add_page(sheet)
+                pending = None
+        else:  # a "full" challan -> its own whole sheet
+            _flush_short()  # a lone buffered short gets its own sheet FIRST
+            sheet = PageObject.create_blank_page(width=_SHEET_W_PT, height=_SHEET_H_PT)
+            _draw(sheet, src, 0.0, _SHEET_H_PT)  # whole 842x595 sheet
+            writer.add_page(sheet)
+    _flush_short()  # a trailing lone short is never dropped
 
 
-# A4 portrait in PDF points — the OUTPUT sheet size for two-up compositing. Each
-# source challan is half this height (A5 landscape 595x421, per @page + StubRenderer),
-# so it drops into a slot at scale 1.0 (no shrink).
-_A4_W_PT = 595.0
-_A4_H_PT = 842.0
+# Landscape A4 in PDF points — the OUTPUT sheet size for two-up compositing (842 wide
+# x 595 tall). Each source challan is a wide half of this sheet (842x297.5, per @page +
+# StubRenderer), so it fills a full-width top/bottom slot at scale 1.0 (no shrink).
+_SHEET_W_PT = 842.0
+_SHEET_H_PT = 595.0
+# A source page at or below this height is a "short" challan that fits a full-width
+# half-slot (297.5pt) and can pair 2-up; a taller page is a "full" challan that takes a
+# whole sheet. Sized just above the 297.5pt short canvas to tolerate rounding.
+_SHORT_MAX = 320.0
 
 
 def merge_2up(pdfs: list[bytes]) -> bytes:
-    """Composite challan PDFs TWO-UP — 2 source pages per portrait-A4 output sheet,
-    each uniformly scaled to fit the top / bottom half and centred. Halves paper usage
-    on a reprint. Pure `pypdf` page compositing of the ALREADY-rendered stored challans
-    (no re-render / WeasyPrint), so it runs anywhere. Source pages are laid out in order;
-    a multi-page challan simply consumes consecutive half-slots. Raises on an empty list.
+    """Composite challan PDFs onto LANDSCAPE-A4 sheets by HEIGHT-AWARE bin-packing (via
+    ``_compose_2up``): two SHORT challans stack 2-up on one sheet (full-width top/bottom
+    halves), while a TALL challan takes a whole sheet to itself — so a single challan is
+    never split or misaligned. Saves paper on a reprint. Pure `pypdf` page compositing of
+    the ALREADY-rendered single-page stored challans (no re-render / WeasyPrint), so it
+    runs anywhere. Order-preserving. Raises on an empty list.
     """
     if not pdfs:
         raise ValueError("merge_2up requires at least one PDF")
