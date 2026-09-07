@@ -174,6 +174,38 @@ export function useUpdateProjectStatus(): UseMutationResult<
   });
 }
 
+/**
+ * Editable project details (all optional — send only what changed). Lets a user
+ * correct a mistake, e.g. a typo in the name. `start_date` / `description` are
+ * nullable: send `null` to CLEAR the value, or omit the key to leave it unchanged.
+ * CODE + CLIENT are system-assigned identity and are deliberately NOT editable.
+ */
+export interface ProjectPatch {
+  name?: string;
+  start_date?: string | null;
+  description?: string | null;
+}
+
+/**
+ * Edit a project's details (name / start date / description). MANAGE, same gate
+ * + endpoint as the status change. Refreshes the list + that project's detail.
+ */
+export function useUpdateProject(): UseMutationResult<
+  Project,
+  ApiError,
+  { id: string; patch: ProjectPatch }
+> {
+  const { patch } = useApi();
+  const qc = useQueryClient();
+  return useMutation<Project, ApiError, { id: string; patch: ProjectPatch }>({
+    mutationFn: ({ id, patch: body }) => patch<Project>(`/projects/${id}`, body),
+    onSuccess: (project) => {
+      qc.setQueryData(projectKeys.detail(project.id), project);
+      void qc.invalidateQueries({ queryKey: ['projects', 'list'] });
+    },
+  });
+}
+
 // ===========================================================================
 // Client Master — a client's full profile (PAN / credit terms) plus its child
 // collections (GSTINs, addresses, contacts). Reads need projects VIEW; every

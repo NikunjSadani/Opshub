@@ -24,6 +24,7 @@ import {
   useClientsQuery,
   useCreateProject,
   useProjectsQuery,
+  useUpdateProject,
   useUpdateProjectStatus,
   type Client,
   type Project,
@@ -187,6 +188,126 @@ function NewProjectModal({
   );
 }
 
+/**
+ * Edit-project modal (MANAGE): correct a project's typed details — name (required),
+ * start date, description. CODE + CLIENT are system-assigned identity and are shown
+ * read-only, never edited. Sends only editable fields; nullable ones are cleared by
+ * sending an empty value.
+ */
+function EditProjectModal({
+  project,
+  onClose,
+}: {
+  project: Project | null;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const updateProject = useUpdateProject();
+
+  const [name, setName] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [description, setDescription] = useState('');
+
+  const open = project !== null;
+  const trimmedName = name.trim();
+  const canSubmit = trimmedName.length > 0 && !updateProject.isPending;
+
+  // Seed the fields from the project whenever the modal opens (or the row changes).
+  useEffect(() => {
+    if (!project) return;
+    setName(project.name);
+    setStartDate(project.start_date ?? '');
+    setDescription(project.description ?? '');
+    updateProject.reset();
+    // Re-run only when the edited project changes; reset is stable enough here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project]);
+
+  function close() {
+    if (updateProject.isPending) return;
+    onClose();
+  }
+
+  function submit() {
+    if (!project || !canSubmit) return;
+    updateProject.mutate(
+      {
+        id: project.id,
+        // Nullable fields: send null (not undefined) so an emptied value CLEARS it.
+        patch: {
+          name: trimmedName,
+          start_date: startDate || null,
+          description: description.trim() || null,
+        },
+      },
+      {
+        onSuccess: (updated) => {
+          toast.success(`Project ${updated.code} updated.`);
+          onClose();
+        },
+        onError: (err) => toast.error(errorMessage(err)),
+      },
+    );
+  }
+
+  return (
+    <Modal
+      open={open}
+      title="Edit project"
+      onClose={close}
+      busy={updateProject.isPending}
+      footer={
+        <>
+          <Button variant="secondary" onClick={close} disabled={updateProject.isPending}>
+            Cancel
+          </Button>
+          <Button onClick={submit} loading={updateProject.isPending} disabled={!canSubmit}>
+            Save changes
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <TextField
+          label="Code"
+          value={project?.code ?? ''}
+          readOnly
+          disabled
+          hint="System-assigned and permanent — it can't be changed."
+        />
+        <TextField
+          label="Client"
+          value={project ? `${project.client_code} — ${project.client_name}` : ''}
+          readOnly
+          disabled
+        />
+        <TextField
+          label="Name"
+          required
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="e.g. Q3 Trade Scheme"
+          maxLength={160}
+        />
+        <TextField
+          label="Start date"
+          type="date"
+          value={startDate}
+          onChange={(e) => setStartDate(e.target.value)}
+        />
+        <TextArea
+          label="Description"
+          rows={3}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="Optional notes about this project."
+          maxLength={2000}
+        />
+      </div>
+    </Modal>
+  );
+}
+
 /** The projects register: filters + a create action + the project table. */
 export function ProjectsList() {
   const perms = usePermissions();
@@ -199,6 +320,8 @@ export function ProjectsList() {
   const [status, setStatus] = useState<ProjectStatus | ''>('');
   const [q, setQ] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
+  // The project currently open in the edit modal, or null when closed.
+  const [editing, setEditing] = useState<Project | null>(null);
 
   const clientsQuery = useClientsQuery();
   const clients = clientsQuery.data ?? [];
@@ -285,6 +408,11 @@ export function ProjectsList() {
               <Th>Client</Th>
               <Th>Start date</Th>
               <Th>Status</Th>
+              {canManage && (
+                <Th>
+                  <span className="sr-only">Actions</span>
+                </Th>
+              )}
             </Tr>
           </THead>
           <tbody>
@@ -307,6 +435,18 @@ export function ProjectsList() {
                     </Badge>
                   )}
                 </Td>
+                {canManage && (
+                  <Td className="whitespace-nowrap text-right">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setEditing(p)}
+                      aria-label={`Edit ${p.code}`}
+                    >
+                      Edit
+                    </Button>
+                  </Td>
+                )}
               </Tr>
             ))}
           </tbody>
@@ -314,6 +454,7 @@ export function ProjectsList() {
       )}
 
       <NewProjectModal open={modalOpen} clients={clients} onClose={() => setModalOpen(false)} />
+      <EditProjectModal project={editing} onClose={() => setEditing(null)} />
     </div>
   );
 }

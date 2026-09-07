@@ -175,6 +175,104 @@ def test_status_patch_admin_only_and_validated(client: TestClient) -> None:
     assert forbidden.status_code == 403
 
 
+# ---------------------------------------------------------------- edit details
+
+def test_edit_project_details_happy_path(client: TestClient) -> None:
+    """ADMIN (MANAGE) can correct a project's editable typed details — name,
+    start date, description — via the same PATCH endpoint as the status change."""
+    bri = _new_client(client, "Britannia", "BRI")
+    pid = client.post(
+        "/api/v1/projects",
+        json={"client_id": bri, "name": "Q3 Trate Scheme", "start_date": "2026-07-01"},
+    ).json()["id"]
+
+    r = client.patch(
+        f"/api/v1/projects/{pid}",
+        json={
+            "name": "Q3 Trade Scheme",  # fix the typo
+            "start_date": "2026-08-01",
+            "description": "corrected",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "Q3 Trade Scheme"
+    assert body["start_date"] == "2026-08-01"
+    assert body["description"] == "corrected"
+    # Identity is untouched by an edit.
+    assert body["code"] == "BRI-001"
+    assert body["client_id"] == bri
+
+
+def test_edit_project_name_is_trimmed_and_validated(client: TestClient) -> None:
+    """Name is trimmed + collapsed (like create); blank/null is rejected 422."""
+    bri = _new_client(client, "Britannia", "BRI")
+    pid = client.post("/api/v1/projects", json={"client_id": bri, "name": "X"}).json()["id"]
+
+    ok = client.patch(f"/api/v1/projects/{pid}", json={"name": "  Fixed   Name  "})
+    assert ok.status_code == 200 and ok.json()["name"] == "Fixed Name"
+
+    # Empty string -> pydantic min_length 422; explicit null -> service guard 422.
+    assert client.patch(f"/api/v1/projects/{pid}", json={"name": ""}).status_code == 422
+    assert client.patch(f"/api/v1/projects/{pid}", json={"name": None}).status_code == 422
+
+
+def test_edit_can_clear_nullable_details(client: TestClient) -> None:
+    """An explicit null CLEARS a nullable detail (start_date / description);
+    omitting the key leaves it unchanged."""
+    bri = _new_client(client, "Britannia", "BRI")
+    pid = client.post(
+        "/api/v1/projects",
+        json={"client_id": bri, "name": "X", "start_date": "2026-07-01", "description": "note"},
+    ).json()["id"]
+
+    r = client.patch(f"/api/v1/projects/{pid}", json={"start_date": None, "description": None})
+    assert r.status_code == 200, r.text
+    assert r.json()["start_date"] is None
+    assert r.json()["description"] is None
+    # Name (omitted) is left unchanged.
+    assert r.json()["name"] == "X"
+
+
+def test_edit_project_requires_manage(client: TestClient) -> None:
+    """Editing details is MANAGE-gated (same as status): an OPERATE module user is 403."""
+    bri = _new_client(client, "Britannia", "BRI")
+    pid = client.post("/api/v1/projects", json={"client_id": bri, "name": "X"}).json()["id"]
+
+    _as(client, MODULE_USER)  # has OPERATE (can create) but not MANAGE
+    r = client.patch(f"/api/v1/projects/{pid}", json={"name": "Renamed"})
+    assert r.status_code == 403
+
+
+def test_edit_cannot_change_code_or_client(client: TestClient) -> None:
+    """CODE + CLIENT are system-assigned identity: unknown fields are ignored and
+    the project keeps its original code + client while an editable field updates."""
+    bri = _new_client(client, "Britannia", "BRI")
+    tat = _new_client(client, "Tata", "TAT")
+    pid = client.post("/api/v1/projects", json={"client_id": bri, "name": "X"}).json()["id"]
+
+    r = client.patch(
+        f"/api/v1/projects/{pid}",
+        json={"name": "Renamed", "code": "ZZZ-999", "client_id": tat, "seq": 42},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["name"] == "Renamed"  # the one editable field applied
+    assert body["code"] == "BRI-001"  # code NOT changed
+    assert body["client_id"] == bri  # client NOT changed
+    assert body["client_code"] == "BRI"
+
+
+def test_edit_is_audited(client: TestClient) -> None:
+    bri = _new_client(client, "Britannia", "BRI")
+    pid = client.post("/api/v1/projects", json={"client_id": bri, "name": "X"}).json()["id"]
+    client.patch(f"/api/v1/projects/{pid}", json={"name": "Fixed"})
+    db = client.app.state.TestSession()
+    actions = {a.action for a in db.execute(select(AuditLog)).scalars()}
+    db.close()
+    assert "project.updated" in actions
+
+
 # ------------------------------------------------------------------- filters
 
 def test_project_filters(client: TestClient) -> None:

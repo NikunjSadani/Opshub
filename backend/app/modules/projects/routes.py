@@ -5,7 +5,8 @@
   POST /projects                -> create a project (module-gated)
   GET  /projects                -> list projects (module-gated; filter/paginate)
   GET  /projects/{id}           -> one project (module-gated)
-  PATCH /projects/{id}          -> change status (ADMIN `project.manage`)
+  PATCH /projects/{id}          -> edit details (name/date/desc) and/or status
+                                   (ADMIN `project.manage`)
 
 Reads need the `projects` module grant; client registration + status changes are
 Admin-only. Every write is audited by the service. Client codes are 3 uppercase
@@ -91,8 +92,20 @@ class ProjectIn(BaseModel):
     description: str | None = Field(default=None, max_length=1000)
 
 
-class StatusIn(BaseModel):
-    status: Literal["ACTIVE", "ON_HOLD", "CLOSED"]
+class ProjectPatchIn(BaseModel):
+    # All optional — a PATCH changes only the fields actually supplied. Editing a
+    # project's typed details (to fix a mistake, e.g. a typo in the name) lives on
+    # the SAME endpoint + gate as the status change. CODE + CLIENT are omitted on
+    # purpose: they are system-assigned identity (`code` is unique + derived from
+    # the client), not correctable details, so there is no way to edit them here.
+    #
+    # `name` cannot be cleared (the column is NOT NULL) — an explicit null is a 422.
+    # `start_date` / `description` are nullable, so sending an explicit null CLEARS
+    # them (distinct from omitting the key, which leaves the value unchanged).
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    start_date: date | None = None
+    description: str | None = Field(default=None, max_length=1000)
+    status: Literal["ACTIVE", "ON_HOLD", "CLOSED"] | None = None
 
 
 class ProjectOut(BaseModel):
@@ -242,18 +255,34 @@ def get_project(
 @router.patch("/projects/{project_id}", response_model=ProjectOut)
 def patch_project(
     project_id: int,
-    body: StatusIn,
+    body: ProjectPatchIn,
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ProjectOut:
+    """Edit a project's editable details (name / start date / description) and/or
+    change its status. Same MANAGE gate (`project.manage`) as the status change;
+    every write is audited by the service. CODE + CLIENT are system-assigned
+    identity and are NOT accepted here (see `ProjectPatchIn`)."""
     _require_admin(user)
     project = db.execute(
         select(Project).options(joinedload(Project.client)).where(Project.id == project_id)
     ).scalar_one_or_none()
     if project is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
+    # `exclude_unset` keeps "omitted" distinct from "explicit null" (which CLEARS a
+    # nullable field); status is routed to its own service call so its dedicated
+    # `project.status_changed` audit action is preserved.
+    fields = body.model_dump(exclude_unset=True)
+    new_status = fields.pop("status", None)
     try:
-        service.set_status(db, project=project, status=body.status, actor_uid=user.firebase_uid)
+        if fields:
+            service.update_project(
+                db, project=project, actor_uid=user.firebase_uid, **fields
+            )
+        if "status" in body.model_fields_set and new_status is not None:
+            service.set_status(
+                db, project=project, status=new_status, actor_uid=user.firebase_uid
+            )
     except service.ProjectError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     db.commit()

@@ -360,6 +360,54 @@ def set_status(
     return project
 
 
+def update_project(
+    db: Session,
+    *,
+    project: Project,
+    name: str | _Unset = _UNSET,
+    start_date: date | None | _Unset = _UNSET,
+    description: str | None | _Unset = _UNSET,
+    actor_uid: str | None = None,
+) -> Project:
+    """Patch a project's editable typed details so a user can correct a mistake
+    (e.g. a typo in the name). Only supplied args change; a nullable field can be
+    explicitly cleared by passing `None` (distinct from the `_UNSET` "leave
+    unchanged" default). Validates + trims exactly like the create path (`_clean_name`
+    / `_opt`). Audited.
+
+    Deliberately NARROW: `code`, `client_id` and `seq` are system-assigned identity
+    (the code is globally unique and derived from the client) and are NOT editable
+    here — those are not correctable details. Status has its own path (`set_status`).
+    `name` cannot be cleared (the column is NOT NULL); passing `None` is a 422.
+    """
+    changed: dict[str, object | None] = {}
+    if not isinstance(name, _Unset):
+        if name is None:
+            raise ProjectError("name is required")
+        cleaned = _clean_name(name)
+        if not cleaned:
+            raise ProjectError("name is required")
+        project.name = cleaned
+        changed["name"] = cleaned
+    if not isinstance(start_date, _Unset):
+        project.start_date = start_date
+        changed["start_date"] = start_date.isoformat() if start_date else None
+    if not isinstance(description, _Unset):
+        project.description = _opt(description)
+        changed["description"] = project.description
+
+    db.flush()
+    audit.log(
+        db,
+        action="project.updated",
+        actor_uid=actor_uid,
+        entity="project",
+        entity_id=project.code,
+        detail={"changed": changed},
+    )
+    return project
+
+
 # --------------------------------------------------------------- client master
 #
 # The promoted `project_client` carries child GSTINs / addresses / contacts. All
