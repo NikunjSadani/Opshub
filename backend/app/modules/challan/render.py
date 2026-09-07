@@ -23,7 +23,7 @@ import io
 import shutil
 import zipfile
 from collections.abc import Sequence
-from typing import IO, Protocol
+from typing import IO, TYPE_CHECKING, Protocol
 
 from markupsafe import Markup, escape
 
@@ -34,6 +34,9 @@ from app.modules.challan.schema import (
     LineView,
     ShipToView,
 )
+
+if TYPE_CHECKING:
+    from pypdf import PageObject, PdfWriter
 
 
 def _kv(label: str, value: str) -> Markup:
@@ -272,7 +275,7 @@ class StubRenderer:
     """
 
     def render_pdf(self, html: str) -> bytes:
-        from pypdf import PdfWriter  # lazy, but always installed (used by merge_pdfs)
+        from pypdf import PdfWriter  # lazy, but always installed (used by merge_2up)
 
         writer = PdfWriter()
         writer.add_blank_page(width=595, height=421)  # A5 landscape (half-A4) points
@@ -325,48 +328,34 @@ def merge_2up_stream(sources: Sequence[IO[bytes]], out: IO[bytes]) -> None:
     if not sources:
         raise ValueError("merge_2up_stream requires at least one PDF")
 
-    from pypdf import PageObject, PdfReader, PdfWriter, Transformation  # lazy
+    from pypdf import PdfReader, PdfWriter  # lazy
 
-    src_pages = []
-    for handle in sources:
-        for page in PdfReader(handle).pages:
-            src_pages.append(page)
-
-    slot_h = _A4_H_PT / 2
+    src_pages = [page for handle in sources for page in PdfReader(handle).pages]
     writer = PdfWriter()
+    _compose_2up(src_pages, writer)
+    writer.write(out)
+
+
+def _compose_2up(src_pages: list[PageObject], writer: PdfWriter) -> None:
+    """The SINGLE 2-up layout core, shared by ``merge_2up`` (bytes) and
+    ``merge_2up_stream`` (handles) so every merged-PDF surface produces identical output.
+    Lays already-parsed source pages two per portrait-A4 sheet — each uniformly scaled to
+    fit its top/bottom half slot and centred; an odd final page takes the top slot with a
+    blank bottom (never dropped)."""
+    from pypdf import PageObject, Transformation  # lazy
+
+    slot_h = _A4_H_PT / 2  # two stacked half-A4 slots per portrait sheet
     for i in range(0, len(src_pages), 2):
         sheet = PageObject.create_blank_page(width=_A4_W_PT, height=_A4_H_PT)
         for j, src in enumerate(src_pages[i:i + 2]):
             sw = float(src.mediabox.width) or _A4_W_PT
             sh = float(src.mediabox.height) or _A4_H_PT
-            scale = min(_A4_W_PT / sw, slot_h / sh)
-            slot_bottom = _A4_H_PT - slot_h * (j + 1)
+            scale = min(_A4_W_PT / sw, slot_h / sh)  # fit the slot, preserve aspect
+            slot_bottom = _A4_H_PT - slot_h * (j + 1)  # j=0 -> top half, j=1 -> bottom half
             tx = (_A4_W_PT - sw * scale) / 2
             ty = slot_bottom + (slot_h - sh * scale) / 2
             sheet.merge_transformed_page(src, Transformation().scale(scale).translate(tx, ty))
         writer.add_page(sheet)
-    writer.write(out)
-
-
-def merge_pdfs(pdfs: list[bytes]) -> bytes:
-    """Concatenate PDF byte-strings into one PDF and return its bytes.
-
-    Raises `ValueError` on an empty list rather than emitting a page-less PDF that
-    some readers reject.
-    """
-    if not pdfs:
-        raise ValueError("merge_pdfs requires at least one PDF")
-
-    from pypdf import PdfReader, PdfWriter  # lazy: keep import light
-
-    writer = PdfWriter()
-    for pdf in pdfs:
-        reader = PdfReader(io.BytesIO(pdf))
-        for page in reader.pages:
-            writer.add_page(page)
-    out = io.BytesIO()
-    writer.write(out)
-    return out.getvalue()
 
 
 # A4 portrait in PDF points — the OUTPUT sheet size for two-up compositing. Each
@@ -386,26 +375,11 @@ def merge_2up(pdfs: list[bytes]) -> bytes:
     if not pdfs:
         raise ValueError("merge_2up requires at least one PDF")
 
-    from pypdf import PageObject, PdfReader, PdfWriter, Transformation  # lazy
+    from pypdf import PdfReader, PdfWriter  # lazy
 
-    src_pages = []
-    for pdf in pdfs:
-        for page in PdfReader(io.BytesIO(pdf)).pages:
-            src_pages.append(page)
-
-    slot_h = _A4_H_PT / 2  # two stacked half-A4 slots per portrait sheet
+    src_pages = [page for pdf in pdfs for page in PdfReader(io.BytesIO(pdf)).pages]
     writer = PdfWriter()
-    for i in range(0, len(src_pages), 2):
-        sheet = PageObject.create_blank_page(width=_A4_W_PT, height=_A4_H_PT)
-        for j, src in enumerate(src_pages[i:i + 2]):
-            sw = float(src.mediabox.width) or _A4_W_PT
-            sh = float(src.mediabox.height) or _A4_H_PT
-            scale = min(_A4_W_PT / sw, slot_h / sh)  # fit the slot, preserve aspect
-            slot_bottom = _A4_H_PT - slot_h * (j + 1)  # j=0 -> top half, j=1 -> bottom half
-            tx = (_A4_W_PT - sw * scale) / 2
-            ty = slot_bottom + (slot_h - sh * scale) / 2
-            sheet.merge_transformed_page(src, Transformation().scale(scale).translate(tx, ty))
-        writer.add_page(sheet)
+    _compose_2up(src_pages, writer)
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()

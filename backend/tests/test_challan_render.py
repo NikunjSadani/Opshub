@@ -13,7 +13,7 @@ import pytest
 import segno
 from pypdf import PdfReader, PdfWriter
 
-from app.modules.challan.render import build_challan_html, merge_pdfs, zip_files
+from app.modules.challan.render import build_challan_html, zip_files
 from app.modules.challan.schema import (
     ChallanView,
     ConsigneeView,
@@ -160,27 +160,6 @@ def test_zip_files_round_trips() -> None:
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         assert z.namelist() == ["a.pdf", "b.pdf"]
         assert z.read("a.pdf") == b"AAA"
-
-
-def _one_page_pdf() -> bytes:
-    w = PdfWriter()
-    w.add_blank_page(width=200, height=200)
-    buf = io.BytesIO()
-    w.write(buf)
-    return buf.getvalue()
-
-
-def test_merge_pdfs_concatenates_pages() -> None:
-    merged = merge_pdfs([_one_page_pdf(), _one_page_pdf()])
-    assert len(PdfReader(io.BytesIO(merged)).pages) == 2
-
-
-def test_merge_pdfs_empty_raises() -> None:
-    try:
-        merge_pdfs([])
-    except ValueError:
-        return
-    raise AssertionError("expected ValueError on empty merge")
 
 
 def _blank_pdf() -> bytes:
