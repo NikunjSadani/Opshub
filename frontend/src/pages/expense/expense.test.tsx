@@ -18,6 +18,19 @@ function json(data: unknown, status = 200) {
   });
 }
 
+/** Pick an option from a SearchableSelect combobox (Project / Payment method / Against
+ * invoice are searchable): focus to open the listbox, then mousedown the matching option
+ * (SearchableSelect commits on mousedown). */
+async function pickCombo(labelRe: RegExp, optionRe: RegExp) {
+  const combo = screen.getByRole('combobox', { name: labelRe });
+  // The picker is disabled until its options query resolves — wait, else focus is a no-op
+  // and the listbox never opens.
+  await waitFor(() => expect(combo).toBeEnabled());
+  fireEvent.focus(combo);
+  const opt = await screen.findByRole('option', { name: optionRe });
+  fireEvent.mouseDown(opt);
+}
+
 /**
  * `GET /me` payload the mock provider fetches on sign-in. Grants MANAGE on the
  * expense module so the upload (OPERATE) and delete-confirmed (MANAGE) gates
@@ -174,7 +187,7 @@ describe('Register', () => {
 });
 
 describe('Upload', () => {
-  it('requires a project + payment method, keeps Upload disabled until both are chosen, and posts them', async () => {
+  it('requires only a payment method (project optional), and posts the chosen allocation', async () => {
     let postedForm: FormData | null = null;
     vi.stubGlobal(
       'fetch',
@@ -207,9 +220,6 @@ describe('Upload', () => {
 
     renderWithProviders(<Upload />);
 
-    // The active-projects option arrives from the mocked /projects fetch.
-    await screen.findByRole('option', { name: /BRI-001 — Q3 Trade Rewards/i });
-
     const input = document.getElementById('expense-files') as HTMLInputElement;
     fireEvent.change(input, {
       target: {
@@ -220,16 +230,16 @@ describe('Upload', () => {
       },
     });
 
-    // Files chosen but neither picker set → Upload stays disabled.
+    // Files chosen but no payment method → Upload stays disabled.
     const uploadBtn = screen.getByRole('button', { name: /upload 2 files/i });
     expect(uploadBtn).toBeDisabled();
 
-    // Choosing only the project is not enough.
-    fireEvent.change(screen.getByLabelText(/project/i), { target: { value: '10' } });
-    expect(uploadBtn).toBeDisabled();
+    // Choosing the payment method ALONE enables it — a project is optional (general expense).
+    await pickCombo(/payment method/i, /Bank transfer/i);
+    expect(uploadBtn).toBeEnabled();
 
-    // Choosing the payment method too enables it.
-    fireEvent.change(screen.getByLabelText(/payment method/i), { target: { value: '3' } });
+    // A project can still be attributed; pick one so the post carries it.
+    await pickCombo(/project/i, /BRI-001 — Q3 Trade Rewards/i);
     expect(uploadBtn).toBeEnabled();
 
     fireEvent.click(uploadBtn);
@@ -274,20 +284,17 @@ describe('Upload', () => {
 
     renderWithProviders(<Upload />);
 
-    await screen.findByRole('option', { name: /BRI-001 — Q3 Trade Rewards/i });
-
     const input = document.getElementById('expense-files') as HTMLInputElement;
     fireEvent.change(input, {
       target: { files: [new File(['c'], 'cn.pdf', { type: 'application/pdf' })] },
     });
-    fireEvent.change(screen.getByLabelText(/project/i), { target: { value: '10' } });
-    fireEvent.change(screen.getByLabelText(/payment method/i), { target: { value: '3' } });
+    await pickCombo(/project/i, /BRI-001 — Q3 Trade Rewards/i);
+    await pickCombo(/payment method/i, /Bank transfer/i);
 
     // Switch the document type to Credit note → the against-invoice picker appears.
     fireEvent.change(screen.getByLabelText(/document type/i), { target: { value: 'CREDIT_NOTE' } });
     // Its options load from GET /expense/invoices; pick the existing invoice.
-    await screen.findByRole('option', { name: /INV-2026-001/i });
-    fireEvent.change(screen.getByLabelText(/against invoice/i), { target: { value: '1' } });
+    await pickCombo(/against invoice/i, /INV-2026-001/i);
 
     fireEvent.click(screen.getByRole('button', { name: /upload 1 file/i }));
 
@@ -351,15 +358,13 @@ describe('Upload', () => {
 
     renderWithProviders(<Upload />);
 
-    await screen.findByRole('option', { name: /BRI-001 — Q3 Trade Rewards/i });
-
     const input = document.getElementById('expense-files') as HTMLInputElement;
     fireEvent.change(input, {
       target: { files: [new File(['z'], 'dup.pdf', { type: 'application/pdf' })] },
     });
-    // Both cost-allocation tags are required before Upload is enabled.
-    fireEvent.change(screen.getByLabelText(/project/i), { target: { value: '10' } });
-    fireEvent.change(screen.getByLabelText(/payment method/i), { target: { value: '3' } });
+    // Payment method is required to enable Upload; attribute a project too.
+    await pickCombo(/payment method/i, /Bank transfer/i);
+    await pickCombo(/project/i, /BRI-001 — Q3 Trade Rewards/i);
     fireEvent.click(screen.getByRole('button', { name: /upload 1 file/i }));
 
     // The DUPLICATE row + its existing-invoice summary appear.

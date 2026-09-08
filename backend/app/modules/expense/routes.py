@@ -352,16 +352,17 @@ def upload_invoices(
     db: Annotated[Session, Depends(get_db)],
     response: Response,
     files: Annotated[list[UploadFile], File()],
-    project_id: Annotated[int, Form()],
     payment_method_id: Annotated[int, Form()],
+    project_id: Annotated[int | None, Form()] = None,
     doc_type: Annotated[str, Form()] = service.DOC_TYPE_INVOICE,
     against_invoice_id: Annotated[int | None, Form()] = None,
 ) -> UploadOut:
     """Bulk-upload N PDFs: store each blob, then extract + persist into one batch.
 
-    ``project_id`` + ``payment_method_id`` are REQUIRED — the cost allocation stamped
-    on every invoice in the batch. Both are validated (exist + Active) BEFORE any blob
-    is stored, so a bad allocation is a clean 400 that persists nothing.
+    ``payment_method_id`` is REQUIRED; ``project_id`` is OPTIONAL — a general expense not
+    tied to a project is uploaded with no project (it lands in the "Unattributed" bucket of
+    the by-project overview). When given, the project is validated (exists + Active) BEFORE
+    any blob is stored, so a bad allocation is a clean 400 that persists nothing.
 
     ``doc_type`` (INVOICE | CREDIT_NOTE, default INVOICE) marks the whole batch; a
     CREDIT_NOTE is a REDUCTION of cost (every money aggregate is sign-aware). The
@@ -377,7 +378,8 @@ def upload_invoices(
     if not files:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "no files uploaded")
     # Validate the allocation BEFORE storing any bytes (nothing persists on a bad one).
-    if projects_service.get_active_project(db, project_id) is None:
+    # project_id is optional (a general expense) — validate only when one is supplied.
+    if project_id is not None and projects_service.get_active_project(db, project_id) is None:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "project not found or not Active")

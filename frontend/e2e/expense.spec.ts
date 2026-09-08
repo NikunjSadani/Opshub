@@ -1,6 +1,17 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+
+/** Pick an option from a SearchableSelect combobox (the expense-upload Project / Payment
+ * method pickers are searchable): open it, type to filter, then click the match. */
+async function pickCombo(page: Page, labelRe: RegExp, optionText: string): Promise<void> {
+  const combo = page.getByRole('combobox', { name: labelRe });
+  await combo.click();          // auto-waits until enabled (options query resolved)
+  await combo.fill(optionText); // client-side filter to the match
+  // Scope to the combobox's OWN listbox — an unscoped role=option also matches native
+  // <select> options elsewhere on the page (e.g. the dev-user switcher).
+  await page.getByRole('listbox').getByRole('option', { name: optionText }).first().click();
+}
 
 // A real, machine-generated GST invoice PDF (a gold fixture) driven through the REAL
 // text-layer extractor in the e2e backend.
@@ -29,8 +40,8 @@ test.describe('Expense / Invoice', () => {
 
     // --- upload + real extraction (with the required allocation) ---
     await page.goto(EXPENSE);
-    await page.getByLabel('Project').selectOption(String(project.id));
-    await page.getByLabel('Payment method').selectOption(String(method.id));
+    await pickCombo(page, /Project/, `${project.code} — Expense Project`);
+    await pickCombo(page, /Payment method/, 'Cash');
     await page.setInputFiles('#expense-files', INVOICE);
     await page.getByRole('button', { name: /Upload \d+ file/ }).click();
 

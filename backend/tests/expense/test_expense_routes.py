@@ -257,6 +257,20 @@ def test_upload_extracted_happy(client: TestClient) -> None:
     assert len(reg) == 1 and reg[0]["invoice_number"] == "INV-001"
 
 
+def test_upload_without_project_is_a_general_expense(client: TestClient) -> None:
+    """Project is OPTIONAL: a general (non-project) expense uploads with NO project_id and
+    persists with a null project (it lands in the overview's Unattributed bucket). Payment
+    method stays required."""
+    files = [("files", ("gen.pdf", _pdf(_spec(invoice_number="INV-GEN")), "application/pdf"))]
+    # No project_id in the form at all.
+    data = {"payment_method_id": str(client.app.state.payment_method_id)}
+    r = client.post("/api/v1/expense/invoices", files=files, data=data)
+    assert r.status_code == 201, r.text
+    row = client.get("/api/v1/expense/invoices").json()[0]
+    assert row["invoice_number"] == "INV-GEN"
+    assert row["project_id"] is None and row["project_code"] is None
+
+
 def test_upload_needs_review(client: TestClient) -> None:
     r = _upload(client, _spec(invoice_number="INV-REVIEW", review=True))
     assert r.status_code == 201, r.text

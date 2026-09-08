@@ -1,6 +1,17 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+
+/** Pick from a SearchableSelect combobox (the expense-upload Project / Payment method
+ * pickers): open, type to filter to the unique match, then click the first option. */
+async function pickCombo(page: Page, labelRe: RegExp, filterText: string): Promise<void> {
+  const combo = page.getByRole('combobox', { name: labelRe });
+  await combo.click();          // auto-waits until enabled (options query resolved)
+  await combo.fill(filterText); // filter to the match (a "none" option won't match a code)
+  // Scope to the combobox's OWN open listbox — an unscoped role=option also matches native
+  // <select> options elsewhere on the page (e.g. the dev-user switcher).
+  await page.getByRole('listbox').getByRole('option').first().click();
+}
 
 // Expense cost-allocation (inc 27), end-to-end through the REAL SPA + backend.
 //
@@ -84,28 +95,24 @@ test.describe('Expense / cost-allocation', () => {
     await expect(methodRow).toBeVisible();
     await expect(methodRow.getByText('Active')).toBeVisible();
 
-    // ---- 3. Upload: disabled until BOTH tags + a file are chosen ----
+    // ---- 3. Upload: disabled until a payment method + a file are chosen (project OPTIONAL) ----
     await page.goto(EXPENSE);
     const uploadBtn = page.getByRole('button', { name: /^Upload/ });
-    const projectSelect = page.getByLabel('Project');
-    const methodSelect = page.getByLabel('Payment method');
 
     // Nothing chosen yet -> disabled.
     await expect(uploadBtn).toBeDisabled();
 
-    // A file, but neither tag -> still disabled.
+    // A file, but no payment method -> still disabled.
     await page.setInputFiles('#expense-files', INVOICE);
     await expect(uploadBtn).toBeDisabled();
 
-    // Only the project chosen -> still disabled (payment method still required).
-    const projectOption = await projectSelect
-      .locator('option', { hasText: PROJECT_CODE })
-      .getAttribute('value');
-    await projectSelect.selectOption(projectOption!);
+    // Only the project chosen -> STILL disabled: payment method is the required tag,
+    // project is optional (a general expense can have none).
+    await pickCombo(page, /Project/, PROJECT_CODE);
     await expect(uploadBtn).toBeDisabled();
 
-    // Both tags now chosen -> enabled.
-    await methodSelect.selectOption({ label: METHOD });
+    // Choosing the payment method enables it.
+    await pickCombo(page, /Payment method/, METHOD);
     await expect(uploadBtn).toBeEnabled();
 
     // Upload -> the clean fixture extracts fully (real pdfplumber extractor).

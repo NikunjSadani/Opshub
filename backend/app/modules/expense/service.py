@@ -224,7 +224,7 @@ def create_batch(
     db: Session,
     file_ids: list[int],
     *,
-    project_id: int,
+    project_id: int | None,
     payment_method_id: int,
     actor_uid: str | None,
     doc_type: str = DOC_TYPE_INVOICE,
@@ -285,7 +285,7 @@ def _process_file(
     extractor: Extractor,
     actor_uid: str | None,
     *,
-    project_id: int,
+    project_id: int | None,
     payment_method_id: int,
     doc_type: str = DOC_TYPE_INVOICE,
     against_invoice_id: int | None = None,
@@ -400,7 +400,7 @@ def _persist_invoice(
     content_hash: str,
     actor_uid: str | None,
     *,
-    project_id: int,
+    project_id: int | None,
     payment_method_id: int,
     doc_type: str = DOC_TYPE_INVOICE,
     against_invoice_id: int | None = None,
@@ -459,7 +459,7 @@ def _persist_invoice(
 
 def _persist_rejected(
     db: Session, batch: InvoiceBatch, file_id: int, actor_uid: str | None,
-    *, project_id: int, payment_method_id: int,
+    *, project_id: int | None, payment_method_id: int,
     doc_type: str = DOC_TYPE_INVOICE, against_invoice_id: int | None = None,
 ) -> FileOutcome:
     """A quality-gate failure: a terminal REJECTED invoice with a generic message

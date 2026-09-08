@@ -448,7 +448,9 @@ export function useUploadInvoices(): UseMutationResult<UploadBatchOut, Error, Up
     mutationFn: ({ files, projectId, paymentMethodId, docType, againstInvoiceId }) => {
       const form = new FormData();
       for (const f of files) form.append('files', f);
-      form.append('project_id', projectId);
+      // project is OPTIONAL (a general expense): omit the field when none is chosen — the
+      // backend's `int | None` cannot parse an empty-string form value.
+      if (projectId?.trim()) form.append('project_id', projectId.trim());
       form.append('payment_method_id', paymentMethodId);
       form.append('doc_type', docType);
       // Only a credit note carries an against-invoice ref, and only when one was

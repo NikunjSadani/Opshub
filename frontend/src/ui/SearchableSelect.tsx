@@ -45,6 +45,12 @@ export interface SearchableSelectProps {
    * are supplied. Optional — omitting it preserves the plain client-only behavior.
    */
   onQueryChange?: (query: string) => void;
+  /**
+   * For an OPTIONAL picker: the label of a "none" option prepended to the list (value
+   * `''`), so the user can clear the selection back to nothing (e.g. "No PO — match
+   * later"). Omit for a required picker — then there is no empty choice.
+   */
+  noneLabel?: string;
 }
 
 /** Mirrors the (non-exported) Field wrapper in ./form.tsx, but associates the
@@ -104,6 +110,7 @@ export function SearchableSelect({
   id,
   hint,
   onQueryChange,
+  noneLabel,
 }: SearchableSelectProps) {
   const reactId = useId();
   const baseId = id ?? `ss-${reactId}`;
@@ -118,17 +125,23 @@ export function SearchableSelect({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
+  // An OPTIONAL picker prepends a "none" option (value '') so the selection can be cleared.
+  const opts = useMemo<SearchableSelectOption[]>(
+    () => (noneLabel != null ? [{ value: '', label: noneLabel }, ...options] : options),
+    [noneLabel, options],
+  );
+
   const selectedLabel = useMemo(
-    () => options.find((o) => o.value === value)?.label ?? '',
-    [options, value],
+    () => opts.find((o) => o.value === value)?.label ?? '',
+    [opts, value],
   );
 
   // Case-insensitive substring filter, capped for performance.
   const { visible, truncated } = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const matches = q ? options.filter((o) => o.label.toLowerCase().includes(q)) : options;
+    const matches = q ? opts.filter((o) => o.label.toLowerCase().includes(q)) : opts;
     return { visible: matches.slice(0, MAX_RENDERED), truncated: matches.length > MAX_RENDERED };
-  }, [options, query]);
+  }, [opts, query]);
 
   // Keep the active index in range as the filtered list changes.
   useEffect(() => {
@@ -171,7 +184,7 @@ export function SearchableSelect({
     setOpen(true);
     setQuery('');
     // Preselect the currently-selected option if it's in view.
-    const selIdx = options.findIndex((o) => o.value === value);
+    const selIdx = opts.findIndex((o) => o.value === value);
     setActiveIndex(selIdx >= 0 && selIdx < MAX_RENDERED ? selIdx : 0);
   }
 

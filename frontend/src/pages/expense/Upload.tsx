@@ -5,6 +5,7 @@ import {
   Button,
   ConfirmDialog,
   PageHeader,
+  SearchableSelect,
   SelectField,
   StatePanel,
   useToast,
@@ -86,7 +87,8 @@ export function Upload() {
   }
 
   function onUpload() {
-    if (files.length === 0 || !projectId || !paymentMethodId) return;
+    // project is OPTIONAL (a general expense has none); payment method is required.
+    if (files.length === 0 || !paymentMethodId) return;
     upload.mutate({ files, projectId, paymentMethodId, docType, againstInvoiceId }, {
       onSuccess: (batch) => {
         setResults(batch.outcomes);
@@ -167,10 +169,9 @@ export function Upload() {
   const methods = methodsQuery.data ?? [];
   const invoiceOptions = invoiceOptionsQuery.data ?? [];
   const isCreditNote = docType === 'CREDIT_NOTE';
-  const noProjects = projectsQuery.isSuccess && projects.length === 0;
   const noMethods = methodsQuery.isSuccess && methods.length === 0;
-  // Both cost-allocation tags are REQUIRED before an upload can proceed.
-  const canSubmit = files.length > 0 && !!projectId && !!paymentMethodId;
+  // Payment method is REQUIRED; project is OPTIONAL (a general, non-project expense).
+  const canSubmit = files.length > 0 && !!paymentMethodId;
 
   return (
     <div>
@@ -197,68 +198,46 @@ export function Upload() {
             <option value="CREDIT_NOTE">Credit note</option>
           </SelectField>
           {isCreditNote ? (
-            <SelectField
+            <SearchableSelect
               label="Against invoice (optional)"
               value={againstInvoiceId}
-              onChange={(e) => setAgainstInvoiceId(e.target.value)}
+              onChange={setAgainstInvoiceId}
               disabled={invoiceOptionsQuery.isPending}
               hint="Link this credit note to the invoice it reduces, for context."
-            >
-              <option value="">
-                {invoiceOptionsQuery.isPending ? 'Loading invoices…' : 'Not linked'}
-              </option>
-              {invoiceOptions.map((inv) => (
-                <option key={inv.id} value={inv.id}>
-                  {inv.invoice_number ?? `#${inv.id}`}
-                  {inv.supplier_name ? ` — ${inv.supplier_name}` : ''}
-                </option>
-              ))}
-            </SelectField>
+              noneLabel="Not linked"
+              placeholder={invoiceOptionsQuery.isPending ? 'Loading invoices…' : 'Search an invoice…'}
+              options={invoiceOptions.map((inv) => ({
+                value: String(inv.id),
+                label: `${inv.invoice_number ?? `#${inv.id}`}${
+                  inv.supplier_name ? ` — ${inv.supplier_name}` : ''
+                }`,
+              }))}
+            />
           ) : (
             <div className="hidden sm:block" aria-hidden="true" />
           )}
-          <SelectField
-            label="Project"
-            required
+          <SearchableSelect
+            label="Project (optional)"
             value={projectId}
-            onChange={(e) => setProjectId(e.target.value)}
-            disabled={projectsQuery.isPending || noProjects}
-            hint="Which project this batch of invoices is charged to."
-          >
-            <option value="">
-              {projectsQuery.isPending ? 'Loading projects…' : 'Select a project…'}
-            </option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.code} — {p.name}
-              </option>
-            ))}
-          </SelectField>
-          <SelectField
+            onChange={setProjectId}
+            disabled={projectsQuery.isPending}
+            hint="Which project this batch is charged to — leave as a general expense if none."
+            noneLabel="No project (general expense)"
+            placeholder={projectsQuery.isPending ? 'Loading projects…' : 'Search a project…'}
+            options={projects.map((p) => ({ value: String(p.id), label: `${p.code} — ${p.name}` }))}
+          />
+          <SearchableSelect
             label="Payment method"
             required
             value={paymentMethodId}
-            onChange={(e) => setPaymentMethodId(e.target.value)}
+            onChange={setPaymentMethodId}
             disabled={methodsQuery.isPending || noMethods}
             hint="How this batch was (or will be) paid."
-          >
-            <option value="">
-              {methodsQuery.isPending ? 'Loading payment methods…' : 'Select a payment method…'}
-            </option>
-            {methods.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </SelectField>
+            placeholder={methodsQuery.isPending ? 'Loading payment methods…' : 'Search a payment method…'}
+            options={methods.map((m) => ({ value: String(m.id), label: m.name }))}
+          />
         </div>
 
-        {noProjects && (
-          <p className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            No active projects exist yet. Create one in the Projects module before uploading
-            invoices.
-          </p>
-        )}
         {noMethods && (
           <p className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
             No payment methods have been set up yet.{' '}
@@ -313,7 +292,7 @@ export function Upload() {
                 ? 'You need Operate access to this module to upload.'
                 : files.length === 0
                   ? 'Choose at least one PDF to upload.'
-                  : 'Select a project and payment method to enable upload.'}
+                  : 'Select a payment method to enable upload.'}
             </span>
           )}
         </div>
