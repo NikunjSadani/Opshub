@@ -11,7 +11,11 @@ import {
 } from '../../ui';
 import { ApiError } from '../../api/client';
 import { useClientsQuery, useProjectsQuery } from '../../api/projects';
-import { useBulkUploadPOs, type BulkUploadOut } from '../../api/purchaseOrders';
+import {
+  useBulkUploadPOs,
+  useDownloadBulkTemplate,
+  type BulkUploadOut,
+} from '../../api/purchaseOrders';
 import { SALES_ORDERS_BASE } from './salesOrdersFormat';
 
 function errorMessage(err: unknown): string {
@@ -25,12 +29,25 @@ export function POUpload() {
   const toast = useToast();
   const clientsQuery = useClientsQuery();
   const upload = useBulkUploadPOs();
+  const downloadTemplate = useDownloadBulkTemplate();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [clientId, setClientId] = useState('');
   const [projectId, setProjectId] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<BulkUploadOut | null>(null);
+  const [downloading, setDownloading] = useState(false);
+
+  async function onDownloadTemplate() {
+    setDownloading(true);
+    try {
+      await downloadTemplate();
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setDownloading(false);
+    }
+  }
 
   // Projects are scoped to the chosen client + ACTIVE (the backend requires both).
   const projectsQuery = useProjectsQuery({ client_id: clientId, status: 'ACTIVE' });
@@ -164,6 +181,15 @@ export function POUpload() {
           cost_price, sell_price, freight, packaging, handling, other, tax_rate. Money columns are
           in rupees.
         </p>
+        <div className="mt-2">
+          <Button
+            variant="ghost"
+            onClick={() => void onDownloadTemplate()}
+            loading={downloading}
+          >
+            Download template
+          </Button>
+        </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <Button onClick={onUpload} disabled={!canSubmit} loading={upload.isPending}>

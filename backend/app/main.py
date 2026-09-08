@@ -50,7 +50,7 @@ register_module(ModuleSpec(
     key="projects",
     title="Projects",
     router=APIRouter(),
-    nav_group="Operations",
+    nav_group="Sales",
 ))
 # Expense & Invoice — nav entry only; its API routes are mounted separately below
 # (expense_router at /api/v1). Same empty-router pattern as the modules above.
@@ -66,7 +66,7 @@ register_module(ModuleSpec(
     key="sales_orders",
     title="Purchase Orders",
     router=APIRouter(),
-    nav_group="Operations",
+    nav_group="Sales",
 ))
 # Billing / AR (client invoice capture, payments, advances) — nav entry only; its API
 # mounts separately below (billing_router at /api/v1). Same empty-router pattern.

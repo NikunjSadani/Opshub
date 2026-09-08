@@ -125,6 +125,17 @@ test.describe('Sales Orders — Wave 1 (admin end-to-end)', () => {
     await expect(poRow).toContainText(PROJECT_CODE);
     await expect(poRow).toContainText('3,000.00');
 
+    // ---- 2b. Drill-through: the project's detail lists this PO, and its View link
+    // reaches the PO detail. Exercises Project → its POs → PO detail end-to-end. ----
+    await page.goto(`/m/projects/${project.id}`);
+    await expect(page.getByRole('link', { name: '← Back to projects' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Purchase orders' })).toBeVisible();
+    const projPoRow = page.getByRole('row').filter({ hasText: PO_NUMBER });
+    await expect(projPoRow).toHaveCount(1);
+    await expect(projPoRow).toContainText('3,000.00');
+    await projPoRow.getByRole('link', { name: 'View' }).click();
+    await expect(page.getByRole('heading', { name: `PO ${PO_NUMBER}` })).toBeVisible();
+
     // ---- 3. Quote Search finds the priced line ----
     await page.getByRole('link', { name: 'Quote Search' }).click();
     await expect(page.getByRole('heading', { name: 'Quote Search' })).toBeVisible();

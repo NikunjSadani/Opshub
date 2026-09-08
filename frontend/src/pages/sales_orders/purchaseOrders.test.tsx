@@ -666,6 +666,46 @@ describe('PO bulk upload', () => {
     expect(screen.getByText(/unknown product code XYZ/i)).toBeInTheDocument();
     expect(screen.getByText(/Row 5/i)).toBeInTheDocument();
   });
+
+  it('"Download template" GETs the auth-gated template endpoint and saves the .xlsx', async () => {
+    // jsdom lacks blob-URL plumbing; stub it so the download helper's save step is inert.
+    URL.createObjectURL = vi.fn(() => 'blob:mock');
+    URL.revokeObjectURL = vi.fn();
+
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        if (url.includes('/purchase-orders/bulk-template.xlsx')) {
+          return new Response(new Blob(['xlsx-bytes']), {
+            status: 200,
+            headers: {
+              'content-type':
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              'content-disposition': 'attachment; filename="po-bulk-template.xlsx"',
+            },
+          });
+        }
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.includes('/projects')) return json(PROJECTS);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(<POUpload />);
+
+    const btn = await screen.findByRole('button', { name: /download template/i });
+    fireEvent.click(btn);
+
+    await waitFor(() =>
+      expect(urls.some((u) => u.endsWith('/api/v1/purchase-orders/bulk-template.xlsx'))).toBe(
+        true,
+      ),
+    );
+  });
 });
 
 describe('PO detail live-updates after a mutation (E2)', () => {

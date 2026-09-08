@@ -87,6 +87,10 @@ describe('ProjectsList — edit project (MANAGE)', () => {
 
     renderList();
 
+    // The project code cell links to the project's detail (the drill-through).
+    const codeLink = await screen.findByRole('link', { name: 'BRI-001' });
+    expect(codeLink.getAttribute('href')).toBe('/m/projects/11');
+
     // Open the edit modal from the row action.
     fireEvent.click(await screen.findByRole('button', { name: /edit BRI-001/i }));
     const dialog = await screen.findByRole('dialog');

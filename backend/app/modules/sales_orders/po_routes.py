@@ -26,6 +26,7 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
+    Response,
     UploadFile,
     status,
 )
@@ -45,6 +46,7 @@ router = APIRouter()
 
 MODULE_KEY = "sales_orders"
 _UPLOAD_CHUNK = 1024 * 1024
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _require_module(user: User) -> None:
@@ -403,6 +405,27 @@ def upload_purchase_orders(
         created=result.created,
         skipped=[BulkSkip(po_number=pon, reason=reason) for pon, reason in result.skipped],
         errors=[BulkError(row=row, reason=reason) for row, reason in result.errors],
+    )
+
+
+# --------------------------------------------------------------- bulk template
+
+# Registered BEFORE `/purchase-orders/{po_id}` so the literal `.xlsx` path is matched here
+# rather than trying (and failing) to coerce "bulk-template.xlsx" to an int po_id.
+@router.get("/purchase-orders/bulk-template.xlsx")
+def download_bulk_template(
+    user: Annotated[User, Depends(current_user)],
+) -> Response:
+    """Download a ready-to-fill ``.xlsx`` template for the bulk PO upload: the exact header
+    the parser accepts + one illustrative example row (money columns in rupees). Same OPERATE
+    gate as the upload itself, so the auth-gated download never leaks to a viewer."""
+    rbac.require_level(user, rbac.SALES_ORDERS, Level.OPERATE)
+    return Response(
+        content=po_service.build_bulk_template_xlsx(),
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": 'attachment; filename="po-bulk-template.xlsx"',
+        },
     )
 
 

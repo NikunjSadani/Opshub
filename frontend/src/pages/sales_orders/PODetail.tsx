@@ -281,7 +281,18 @@ function PODetailBody({
             </span>
           </DefItem>
           <DefItem label="Client">{po.client_name ?? '—'}</DefItem>
-          <DefItem label="Project">{po.project_code ?? '—'}</DefItem>
+          <DefItem label="Project">
+            {po.project_code ? (
+              <Link
+                to={`/m/projects/${po.project_id}`}
+                className="font-medium text-brand-600 hover:text-brand-700"
+              >
+                {po.project_code}
+              </Link>
+            ) : (
+              '—'
+            )}
+          </DefItem>
           <DefItem label="PO date">{formatDate(po.po_date)}</DefItem>
           <DefItem label="Expected procurement">
             {formatDate(po.expected_procurement_date)}

@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { usePermissions } from '../../auth/AuthProvider';
 import { Tabs, type TabDef } from '../../ui';
 import { ProjectsList } from './ProjectsList';
+import { ProjectDetail } from './ProjectDetail';
 import { ClientsScreen } from './ClientsScreen';
 import { ClientDetail } from './ClientDetail';
 
@@ -55,6 +56,16 @@ export function ProjectsModule() {
             // A read surface: any projects-module user (VIEW+) may open it; the
             // in-screen edits are MANAGE-gated. Defer until /me resolves.
             perms.loading ? loadingEl : canView ? <ClientDetail /> : <Navigate to={BASE} replace />
+          }
+        />
+        <Route
+          path=":id"
+          element={
+            // Project detail + its PO drill-through. A read surface: any projects-module
+            // user (VIEW+) may open it; reached only from the register. Static `clients`
+            // routes above take precedence over this param, so they never collide. Defer
+            // until /me resolves so a deep-link isn't bounced before permissions load.
+            perms.loading ? loadingEl : canView ? <ProjectDetail /> : <Navigate to={BASE} replace />
           }
         />
         <Route path="*" element={<Navigate to={BASE} replace />} />

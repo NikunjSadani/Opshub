@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import {
   useMutation,
   useQuery,
@@ -298,6 +299,9 @@ export interface POFilters {
   status?: POStatus | '';
   /** Free-text search over po_number. */
   q?: string;
+  /** Page size (backend clamps 1..200, defaults 50). Set it for a bounded scoped view
+   * — e.g. a project's drill-through wants the whole set, not the register's first page. */
+  limit?: number;
 }
 
 // --- query-string builder (pure, unit-testable) -------------------------------
@@ -312,6 +316,7 @@ export function buildPurchaseOrdersQuery(filters: POFilters): string {
   if (filters.project_id?.trim()) params.set('project_id', filters.project_id.trim());
   if (filters.status) params.set('status', filters.status);
   if (filters.q?.trim()) params.set('q', filters.q.trim());
+  if (filters.limit != null) params.set('limit', String(filters.limit));
   const qs = params.toString();
   return qs ? `?${qs}` : '';
 }
@@ -476,6 +481,24 @@ export function useVoidPO(): UseMutationResult<PODetail, ApiError, { id: string;
       void qc.invalidateQueries({ queryKey: ['purchase-orders', 'list'] });
     },
   });
+}
+
+/** The auth-gated endpoint that serves the downloadable bulk-upload .xlsx template (OPERATE). */
+export const PO_BULK_TEMPLATE_PATH = '/purchase-orders/bulk-template.xlsx';
+/** The filename the template downloads as (fallback if the server omits Content-Disposition). */
+export const PO_BULK_TEMPLATE_FILENAME = 'po-bulk-template.xlsx';
+
+/**
+ * Download the bulk-upload .xlsx template through the authed blob helper. The endpoint is
+ * auth-gated (OPERATE), so a bare `<a href>` would 401 — this reuses `downloadUrl`, which
+ * attaches the bearer token, streams the blob, and saves it with the server's filename.
+ * Returns a callback the button can await.
+ */
+export function useDownloadBulkTemplate(): () => Promise<void> {
+  const { downloadUrl } = useApi();
+  return useCallback(async () => {
+    await downloadUrl(PO_BULK_TEMPLATE_PATH, PO_BULK_TEMPLATE_FILENAME);
+  }, [downloadUrl]);
 }
 
 /** Arguments for a bulk .xlsx upload — one client + project tags the whole batch. */

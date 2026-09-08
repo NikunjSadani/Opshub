@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Badge,
   Button,
@@ -410,7 +411,14 @@ export function ProjectsList() {
           <tbody>
             {rows.map((p) => (
               <Tr key={p.id}>
-                <Td className="font-mono font-medium text-slate-900">{p.code}</Td>
+                <Td className="font-mono font-medium">
+                  <Link
+                    to={`/m/projects/${p.id}`}
+                    className="text-brand-600 hover:text-brand-700"
+                  >
+                    {p.code}
+                  </Link>
+                </Td>
                 <Td className="text-slate-900">{p.name}</Td>
                 <Td>
                   <span className="font-mono text-slate-900">{p.client_code}</span>

@@ -14,7 +14,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -424,6 +424,64 @@ def test_bulk_upload_happy_path(client: TestClient, seeded: dict[str, int]) -> N
     # bulk maps the sell column to client_sell; the operator sees the client-sell total.
     assert listing["BULK-1"]["total_client_sell_paise"] == 3 * 2550 + 2 * 900
     assert listing["BULK-1"]["total_sell_paise"] is None  # ACTUAL masked for the operator
+
+
+def test_bulk_template_download(client: TestClient, seeded: dict[str, int]) -> None:
+    """The template endpoint returns an .xlsx (correct content-type + attachment name) whose
+    first sheet's header row is EXACTLY the parser's expected columns, in order."""
+    _as(client, "operator")
+    r = client.get("/api/v1/purchase-orders/bulk-template.xlsx")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert 'filename="po-bulk-template.xlsx"' in r.headers["content-disposition"]
+
+    wb = load_workbook(io.BytesIO(r.content), read_only=True, data_only=True)
+    ws = wb.worksheets[0]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    assert list(rows[0]) == _BULK_HEADER  # header matches the parser's exact columns, in order
+    assert len(rows) == 2  # header + one illustrative example row
+    assert rows[1][0]  # the example row carries a po_number
+
+
+def test_bulk_template_requires_operate(client: TestClient, seeded: dict[str, int]) -> None:
+    """The template is gated like the upload — a VIEW-only user is 403."""
+    _as(client, "viewer")
+    assert client.get("/api/v1/purchase-orders/bulk-template.xlsx").status_code == 403
+
+
+def test_bulk_template_example_row_is_valid_upload(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """Round-trip proof: the downloaded template's example row, fed straight back through the
+    bulk-upload endpoint, creates a PO — so the shipped template is guaranteed-valid input."""
+    _as(client, "operator")
+    tmpl = client.get("/api/v1/purchase-orders/bulk-template.xlsx")
+    assert tmpl.status_code == 200, tmpl.text
+    wb = load_workbook(io.BytesIO(tmpl.content), read_only=True, data_only=True)
+    ws = wb.worksheets[0]
+    header, example = (list(row) for row in list(ws.iter_rows(values_only=True))[:2])
+    wb.close()
+
+    # Seed a product whose code matches the template's example product_code so it resolves.
+    code_idx = header.index("product_code")
+    example_code = str(example[code_idx])
+    db = client.app.state.TestSession()
+    db.add(Product(name="Template Sample", code=example_code, uom="PCS", active=True))
+    db.commit()
+    db.close()
+
+    # Re-serialise the two template rows into a fresh upload workbook and post it back.
+    data = _xlsx(header, [example])
+    r = client.post("/api/v1/purchase-orders/upload",
+                    files={"file": ("pos.xlsx", data, "application/xlsx")},
+                    data={"client_id": seeded["client_id"],
+                          "project_id": seeded["project_id"]})
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["created"] == [str(example[0])]  # the example po_number was created
+    assert out["skipped"] == [] and out["errors"] == []
 
 
 def test_bulk_upload_dedup_skip(client: TestClient, seeded: dict[str, int]) -> None:

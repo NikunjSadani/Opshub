@@ -30,7 +30,7 @@ from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -971,6 +971,37 @@ _BULK_ALIASES: dict[str, str] = {
     "po_date": "po_date", "date": "po_date", "order_date": "po_date",
 }
 _BULK_REQUIRED = ("po_number", "ordered_qty", "cost_price", "sell_price")
+
+# The downloadable TEMPLATE: the canonical header in a fixed, friendly order (a subset of the
+# accepted aliases — ``product_code`` is the product key the template ships) plus one
+# illustrative example row. Money columns are RUPEES (``_build_bulk_line`` converts them to
+# paise via ``parse_paise``), so the example uses rupee figures. Feeding this file straight
+# back through the bulk-upload endpoint creates a PO, so the template is guaranteed-valid
+# input, not just a column list. Required: po_number, product_code, ordered_qty, cost_price,
+# sell_price; the rest are optional.
+_BULK_TEMPLATE_COLUMNS: tuple[str, ...] = (
+    "po_number", "product_code", "description", "uom", "ordered_qty",
+    "cost_price", "sell_price", "freight", "packaging", "handling", "other", "tax_rate",
+)
+# One example row aligned to _BULK_TEMPLATE_COLUMNS. cost_price/sell_price/freight are in
+# RUPEES (250.00 -> 25000 paise). product_code is illustrative — replace with a real SKU.
+_BULK_TEMPLATE_EXAMPLE: tuple[object, ...] = (
+    "PO-2026-001", "SKU-1001", "Sample line — replace with your product", "PCS",
+    100, 250.00, 399.00, 500.00, 0, 0, 0, 18,
+)
+
+
+def build_bulk_template_xlsx() -> bytes:
+    """Return the bulk-upload template as ``.xlsx`` bytes: the header row in the exact column
+    order the parser accepts + one illustrative example row (money columns in rupees)."""
+    wb = Workbook()
+    ws = wb.active or wb.create_sheet()
+    ws.title = "purchase_orders"
+    ws.append(list(_BULK_TEMPLATE_COLUMNS))
+    ws.append(list(_BULK_TEMPLATE_EXAMPLE))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 def _norm_header(raw: str) -> str:
