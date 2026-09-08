@@ -42,9 +42,18 @@ from app.modules.expense.tally import (
     NAME,
     TallyAwareExtractor,
     TallyInvoiceExtractor,
+    _clean_runs,
+    _Col,
+    _Grid,
+    _is_item_start,
     _is_tally_tax_invoice,
     _last_money,
     _num_or_none,
+    _parse_item_row,
+    _peel_lead_sl,
+    _proportional_split,
+    _split_glued_tail,
+    _Word,
 )
 from app.modules.expense.text_layer import (
     _GRAND_TOTAL_RE,
@@ -57,8 +66,10 @@ from tests.expense.tally_synth import (
     GSTIN_BUYER_WB2,
     GSTIN_SUPPLIER_KA,
     GSTIN_SUPPLIER_WB,
+    TGluedInvoice,
     TInvoice,
     TLine,
+    build_tally_glued_igst_pdf,
     build_tally_pdf,
 )
 
@@ -464,3 +475,209 @@ def test_unsupported_doc_type_rejected() -> None:
         EX.extract(pdf, doc_type="purchase_order")
     with pytest.raises(ValueError):
         TallyInvoiceExtractor().extract(pdf, doc_type="purchase_order")
+
+
+# =========================================================================== glued-token split
+# A tight Tally IGST grid makes pdfplumber GLUE adjacent cells into one word token; the item-row
+# token-splitter must fan each glued token back into its own column. These tests pin the
+# splitter primitives, then the row-parser on the EXACT real-Bajaj glued geometry, then the
+# committed gold fixture end-to-end.
+
+
+def _w(text: str, x0: float, x1: float) -> _Word:
+    return _Word(text=text, x0=x0, x1=x1, top=258.0, bottom=266.0, page=1)
+
+
+def test_clean_runs_segments_glued_money_percent_uom() -> None:
+    assert _clean_runs("PCS32,000.00PCS") == ["PCS", "32,000.00", "PCS"]
+    # A 4-decimal glue splits AFTER the paise (money caps at 2 decimals), never swallowing the
+    # abutting rate digits: taxable 32,000.00 + IGST-rate 18% + IGST-amount 5,760.00.
+    assert _clean_runs("32,000.0018%5,760.00") == ["32,000.00", "18%", "5,760.00"]
+    assert _clean_runs("1Lloyd") == ["1", "Lloyd"]
+    assert _clean_runs("18%") == ["18%"]                      # a clean single run
+    # A SUB-₹1,000 taxable carries no thousands comma, so the percent run must NOT eat its
+    # paise: "50.0018%9.00" is taxable 50.00 + rate 18% + IGST 9.00 (regression: an unbounded
+    # percent mantissa fused "50.0018%" and dropped the cheap line to review).
+    assert _clean_runs("50.0018%9.00") == ["50.00", "18%", "9.00"]
+    assert _clean_runs("999.0018%179.82") == ["999.00", "18%", "179.82"]
+    assert _clean_runs("2.5%") == ["2.5%"]                    # a fractional rate still parses
+
+
+def test_clean_runs_rejects_tokens_with_stray_glyphs() -> None:
+    # A rupee-symbol artefact, a description fragment, and a one-decimal token do NOT decompose
+    # cleanly (a stray '(' / ':' / ')' / '.5') → None → the token is left untouched (never split
+    # into a spurious money value that would pollute a column).
+    assert _clean_runs("(cid:299)") is None
+    assert _clean_runs("2026(6") is None
+    assert _clean_runs("1.5") is None
+    assert _clean_runs("Ac,") is None
+
+
+def test_split_glued_tail_idempotent_on_clean_and_junk_tokens() -> None:
+    # A clean single money token is never fragmented.
+    clean = _w("32,000.00", 649.0, 682.0)
+    assert [x.text for x in _split_glued_tail(clean)] == ["32,000.00"]
+    # A rupee-symbol artefact (Tally's "(cid:299)" before the bill total) is never fragmented
+    # into a spurious "299" money value.
+    junk = _w("(cid:299)", 644.0, 649.0)
+    assert [x.text for x in _split_glued_tail(junk)] == ["(cid:299)"]
+
+
+def test_split_glued_tail_proportional_x_boxes() -> None:
+    glued = _w("32,000.0018%5,760.00", 688.0, 765.0)
+    parts = _split_glued_tail(glued)
+    assert [p.text for p in parts] == ["32,000.00", "18%", "5,760.00"]
+    # Sub-boxes tile the original [x0, x1] span left-to-right, contiguous, in-bounds.
+    assert parts[0].x0 == pytest.approx(688.0)
+    assert parts[-1].x1 == pytest.approx(765.0)
+    for a, b in zip(parts, parts[1:], strict=False):         # adjacent pairs (len-1 of them)
+        assert a.x1 == pytest.approx(b.x0)                    # contiguous, no gaps/overlap
+        assert a.x0 < a.x1
+
+
+def test_proportional_split_divides_by_character_length() -> None:
+    parts = _proportional_split(_w("AB1234", 0.0, 60.0), ["AB", "1234"])
+    assert [p.text for p in parts] == ["AB", "1234"]
+    assert (parts[0].x0, parts[0].x1) == pytest.approx((0.0, 20.0))   # 2 of 6 chars
+    assert (parts[1].x0, parts[1].x1) == pytest.approx((20.0, 60.0))  # 4 of 6 chars
+
+
+def _bajaj_grid() -> _Grid:
+    """The column grid of a real Bajaj 'Sales TI' IGST invoice (from its two-row banner)."""
+    return _Grid(
+        desc_tail_x=431.5,
+        tail_cols=[
+            _Col("hsn", 547.5), _Col("qty", 581.0), _Col("rate", 612.0), _Col("per", 632.5),
+            _Col("amount", 660.0), _Col("taxable", 698.0), _Col("igst_rate", 728.5),
+            _Col("igst_amt", 751.0), _Col("total", 784.5),
+        ],
+        intra=False,
+    )
+
+
+def test_peel_lead_sl_splits_glued_serial_only() -> None:
+    grid = _bajaj_grid()
+    peeled = _peel_lead_sl([_w("1Lloyd", 45.0, 71.0)], grid)
+    assert [p.text for p in peeled] == ["1", "Lloyd"]
+    assert peeled[0].text.isdigit() and peeled[0].x0 == pytest.approx(45.0)
+    # A NON-glued serial (a bare "1") is returned unchanged.
+    assert [p.text for p in _peel_lead_sl([_w("1", 45.0, 49.0)], grid)] == ["1"]
+
+
+def test_parse_item_row_on_real_bajaj_glued_geometry() -> None:
+    """The EXACT glued item row of Sales_TI_2026_1229 (real word boxes) → the canonical line.
+
+    pdfplumber glues the Sl onto the description ("1Lloyd"), the uom+rate+per ("PCS32,000.00PCS")
+    and the taxable+IGST-rate+IGST-amount ("32,000.0018%5,760.00"); the splitter must fan each
+    back into its own column. Reproduced as raw ``_Word`` tokens so the assertion is exact and
+    independent of any renderer (the direct row-parser proof the fix demands).
+    """
+    grid = _bajaj_grid()
+    toks = [
+        _w("1Lloyd", 45.0, 71.0), _w("1.5", 73.0, 83.0), _w("Ton", 85.0, 99.0),
+        _w("3", 101.0, 105.0), _w("Star", 107.0, 122.0), _w("Inverter", 124.0, 151.0),
+        _w("Split", 153.0, 169.0), _w("Ac,", 171.0, 183.0), _w("2026(6", 185.0, 208.0),
+        _w("in", 210.0, 217.0), _w("1", 219.0, 223.0), _w("Convertible)", 225.0, 268.0),
+        _w("84151010", 540.0, 563.0), _w("1", 580.0, 584.0),
+        _w("PCS32,000.00PCS", 586.0, 641.0), _w("32,000.00", 649.0, 682.0),
+        _w("32,000.0018%5,760.00", 688.0, 765.0), _w("37,760.00", 771.0, 804.0),
+    ]
+    peeled = _peel_lead_sl(sorted(toks, key=lambda w: w.x0), grid)
+    assert _is_item_start(peeled, grid) is True
+    row = _parse_item_row(peeled, grid)
+    assert row.description == "Lloyd 1.5 Ton 3 Star Inverter Split Ac, 2026(6 in 1 Convertible)"
+    assert row.hsn == "84151010"
+    assert row.quantity == Decimal("1")
+    assert row.unit == "PCS"
+    assert row.unit_rate == 3_200_000       # ₹32,000 from the glued PCS<rate>PCS run
+    assert row.taxable == 3_200_000         # ₹32,000 from the glued taxable+rate+amount run
+    assert row.gst_rate == Decimal("18")
+    assert row.igst == 576_000              # ₹5,760
+    assert row.cgst is None and row.sgst is None
+    assert row.line_total == 3_776_000      # ₹37,760
+
+
+def test_parse_item_row_bounds_missplit_rate_to_0_100() -> None:
+    """A mis-split value that lands in the rate column but is NOT a plausible 0..100 percent
+    (a stray money figure) must never be read as a gst_rate (it would overflow NUMERIC(5,2))."""
+    grid = _Grid(desc_tail_x=100.0,
+                 tail_cols=[_Col("taxable", 200.0), _Col("igst_rate", 300.0),
+                            _Col("igst_amt", 400.0)],
+                 intra=False)
+    toks = [_w("9", 10.0, 14.0), _w("3,200.00", 195.0, 205.0),
+            _w("5,760.00", 295.0, 305.0), _w("576.00", 395.0, 405.0)]
+    row = _parse_item_row(toks, grid)
+    assert row.taxable == 320_000           # ₹3,200.00
+    assert row.igst == 57_600               # ₹576.00
+    assert row.gst_rate is None             # 5760 is not a 0..100 rate → dropped, not persisted
+
+
+def test_glued_igst_synth_extracts_canonical_line_no_review() -> None:
+    """The synthetic glued-token IGST invoice extracts the canonical line with NO review."""
+    inv = TGluedInvoice(
+        supplier_name="Acme Cooling Devices Private Limited", supplier_gstin=GSTIN_SUPPLIER_KA,
+        supplier_address="MG Road, Bengaluru", buyer_name="Northstar Retail LLP",
+        buyer_gstin=GSTIN_BUYER_WB2, buyer_address="Park Street, Kolkata",
+        invoice_number="TI/2026/7788", invoice_date=date(2026, 7, 15),
+        place_of_supply="West Bengal", description="Acme Cooler Deluxe Split AC",
+        description_first="Acme", hsn="84151010", qty=Decimal("1"), unit="PCS",
+        unit_rate_paise=4_000_000, gst_rate=Decimal("18"))
+    pdf, gold = build_tally_glued_igst_pdf(inv)
+    r = EX.extract(pdf)
+    assert r.source_engine == NAME
+    assert len(r.lines) == 1
+    ln = r.lines[0]
+    assert ln.description.value_normalized == "Acme Cooler Deluxe Split AC"
+    assert ln.hsn_sac.value_normalized == "84151010"
+    assert ln.quantity.value_normalized == Decimal("1")
+    assert ln.unit.value_normalized == "PCS"
+    assert ln.unit_rate_paise.value_normalized == 4_000_000
+    assert ln.taxable_paise.value_normalized == 4_000_000
+    assert ln.gst_rate.value_normalized == Decimal("18")
+    assert ln.igst_paise.value_normalized == 720_000
+    assert ln.cgst_paise.status is FieldStatus.MISSING
+    assert ln.line_total_paise.value_normalized == 4_720_000
+    t = r.totals
+    assert t.total_taxable_paise.value_normalized == 4_000_000
+    assert t.total_igst_paise.value_normalized == 720_000
+    assert t.grand_total_paise.value_normalized == 4_720_000
+    assert r.arithmetic.lines_sum_matches_taxable and r.arithmetic.per_line_tax_consistent
+    assert r.arithmetic.totals_add_to_grand and r.arithmetic.supply_type_consistent
+    assert r.review_needed is False and r.review_reasons == []
+
+
+def test_gold_tally_glued_igst_line_exact() -> None:
+    """The committed gold fixture (tests/expense/gold/tally_glued_igst) extracts to its
+    expected.json line + totals + ids EXACTLY via the Tally engine (a regression guard on the
+    glued-token splitter; the text-layer accuracy harness excludes this Tally-only fixture)."""
+    import json
+    import pathlib
+
+    d = pathlib.Path(__file__).parent / "gold" / "tally_glued_igst"
+    gold = json.loads((d / "expected.json").read_text(encoding="utf-8"))
+    r = EX.extract((d / "source.pdf").read_bytes())
+
+    assert r.source_engine == NAME
+    assert r.review_needed is bool(gold["review_needed"]) is False
+    h, gh = r.header, gold["header"]
+    assert h.invoice_number.value_normalized == gh["invoice_number"]
+    assert h.invoice_date.value_normalized == date.fromisoformat(gh["invoice_date"])
+    assert h.supplier_gstin.value_normalized == gh["supplier_gstin"]
+    assert h.buyer_gstin.value_normalized == gh["buyer_gstin"]
+
+    assert len(r.lines) == len(gold["lines"]) == 1
+    ln, gl = r.lines[0], gold["lines"][0]
+    assert ln.description.value_normalized == gl["description"]
+    assert ln.hsn_sac.value_normalized == gl["hsn_sac"]
+    assert ln.quantity.value_normalized == Decimal(gl["quantity"])
+    assert ln.unit.value_normalized == gl["unit"]
+    assert ln.unit_rate_paise.value_normalized == gl["unit_rate_paise"]
+    assert ln.taxable_paise.value_normalized == gl["taxable_paise"]
+    assert ln.gst_rate.value_normalized == Decimal(gl["gst_rate"])
+    assert ln.igst_paise.value_normalized == gl["igst_paise"]
+    assert ln.line_total_paise.value_normalized == gl["line_total_paise"]
+
+    t, gt = r.totals, gold["totals"]
+    assert t.total_taxable_paise.value_normalized == gt["total_taxable_paise"]
+    assert t.total_igst_paise.value_normalized == gt["total_igst_paise"]
+    assert t.grand_total_paise.value_normalized == gt["grand_total_paise"]

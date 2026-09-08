@@ -358,6 +358,175 @@ def _build_gold(inv: TInvoice, lines: list[_CLine],
     }
 
 
+# ===========================================================================================
+# GLUED-TOKEN Tally layout (regression fixture for the item-row token-splitter)
+# ===========================================================================================
+# A real Tally "Sales TI" IGST invoice renders its tight right-aligned tax columns so that
+# pdfplumber GLUES adjacent cells into a single word: the Sl digit onto the description start
+# ("1Acme"), a uom+rate+per run ("PCS40,000.00PCS"), and a taxable+IGST-rate+IGST-amount run
+# ("40,000.0018%7,200.00"). This builder reproduces that geometry (column x-anchors matching a
+# genuine Tally grid; FICTIONAL data) by drawing those runs as CONTIGUOUS strings so the text
+# layer carries the same glued tokens — the exact shape that yields 0 line items without the
+# splitter, and the canonical line WITH it.
+
+
+@dataclass
+class TGluedInvoice:
+    supplier_name: str
+    supplier_gstin: str
+    supplier_address: str
+    buyer_name: str
+    buyer_gstin: str
+    buyer_address: str
+    invoice_number: str
+    invoice_date: date
+    place_of_supply: str
+    description: str
+    description_first: str    # the description's first word, GLUED to the Sl digit ("1Acme")
+    hsn: str
+    qty: Decimal
+    unit: str
+    unit_rate_paise: int
+    gst_rate: Decimal         # inter-state IGST percent (e.g. 18)
+
+
+# Column x-anchors of a genuine Tally IGST grid (right edge for money, left for text). The tight
+# tax columns are what make abutting cells glue into one token under pdfplumber word extraction.
+_G_SL_X = 44.0
+_G_HSN_X = 540.0
+_G_QTY_X = 580.0
+_G_UOMRATE_X = 590.0          # left x of the glued "PCS<rate>PCS" run
+_G_AMOUNT_R = 685.0
+_G_TAXBLK_X = 688.0           # left x of the glued "<taxable><igst%><igst>" run
+_G_TAXABLE_R = 721.0
+_G_IGST_R = 765.0
+_G_TOTAL_R = 804.0
+
+
+def _g_banner(c: canvas.Canvas, y: float) -> float:
+    c.setFont("Helvetica-Bold", 7)
+    c.drawString(_G_SL_X, y, "Sl")
+    c.drawString(257.0, y, "Description of Goods")
+    c.drawString(537.0, y, "HSN/SAC")
+    c.drawString(574.0, y, "Quantity")
+    c.drawString(613.0, y, "Rate")
+    c.drawString(639.0, y, "per")
+    c.drawString(656.0, y, "Amount")
+    c.drawString(691.0, y, "Taxable")
+    c.drawString(732.0, y, "IGST")
+    c.drawString(776.0, y, "Total")
+    y2 = y - 11.0
+    c.drawString(_G_SL_X, y2, "No.")
+    c.drawString(690.0, y2, "Value")
+    c.drawString(724.0, y2, "Rate")
+    c.drawString(744.0, y2, "Amount")
+    c.drawString(774.0, y2, "Amount")
+    return y2 - 14.0
+
+
+def build_tally_glued_igst_pdf(inv: TGluedInvoice) -> tuple[bytes, dict[str, object]]:
+    """Render a single-line inter-state Tally IGST invoice whose item + total rows carry GLUED
+    multi-column tokens, and return ``(pdf_bytes, gold)`` in the eval-gold record shape."""
+    taxable = _q0(inv.qty * Decimal(inv.unit_rate_paise))
+    igst = _q0(Decimal(taxable) * inv.gst_rate / Decimal(100))
+    line_total = taxable + igst
+    grand = line_total
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=(_PAGE_W, _PAGE_H))
+    c.setTitle("Tax Invoice")
+
+    masthead_inv = TInvoice(
+        supplier_name=inv.supplier_name, supplier_gstin=inv.supplier_gstin,
+        supplier_address=inv.supplier_address, buyer_name=inv.buyer_name,
+        buyer_gstin=inv.buyer_gstin, buyer_address=inv.buyer_address,
+        invoice_number=inv.invoice_number, invoice_date=inv.invoice_date,
+        place_of_supply=inv.place_of_supply, intra=False, lines=[])
+    y = _draw_masthead(c, masthead_inv, _PAGE_H - 30.0, continued=False)
+    y = _g_banner(c, y)
+
+    # ---- item row: contiguous draws so pdfplumber glues the intended runs ----
+    c.setFont("Helvetica", 7)
+    rate_s = _money(inv.unit_rate_paise)
+    tax_s = _money(taxable)
+    igst_s = _money(igst)
+    # (a) Sl digit glued onto the description start; the rest of the description follows.
+    desc_rest = inv.description[len(inv.description_first):].lstrip()
+    c.drawString(_G_SL_X, y, f"1{inv.description_first} {desc_rest}".rstrip())
+    c.drawString(_G_HSN_X, y, inv.hsn)
+    c.drawString(_G_QTY_X, y, _dec_str(inv.qty))
+    # (b) glued uom+rate+per, and glued taxable+IGST-rate+IGST-amount (one drawString each). The
+    # inclusive "Amount" cell is intentionally omitted (Tally often prints only the Taxable Value
+    # on the item row); taxable comes from the tax block, so no separate Amount value is needed.
+    c.drawString(_G_UOMRATE_X, y, f"{inv.unit}{rate_s}{inv.unit}")
+    c.drawString(_G_TAXBLK_X, y, f"{tax_s}{_rate_str(inv.gst_rate)}{igst_s}")
+    c.drawRightString(_G_TOTAL_R, y, _money(line_total))
+    y -= 14.0
+
+    # ---- IGST summary line (label-anchored total) + the grand-total row ----
+    c.drawString(520.0, y, "IGST")
+    c.drawRightString(_G_AMOUNT_R, y, igst_s)
+    y -= 14.0
+    c.drawString(521.0, y, "Total")
+    c.drawRightString(_G_AMOUNT_R, y, _money(grand))
+    c.drawRightString(_G_TAXABLE_R, y, tax_s)
+    c.drawRightString(_G_IGST_R, y, igst_s)
+    y -= 16.0
+
+    c.setFont("Helvetica", 8)
+    c.drawString(45.0, y, "Amount Chargeable (in words) INR As Rendered Only")
+    y -= 14.0
+    c.drawString(45.0, y, "This is a Computer Generated Invoice")
+    c.showPage()
+    c.save()
+
+    gold: dict[str, object] = {
+        "schema_version": CANONICAL_SCHEMA_VERSION,
+        "doc_type": "gst_invoice",
+        "page_count": 1,
+        "needs_ocr": False,
+        "review_needed": False,
+        "header": {
+            "supplier_name": inv.supplier_name,
+            "supplier_gstin": inv.supplier_gstin,
+            "supplier_address": inv.supplier_address,
+            "buyer_name": inv.buyer_name,
+            "buyer_gstin": inv.buyer_gstin,
+            "buyer_address": inv.buyer_address,
+            "invoice_number": inv.invoice_number,
+            "invoice_date": inv.invoice_date.isoformat(),
+            "place_of_supply": inv.place_of_supply,
+            "po_ref": None,
+        },
+        "totals": {
+            "total_taxable_paise": taxable,
+            "total_cgst_paise": None,
+            "total_sgst_paise": None,
+            "total_igst_paise": igst,
+            "round_off_paise": None,
+            "grand_total_paise": grand,
+            "amount_in_words": None,
+        },
+        "lines": [
+            {
+                "line_no": 1,
+                "description": inv.description,
+                "hsn_sac": inv.hsn,
+                "quantity": _dec_str(inv.qty),
+                "unit": inv.unit,
+                "unit_rate_paise": inv.unit_rate_paise,
+                "taxable_paise": taxable,
+                "gst_rate": _dec_str(inv.gst_rate),
+                "cgst_paise": None,
+                "sgst_paise": None,
+                "igst_paise": igst,
+                "line_total_paise": line_total,
+            }
+        ],
+    }
+    return buf.getvalue(), gold
+
+
 # A few checksum-valid GSTINs (verified via masterdata.normalize.valid_gstin), reused across
 # fixtures. Kept here so a fixture never spuriously trips the checksum gate.
 GSTIN_SUPPLIER_WB = "19AAACT9811F1Z9"   # West Bengal (19)

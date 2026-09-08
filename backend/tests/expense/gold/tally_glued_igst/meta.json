@@ -1,0 +1,20 @@
+{
+  "fixture_id": "tally_glued_igst",
+  "supply_type": "inter",
+  "n_lines": 1,
+  "page_count": 1,
+  "needs_ocr": false,
+  "review_needed": false,
+  "column_order": [
+    "sl",
+    "description",
+    "hsn",
+    "qty",
+    "uom+rate+per",
+    "taxable+igst_rate+igst_amt",
+    "total"
+  ],
+  "notes": "Real Tally IGST layout whose tight tax columns make pdfplumber GLUE adjacent cells into single word tokens ('1Acme', 'PCS40,000.00PCS', '40,000.0018%7,200.00'). The Tally engine's item-row token-splitter fans each glued token back into its own column via a proportional x-split; without it the row yields 0 line items → NEEDS_REVIEW. Tally-engine-only fixture (excluded from the text-layer accuracy harness).",
+  "generator": "tests.expense.tally_synth.build_tally_glued_igst_pdf (rl_config.invariant)",
+  "schema_version": "gst_invoice/1.0.0"
+}

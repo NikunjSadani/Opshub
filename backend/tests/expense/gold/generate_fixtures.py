@@ -27,6 +27,12 @@ from app.modules.expense.eval.synth import (
     build_hash_rate_invoice_pdf,
     build_invoice_pdf,
 )
+from tests.expense.tally_synth import (
+    GSTIN_BUYER_WB2,
+    GSTIN_SUPPLIER_KA,
+    TGluedInvoice,
+    build_tally_glued_igst_pdf,
+)
 
 GOLD_DIR = Path(__file__).resolve().parent
 
@@ -248,6 +254,39 @@ _HASH_RATE_FIXTURES: dict[str, HashRateInvoiceSpec] = {
 }
 
 
+def _tally_glued_igst() -> TGluedInvoice:
+    # A real Tally IGST "Sales TI" whose tight tax columns make pdfplumber GLUE adjacent cells
+    # into single word tokens ("1Acme", "PCS40,000.00PCS", "40,000.0018%7,200.00"). Doc-exact on
+    # the line ONLY when the Tally engine's item-row token-splitter fans each glued token back
+    # into its column; without it the row yields 0 line items → NEEDS_REVIEW. Handled by the
+    # dedicated TallyInvoiceExtractor (this fixture is Tally-engine-only — see the note in
+    # test_extractor_accuracy.py), with fictional data (no real names / GSTINs).
+    return TGluedInvoice(
+        supplier_name="Acme Cooling Devices Private Limited",
+        supplier_gstin=GSTIN_SUPPLIER_KA,
+        supplier_address="MG Road, Bengaluru",
+        buyer_name="Northstar Retail LLP",
+        buyer_gstin=GSTIN_BUYER_WB2,
+        buyer_address="Park Street, Kolkata",
+        invoice_number="TI/2026/7788",
+        invoice_date=date(2026, 7, 15),
+        place_of_supply="West Bengal",
+        description="Acme Cooler Deluxe Split AC",
+        description_first="Acme",
+        hsn="84151010",
+        qty=Decimal("1"),
+        unit="PCS",
+        unit_rate_paise=4000000,
+        gst_rate=Decimal("18"),
+    )
+
+
+# Fixtures built by the dedicated glued-token IGST Tally builder (Tally-engine-only).
+_GLUED_FIXTURES: dict[str, TGluedInvoice] = {
+    "tally_glued_igst": _tally_glued_igst(),
+}
+
+
 def _meta(fixture_id: str, spec: InvoiceSpec, gold: dict[str, object]) -> dict[str, object]:
     return {
         "fixture_id": fixture_id,
@@ -290,6 +329,12 @@ _NOTES: dict[str, str] = {
         "amounts, a DOUBLED trailing 'Amount' = the inclusive line total, and only a bare "
         "'TOTAL:' line — so both totals are DERIVED from the line items (Σ taxable, Σ line "
         "total) and the arithmetic cross-checks corroborate them."),
+    "tally_glued_igst": (
+        "Real Tally IGST layout whose tight tax columns make pdfplumber GLUE adjacent cells into "
+        "single word tokens ('1Acme', 'PCS40,000.00PCS', '40,000.0018%7,200.00'). The Tally "
+        "engine's item-row token-splitter fans each glued token back into its own column via a "
+        "proportional x-split; without it the row yields 0 line items → NEEDS_REVIEW. "
+        "Tally-engine-only fixture (excluded from the text-layer accuracy harness)."),
 }
 
 
@@ -310,7 +355,39 @@ def _hash_rate_meta(fixture_id: str, gold: dict[str, object]) -> dict[str, objec
     }
 
 
+def _glued_meta(fixture_id: str, gold: dict[str, object]) -> dict[str, object]:
+    return {
+        "fixture_id": fixture_id,
+        "supply_type": "inter",
+        "n_lines": len(gold["lines"]) if isinstance(gold["lines"], list) else 0,
+        "page_count": gold["page_count"],
+        "needs_ocr": gold["needs_ocr"],
+        "review_needed": gold["review_needed"],
+        "column_order": ["sl", "description", "hsn", "qty", "uom+rate+per",
+                         "taxable+igst_rate+igst_amt", "total"],
+        "notes": _NOTES[fixture_id],
+        "generator": (
+            "tests.expense.tally_synth.build_tally_glued_igst_pdf (rl_config.invariant)"),
+        "schema_version": gold["schema_version"],
+    }
+
+
+def _write_fixture(fixture_id: str, pdf_bytes: bytes, gold: dict[str, object],
+                   meta: dict[str, object]) -> None:
+    out = GOLD_DIR / fixture_id
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "source.pdf").write_bytes(pdf_bytes)
+    (out / "expected.json").write_text(
+        json.dumps(gold, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    (out / "meta.json").write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"wrote {fixture_id}: {len(pdf_bytes)} bytes, {len(gold['lines'])} lines")  # type: ignore[arg-type]
+
+
 def main() -> None:
+    for fixture_id, glued_spec in _GLUED_FIXTURES.items():
+        pdf_bytes, gold = build_tally_glued_igst_pdf(glued_spec)
+        _write_fixture(fixture_id, pdf_bytes, gold, _glued_meta(fixture_id, gold))
     for fixture_id, spec in _FIXTURES.items():
         pdf_bytes, gold = build_invoice_pdf(spec)
         out = GOLD_DIR / fixture_id

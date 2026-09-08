@@ -62,6 +62,8 @@ from app.modules.expense.text_layer import (
     _MIN_CHARS_PER_PAGE,
     _PO_RE,
     _POS_RE,
+    _RATE_MAX,
+    _RATE_MIN,
     _ROUND_OFF_RE,
     _TOTAL_CGST_RE,
     _TOTAL_IGST_RE,
@@ -359,6 +361,99 @@ def _combine_rate(cgst_rate: Decimal | None, sgst_rate: Decimal | None,
     return None
 
 
+# --------------------------------------------------------------------------- glued-token split
+
+# On a tight Tally grid pdfplumber can GLUE adjacent right-aligned cells into a SINGLE word
+# token that spans several columns — an Sl digit onto the description start ("1Lloyd"), a
+# uom+rate+per run ("PCS32,000.00PCS"), or a taxable+IGST-rate+IGST-amount run
+# ("32,000.0018%5,760.00"). The word-geometry bucketer cannot file a token spanning several
+# columns, so BEFORE bucketing an item / total row we split such a token into its constituent
+# runs, each given a PROPORTIONAL x-box (the original [x0,x1] sliced by character offset) so
+# nearest-centre bucketing files each piece into its own column.
+#
+# A run is money (grouped rupees, AT MOST two decimals — so a 4-decimal glue "32,000.0018"
+# splits after the paise instead of swallowing the abutting rate digits), a percent rate (a
+# plain, un-grouped 0..100-ish number immediately followed by '%'), or an alpha/uom word. A
+# token is split ONLY when its WHOLE text decomposes cleanly into >=2 such runs AND it does not
+# already parse as a single money value; anything carrying a stray glyph (a rupee-symbol
+# artefact "(cid:299)", a description fragment "2026(6", a one-decimal "1.5") fails the clean
+# decomposition and is left UNTOUCHED — so junk is never fragmented into a spurious money value
+# and a normal (non-glued) Tally row is unchanged (the split is idempotent on clean tokens).
+_RUN_MONEY = r"[0-9][0-9,]*(?:\.[0-9]{2})?"
+# A percent rate carries AT MOST two decimals (real GST rates: 5, 12, 18, 28, 2.5, 0.25). The
+# 2-decimal cap is essential: an unbounded mantissa lets a comma-less taxable's paise get eaten
+# into the rate — "50.0018%" would match whole as 50.0018%, so a ₹50 IGST line stops splitting.
+# Capped, PCT fails on "50.0018%" (no '%' within 2 decimals of "50"), MONEY then claims "50.00"
+# and PCT claims the real "18%". (Comma'd taxables like "32,000.00" are already safe — the ','
+# breaks PCT's leading [0-9]{1,3} — but sub-₹1,000 line items are not, and are common.)
+_RUN_PCT = r"[0-9]{1,3}(?:\.[0-9]{1,2})?%"
+_RUN_WORD = r"[A-Za-z]+"
+_GLUED_RUN_RE = re.compile(rf"{_RUN_PCT}|{_RUN_MONEY}|{_RUN_WORD}")
+_LEAD_SL_RE = re.compile(r"^([0-9]+)([^0-9].*)$")
+
+
+def _clean_runs(text: str) -> list[str] | None:
+    """Segment `text` into consecutive money / percent / alpha runs iff the WHOLE string is
+    covered with no leftover glyph; else None (leave the token unsplit)."""
+    runs: list[str] = []
+    pos = 0
+    while pos < len(text):
+        m = _GLUED_RUN_RE.match(text, pos)
+        if m is None or m.end() == pos:
+            return None
+        runs.append(m.group(0))
+        pos = m.end()
+    return runs or None
+
+
+def _proportional_split(w: _Word, parts: list[str]) -> list[_Word]:
+    """Distribute `w`'s [x0,x1] span across `parts` by character length (each part's box is the
+    slice of the original box its characters occupy); top/bottom/page are preserved."""
+    total = sum(len(p) for p in parts)
+    if total <= 0:
+        return [w]
+    span = w.x1 - w.x0
+    out: list[_Word] = []
+    off = 0
+    for p in parts:
+        x0 = w.x0 + span * (off / total)
+        off += len(p)
+        x1 = w.x0 + span * (off / total)
+        out.append(_Word(text=p, x0=x0, x1=x1, top=w.top, bottom=w.bottom, page=w.page))
+    return out
+
+
+def _split_glued_tail(w: _Word) -> list[_Word]:
+    """Split a glued TAIL token into its money/percent/uom runs (>=2 runs), else return [w]."""
+    if _money_to_paise(w.text) is not None:     # already a clean single money value → never split
+        return [w]
+    runs = _clean_runs(w.text)
+    if runs is None or len(runs) < 2:
+        return [w]
+    return _proportional_split(w, runs)
+
+
+def _peel_lead_sl(toks: list[_Word], grid: _Grid) -> list[_Word]:
+    """If the row's first (description-side) token is an Sl integer GLUED to the description
+    start ("1Lloyd"), split off the leading digit run as its own token so the Sl is recognised
+    and the remainder files into the description. A non-glued lead is returned unchanged."""
+    if not toks:
+        return toks
+    first = toks[0]
+    if _center(first) >= grid.desc_tail_x:
+        return toks
+    m = _LEAD_SL_RE.match(first.text)
+    if m is None:
+        return toks
+    return _proportional_split(first, [m.group(1), m.group(2)]) + list(toks[1:])
+
+
+def _split_tail(toks: list[_Word], grid: _Grid) -> list[_Word]:
+    """The tail words of a row, with each glued tail token split into its column runs."""
+    return [sub for w in toks if _center(w) >= grid.desc_tail_x
+            for sub in _split_glued_tail(w)]
+
+
 # --------------------------------------------------------------------------- item rows
 
 def _tail_money_count(toks: list[_Word], grid: _Grid) -> int:
@@ -383,7 +478,7 @@ def _parse_item_row(toks: list[_Word], grid: _Grid) -> _RawLine:
     """Parse one Tally item row into a `_RawLine` (paise ints / Decimals + verbatim strings)."""
     rest = toks[1:]  # drop the Sl number
     desc_words = [w for w in rest if _center(w) < grid.desc_tail_x]
-    tail_words = [w for w in rest if _center(w) >= grid.desc_tail_x]
+    tail_words = _split_tail(rest, grid)      # split any glued multi-column tail token
     cells = _bucket(tail_words, grid.tail_cols)
 
     taxable = _money_of(cells, "taxable")
@@ -393,6 +488,8 @@ def _parse_item_row(toks: list[_Word], grid: _Grid) -> _RawLine:
     qty, unit = _split_qty_unit(_text_of(cells, "qty"))
     gst_rate = _combine_rate(_rate_of(cells, "cgst_rate"), _rate_of(cells, "sgst_rate"),
                              _rate_of(cells, "igst_rate"))
+    if gst_rate is not None and not (_RATE_MIN <= gst_rate <= _RATE_MAX):
+        gst_rate = None                       # a mis-split "rate" outside 0..100 is not a rate
     description = " ".join(w.text for w in desc_words).strip() or None
     return _RawLine(
         raw={"row": _row_text(toks)},
@@ -422,7 +519,7 @@ class _TotalRow:
 def _parse_total_row(toks: list[_Word], grid: _Grid) -> _TotalRow:
     """Bucket the Tally grand-total row: the bill total sits in the AMOUNT column, the taxable
     / tax totals in their own columns."""
-    tail = [w for w in toks if _center(w) >= grid.desc_tail_x]
+    tail = _split_tail(toks, grid)            # split any glued multi-column tail token
     cells = _bucket(tail, grid.tail_cols)
     return _TotalRow(
         grand=_money_of(cells, "amount"),
@@ -490,7 +587,9 @@ def _scan_page(rows: list[list[_Word]], grid: _Grid, result: _Items) -> None:
     current: _RawLine | None = None
     in_summary = False
     for row in rows:
-        toks = sorted(row, key=lambda w: w.x0)
+        # Peel an Sl integer glued onto the description start ("1Lloyd" → "1" + "Lloyd") so the
+        # row is recognised as an item and the remainder files into the description.
+        toks = _peel_lead_sl(sorted(row, key=lambda w: w.x0), grid)
         if not toks:
             continue
         lead = toks[0].text.strip()

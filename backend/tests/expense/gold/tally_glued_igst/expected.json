@@ -1,0 +1,44 @@
+{
+  "doc_type": "gst_invoice",
+  "header": {
+    "buyer_address": "Park Street, Kolkata",
+    "buyer_gstin": "19AABCB2066P1ZC",
+    "buyer_name": "Northstar Retail LLP",
+    "invoice_date": "2026-07-15",
+    "invoice_number": "TI/2026/7788",
+    "place_of_supply": "West Bengal",
+    "po_ref": null,
+    "supplier_address": "MG Road, Bengaluru",
+    "supplier_gstin": "29AABCU9603R1ZJ",
+    "supplier_name": "Acme Cooling Devices Private Limited"
+  },
+  "lines": [
+    {
+      "cgst_paise": null,
+      "description": "Acme Cooler Deluxe Split AC",
+      "gst_rate": "18",
+      "hsn_sac": "84151010",
+      "igst_paise": 720000,
+      "line_no": 1,
+      "line_total_paise": 4720000,
+      "quantity": "1",
+      "sgst_paise": null,
+      "taxable_paise": 4000000,
+      "unit": "PCS",
+      "unit_rate_paise": 4000000
+    }
+  ],
+  "needs_ocr": false,
+  "page_count": 1,
+  "review_needed": false,
+  "schema_version": "gst_invoice/1.0.0",
+  "totals": {
+    "amount_in_words": null,
+    "grand_total_paise": 4720000,
+    "round_off_paise": null,
+    "total_cgst_paise": null,
+    "total_igst_paise": 720000,
+    "total_sgst_paise": null,
+    "total_taxable_paise": 4000000
+  }
+}
