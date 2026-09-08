@@ -78,10 +78,14 @@ function formFrom(product: Product): FormState {
 function ProductModal({
   open,
   editing,
+  duplicateFrom,
   onClose,
 }: {
   open: boolean;
   editing: Product | null;
+  /** When set (and not editing), the modal opens in CREATE mode pre-filled from this product
+   * — a "duplicate & edit" flow. The unique `code` is cleared so the copy needs its own. */
+  duplicateFrom: Product | null;
   onClose: () => void;
 }) {
   const toast = useToast();
@@ -95,12 +99,18 @@ function ProductModal({
   // Seed the form + clear mutation state whenever the modal opens.
   useEffect(() => {
     if (!open) return;
-    setForm(editing ? formFrom(editing) : EMPTY_FORM);
+    setForm(
+      editing
+        ? formFrom(editing)
+        : duplicateFrom
+          ? { ...formFrom(duplicateFrom), code: '' } // duplicate: prefill, but a fresh code
+          : EMPTY_FORM,
+    );
     createProduct.reset();
     updateProduct.reset();
     // Only re-run on open transitions; the mutation resets are stable enough here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, editing]);
+  }, [open, editing, duplicateFrom]);
 
   function set<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((f) => ({ ...f, [key]: value }));
@@ -169,7 +179,7 @@ function ProductModal({
   return (
     <Modal
       open={open}
-      title={isEdit ? 'Edit product' : 'New product'}
+      title={isEdit ? 'Edit product' : duplicateFrom ? 'Duplicate product' : 'New product'}
       onClose={close}
       busy={pending}
       footer={
@@ -260,6 +270,7 @@ export function ProductsPage() {
   const [active, setActive] = useState<'true' | 'false' | ''>('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Product | null>(null);
+  const [duplicating, setDuplicating] = useState<Product | null>(null);
 
   // Debounce the free-text search that feeds the query key (category/active are
   // selects/immediate) so each keystroke does not fire its own request.
@@ -269,11 +280,20 @@ export function ProductsPage() {
 
   function openCreate() {
     setEditing(null);
+    setDuplicating(null);
     setModalOpen(true);
   }
 
   function openEdit(product: Product) {
     setEditing(product);
+    setDuplicating(null);
+    setModalOpen(true);
+  }
+
+  // Duplicate & edit: open the create modal pre-filled from this product (fresh code).
+  function openDuplicate(product: Product) {
+    setEditing(null);
+    setDuplicating(product);
     setModalOpen(true);
   }
 
@@ -359,7 +379,14 @@ export function ProductsPage() {
                 </Td>
                 {canManage && (
                   <Td>
-                    <div className="flex justify-end">
+                    <div className="flex justify-end gap-3">
+                      <button
+                        type="button"
+                        onClick={() => openDuplicate(p)}
+                        className="text-sm font-medium text-brand-600 hover:text-brand-700"
+                      >
+                        Copy
+                      </button>
                       <button
                         type="button"
                         onClick={() => openEdit(p)}
@@ -377,7 +404,12 @@ export function ProductsPage() {
       )}
 
       {canManage && (
-        <ProductModal open={modalOpen} editing={editing} onClose={() => setModalOpen(false)} />
+        <ProductModal
+          open={modalOpen}
+          editing={editing}
+          duplicateFrom={duplicating}
+          onClose={() => setModalOpen(false)}
+        />
       )}
     </div>
   );

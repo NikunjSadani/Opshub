@@ -152,6 +152,40 @@ describe('ProductsPage', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
+  it('Copy duplicates a product: opens a prefilled create modal with a cleared code, POSTs it', async () => {
+    let postedBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        if (url.includes('/products') && method === 'POST') {
+          postedBody = JSON.parse(String(init?.body));
+          return json({ ...PRODUCTS[0], id: '9', code: null }, 201);
+        }
+        if (url.includes('/products')) return json(PRODUCTS);
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<ProductsPage />);
+    const row = (await screen.findByText('15W LED Bulb')).closest('tr') as HTMLElement;
+
+    fireEvent.click(within(row).getByRole('button', { name: /copy/i }));
+    const dialog = await screen.findByRole('dialog', { name: /duplicate product/i });
+    // Prefilled from the source product, but the unique CODE is cleared for the copy.
+    expect(within(dialog).getByLabelText(/name/i)).toHaveValue('15W LED Bulb');
+    expect(within(dialog).getByLabelText(/brand/i)).toHaveValue('Philips');
+    expect(within(dialog).getByLabelText(/^code/i)).toHaveValue('');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /create product/i }));
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    // It POSTs a CREATE carrying the copied fields, and no code (a fresh one is required).
+    expect(postedBody).toMatchObject({ name: '15W LED Bulb', brand: 'Philips', uom: 'PCS' });
+    expect(postedBody?.code).toBeUndefined();
+  });
+
   it('surfaces the server 409 message on a duplicate', async () => {
     vi.stubGlobal(
       'fetch',
