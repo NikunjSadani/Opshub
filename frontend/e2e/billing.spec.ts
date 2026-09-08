@@ -86,7 +86,7 @@ test.describe('Billing & Finance — Wave 2 money flows (admin end-to-end)', () 
       po_date: new Date().toISOString().slice(0, 10),
       lines: [
         // qty 3 == the fixture line's qty, so confirming does not soft-flag over-billing.
-        { product_id: product.id, ordered_qty: '3', cost_price_paise: 400000, sell_price_paise: 550000 },
+        { product_id: product.id, ordered_qty: '3', cost_price_paise: 400000, client_sell_price_paise: 550000 },
       ],
     });
 

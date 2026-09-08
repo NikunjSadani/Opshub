@@ -1,4 +1,4 @@
-import { test, expect, type Locator, type APIRequestContext } from '@playwright/test';
+import { test, expect, type Locator, type Page, type APIRequestContext } from '@playwright/test';
 
 /**
  * Project Spine — Wave 1, the Sales Orders module driven end-to-end through the
@@ -44,6 +44,17 @@ async function pickOption(select: Locator, optionText: string): Promise<void> {
   await select.selectOption((await opt.getAttribute('value'))!);
 }
 
+/** Pick a product from the searchable combobox (the product picker is a SearchableSelect,
+ * not a native <select>): focus to open, type the keyword to drive the server-side search,
+ * then click the matching listbox option (committed on mousedown). `index` targets the
+ * n-th line's picker. */
+async function selectProduct(page: Page, index: number, keyword: string): Promise<void> {
+  const combo = page.getByLabel('Product').nth(index);
+  await combo.click();          // open the listbox
+  await combo.fill(keyword);    // type -> debounced server search populates the options
+  await page.getByRole('option', { name: new RegExp(keyword) }).first().click();
+}
+
 test.describe('Sales Orders — Wave 1 (admin end-to-end)', () => {
   test('create a PO, find it in the register + quote search, short-close + void, add a client GSTIN', async ({
     page,
@@ -76,19 +87,21 @@ test.describe('Sales Orders — Wave 1 (admin end-to-end)', () => {
     const today = new Date().toISOString().slice(0, 10);
     await page.getByLabel('PO date').fill(today);
 
-    // Line 1 — Widgetronic, qty 10 @ ₹150 sell.
-    const products = page.getByLabel('Product');
-    await pickOption(products.nth(0), 'Widgetronic');
+    // Line 1 — Widgetronic, qty 10 @ ₹150 client sell (cost ₹100 = "Our CP").
+    // The pricing form splits cost/sell into tiers; the two required money fields are
+    // "Our CP ₹" and "Client sell ₹" (regex avoids the ₹/suffix + sibling "Original CP"/
+    // "Client freight" labels).
+    await selectProduct(page, 0, 'Widgetronic');
     await page.getByLabel('Ordered qty').nth(0).fill('10');
-    await page.getByLabel('Cost price').nth(0).fill('100');
-    await page.getByLabel('Sell price').nth(0).fill('150');
+    await page.getByLabel(/Our CP/).nth(0).fill('100');
+    await page.getByLabel(/Client sell/).nth(0).fill('150');
 
-    // Line 2 — Boltmatic, qty 10 @ ₹150 sell.
+    // Line 2 — Boltmatic, qty 10 @ ₹150 client sell.
     await page.getByRole('button', { name: 'Add line' }).click();
-    await pickOption(page.getByLabel('Product').nth(1), 'Boltmatic');
+    await selectProduct(page, 1, 'Boltmatic');
     await page.getByLabel('Ordered qty').nth(1).fill('10');
-    await page.getByLabel('Cost price').nth(1).fill('100');
-    await page.getByLabel('Sell price').nth(1).fill('150');
+    await page.getByLabel(/Our CP/).nth(1).fill('100');
+    await page.getByLabel(/Client sell/).nth(1).fill('150');
 
     await page.getByRole('button', { name: 'Create purchase order' }).click();
 

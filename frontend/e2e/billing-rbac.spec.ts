@@ -64,7 +64,7 @@ test.describe('Billing & Finance — RBAC gating', () => {
       project_id: project.id,
       po_date: new Date().toISOString().slice(0, 10),
       lines: [
-        { product_id: product.id, ordered_qty: '3', cost_price_paise: 400000, sell_price_paise: 550000 },
+        { product_id: product.id, ordered_qty: '3', cost_price_paise: 400000, client_sell_price_paise: 550000 },
       ],
     });
 

@@ -24,8 +24,9 @@ test.describe('Projects', () => {
     await projectDialog.getByLabel('Name').fill('E2E Project');
     await projectDialog.getByRole('button', { name: 'Create project' }).click();
 
-    // Target the register cell, not getByText — a success toast also contains the
-    // code, so a bare text match is strict-mode-ambiguous while the toast is visible.
-    await expect(page.getByRole('cell', { name: 'ZZZ-001' })).toBeVisible();
+    // Target the register CODE cell exactly — a success toast also contains the code, and
+    // the row's Edit button carries aria-label "Edit ZZZ-001", so a non-exact match is
+    // strict-mode-ambiguous. `exact` pins it to the `<td>ZZZ-001</td>` code cell alone.
+    await expect(page.getByRole('cell', { name: 'ZZZ-001', exact: true })).toBeVisible();
   });
 });

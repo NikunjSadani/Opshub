@@ -49,7 +49,7 @@ test.describe('Sales Orders — RBAC gating', () => {
       project_id: project.id,
       po_date: new Date().toISOString().slice(0, 10),
       lines: [
-        { product_id: product.id, ordered_qty: '5', cost_price_paise: 10000, sell_price_paise: 15000 },
+        { product_id: product.id, ordered_qty: '5', cost_price_paise: 10000, client_sell_price_paise: 15000 },
       ],
     });
 

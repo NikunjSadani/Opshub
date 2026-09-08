@@ -107,7 +107,7 @@ test.describe('Action Center — Wave 4 (admin end-to-end)', () => {
       expected_procurement_date: isoInDays(DAYS_OUT),
       lines: [
         // Priced + never invoiced → open-to-invoice qty 10 > 0 → Invoicing due.
-        { product_id: product.id, ordered_qty: '10', cost_price_paise: 10000, sell_price_paise: 15000 },
+        { product_id: product.id, ordered_qty: '10', cost_price_paise: 10000, client_sell_price_paise: 15000 },
       ],
     });
     poId = po.id;

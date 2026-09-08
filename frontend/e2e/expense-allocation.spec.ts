@@ -70,7 +70,7 @@ test.describe('Expense / cost-allocation', () => {
     await projectDialog.getByLabel('Client').selectOption(clientValue!);
     await projectDialog.getByLabel('Name').fill('Allocation Project');
     await projectDialog.getByRole('button', { name: 'Create project' }).click();
-    await expect(page.getByRole('cell', { name: PROJECT_CODE })).toBeVisible();
+    await expect(page.getByRole('cell', { name: PROJECT_CODE, exact: true })).toBeVisible();
 
     // ---- 2. add a Payment method on the Manage-gated Payment Methods tab ----
     await page.goto(`${EXPENSE}/payment-methods`);
@@ -141,7 +141,8 @@ test.describe('Expense / cost-allocation', () => {
     await expect(page.getByText('Confirmed spend')).toBeVisible();
     // ...and the by-project / by-payment-method breakdowns (built only from
     // CONFIRMED invoices) attribute this spend to our project + method.
-    // The by-project cell now reads "<code> — <name>", so match the code as a substring.
+    // The by-project cell reads "<code> — <name>" (no Edit button on this dashboard), so
+    // match the code as a SUBSTRING — an exact match would miss the "— <name>" suffix.
     await expect(page.getByRole('cell', { name: PROJECT_CODE })).toBeVisible();
     await expect(page.getByRole('cell', { name: METHOD, exact: true })).toBeVisible();
   });
