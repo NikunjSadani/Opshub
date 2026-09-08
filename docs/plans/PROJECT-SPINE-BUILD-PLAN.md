@@ -2,7 +2,7 @@
 
 **Companion to `PROJECT-SPINE-DESIGN.md` (the frozen contract).** This is the living orchestration tracker — updated as waves land. Owner approved the plan + Wave 1 go on 2026-08-20.
 
-> **PO pricing overhaul ("Batch 2", post-Wave-4)** — three sell/freight tiers (actual = admin-only margin), agency-fee & client-freight **revenue** rules, actual-masking across all surfaces incl. quote-search, optional PO number. Full business rules + RBAC + revenue/netting semantics: **`PO-PRICING-DESIGN.md`**. Status (2026-09-07): built + gate-green (BE pytest 750 · FE vitest), dual+E2E-audited + folded, **not yet deployed** (uncommitted `develop` WIP awaiting owner deploy go). Separately, the invoice-reader **Tally-variant** extractor fix is committed+pushed (`04eace7`) awaiting the manual Deploy-prod click.
+> **PO pricing overhaul ("Batch 2", post-Wave-4)** — three sell/freight tiers (actual = admin-only margin), agency-fee & client-freight **revenue** rules, actual-masking across all surfaces incl. quote-search, optional PO number. Full business rules + RBAC + revenue/netting semantics: **`PO-PRICING-DESIGN.md`**. Status (2026-09-08): ✅ **DEPLOYED to prod** — develop `3ee1492` (Batch 2 + the invoice-reader Tally-variant fix + e2e fixes) shipped via "Deploy prod", serving rev `opshub-api-00021-6qq` = `prod-3ee1492` (Ready @ 100%); migration `a7f3c1b2d4e5` applied. Runtime-verified on prod (SPA 200, API auth-gated, new pricing contract in `/openapi.json`); a real per-role login pass remains owner-gated (Firebase auth).
 
 ## Orchestration model — the 6-stage pipeline every wave runs
 
