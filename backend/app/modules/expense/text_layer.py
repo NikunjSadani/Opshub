@@ -71,6 +71,11 @@ _CONF_STRONG = 0.95  # anchored + type-valid + arithmetic-corroborated
 _CONF_OK = 0.80      # anchored + type-valid, no arithmetic corroboration
 _CONF_WEAK = 0.50    # positional / weak-sourced / arithmetic-fails / checksum-fails
 
+# A GST rate is a percentage: a parsed "rate" outside 0..100 is a mis-bucketed amount, and
+# would overflow the persisted gst_rate NUMERIC(5,2) column (max 999.99) → a 500 on save.
+_RATE_MIN = Decimal(0)
+_RATE_MAX = Decimal(100)
+
 # GSTIN structure: 2 state digits, 5 PAN letters, 4 PAN digits, PAN letter, entity char,
 # a literal 'Z', a check char. Checksum validity is a separate `valid_gstin` call.
 _GSTIN_RE = re.compile(r"\b[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]\b")
@@ -540,10 +545,17 @@ def _parse_tables(tables: list[list[list[str]]]) -> list[_RawLine]:
             # tax-AMOUNT fields MISSING (they were never amounts). Never fires on a normal amount
             # table (no "%"), so existing amount-column layouts are untouched.
             if gst_rate is None and any("%" in (c or "") for c in (c_cgst, c_sgst, c_igst)):
+                # Only PLAUSIBLE percentages (0..100). A mis-bucketed AMOUNT landing in a tax
+                # column (e.g. a 6-digit "1,08,784") must NOT be read as a rate — that value
+                # would blow past the persisted gst_rate NUMERIC(5,2) column and 500 the upload.
                 rate_vals = [_num_or_none(c) for c in (c_cgst, c_sgst, c_igst)]
-                present = [v for v in rate_vals if v is not None]
+                present = [v for v in rate_vals if v is not None and _RATE_MIN <= v <= _RATE_MAX]
                 gst_rate = max(present) if present else None
                 cgst = sgst = igst = None
+            # A GST rate is a percentage: any value outside 0..100 (from any column) is a
+            # misparse — drop it to None (→ review) so it can never overflow NUMERIC(5,2).
+            if gst_rate is not None and not (_RATE_MIN <= gst_rate <= _RATE_MAX):
+                gst_rate = None
             r = _RawLine(
                 raw={"row": " | ".join(str(c) for c in row)},
                 description=_cell(row, mapping, "description"),

@@ -857,6 +857,30 @@ def test_grand_total_check_not_masked_when_tax_heads_are_printed() -> None:
     assert checks2.totals_add_to_grand is True
 
 
+def test_gst_rate_ignores_misbucketed_amount_and_caps_at_100() -> None:
+    """A GST rate is a percentage: a mis-bucketed 6-digit AMOUNT in a tax-rate column (or any
+    out-of-range value) must NOT become the gst_rate — it would overflow the persisted
+    NUMERIC(5,2) column and 500 the billing upload. Only a plausible 0..100 rate survives.
+    (Regression guard — prod invoice-upload 500 `numeric field overflow` on gst_rate.)"""
+    # Rate-column layout, but the CGST cell got a mis-bucketed amount "108784"; IGST is a real
+    # "18%". The plausible rate (18) must win; 108784 must be dropped, not read as the rate.
+    tables = [[
+        ["#", "Item & Description", "HSN/SAC", "Rate", "Qty", "Taxable Amount",
+         "SGST", "CGST", "IGST", "Amount"],
+        ["1", "Widget", "8471", "100.00", "2", "200.00", "0", "108784", "18%", "236.00"],
+    ]]
+    r = _parse_tables(tables)[0]
+    assert r.gst_rate is not None and int(r.gst_rate) == 18  # NOT 108784
+
+    # And a bare (non-rate-column) gst_rate that parses to an implausible value is dropped.
+    tables2 = [[
+        ["Description", "HSN/SAC", "Qty", "Rate", "Taxable", "GST%"],
+        ["Widget", "8471", "2", "100.00", "200.00", "108784"],
+    ]]
+    r2 = _parse_tables(tables2)[0]
+    assert r2.gst_rate is None  # out of 0..100 -> dropped, never persisted/overflowed
+
+
 def test_header_scan_ignores_a_prose_row_without_an_item_anchor() -> None:
     """The below-row-0 header scan must demand a real item-table anchor (HSN or Qty) — a prose
     notes/terms row that coincidentally maps three generic money synonyms must NOT be taken as

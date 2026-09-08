@@ -433,6 +433,22 @@ def _duplicate_outcome(
     )
 
 
+# Persisted-line NUMERIC column bounds (see billing/models.py SalesInvoiceLine): gst_rate is
+# NUMERIC(5,2) (|v| < 1000) and quantity is NUMERIC(14,3) (|v| < 1e11). An extracted value
+# outside its column's range is a misparse — store NULL (→ review) rather than let a
+# `numeric field overflow` 500 the whole upload batch. Defense-in-depth behind the extractor,
+# which already bounds gst_rate to a plausible 0..100 percentage.
+_GST_RATE_ABS_MAX = Decimal("999.99")
+_QTY_ABS_MAX = Decimal("99999999999.999")
+
+
+def _fit_numeric(value: Decimal | None, abs_max: Decimal) -> Decimal | None:
+    """Return `value` only if it fits its DB column's magnitude, else None (never overflow)."""
+    if value is None or abs(value) > abs_max:
+        return None
+    return value
+
+
 def _persist_invoice(
     db: Session,
     batch: BillingBatch,
@@ -489,11 +505,11 @@ def _persist_invoice(
             line_no=i,
             description=line.description.value_normalized,
             hsn_sac=line.hsn_sac.value_normalized,
-            quantity=line.quantity.value_normalized,
+            quantity=_fit_numeric(line.quantity.value_normalized, _QTY_ABS_MAX),
             unit=line.unit.value_normalized,
             unit_rate_paise=line.unit_rate_paise.value_normalized,
             taxable_paise=line.taxable_paise.value_normalized,
-            gst_rate=line.gst_rate.value_normalized,
+            gst_rate=_fit_numeric(line.gst_rate.value_normalized, _GST_RATE_ABS_MAX),
             cgst_paise=line.cgst_paise.value_normalized,
             sgst_paise=line.sgst_paise.value_normalized,
             igst_paise=line.igst_paise.value_normalized,
