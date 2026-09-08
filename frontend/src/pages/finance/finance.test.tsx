@@ -14,6 +14,18 @@ function json(data: unknown, status = 200) {
   });
 }
 
+/** Pick an option from a SearchableSelect combobox (Client is searchable): focus to open the
+ * listbox, then mousedown the matching option (SearchableSelect commits on mousedown). */
+async function pickCombo(labelRe: RegExp, optionRe: RegExp) {
+  const combo = screen.getByRole('combobox', { name: labelRe });
+  // The picker is disabled until its options query resolves — wait, else focus is a no-op
+  // and the listbox never opens.
+  await waitFor(() => expect(combo).toBeEnabled());
+  fireEvent.focus(combo);
+  const opt = await screen.findByRole('option', { name: optionRe });
+  fireEvent.mouseDown(opt);
+}
+
 /** `GET /me` payload — grants VIEW on the finance module (all P&L reads are VIEW). */
 function meResponse(): Response {
   return json({
@@ -180,7 +192,7 @@ describe('FinanceModule (P&L dashboard)', () => {
     expect(projectUrls.some((u) => u.includes('client_id='))).toBe(false);
 
     // Choosing a client re-queries with `client_id=1`.
-    fireEvent.change(screen.getByLabelText('Client'), { target: { value: '1' } });
+    await pickCombo(/client/i, /Britannia/i);
     await waitFor(() =>
       expect(projectUrls.some((u) => u.includes('client_id=1'))).toBe(true),
     );

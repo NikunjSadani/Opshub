@@ -183,7 +183,8 @@ describe('ProductsPage', () => {
     await waitFor(() => expect(postedBody).not.toBeNull());
     // It POSTs a CREATE carrying the copied fields, and no code (a fresh one is required).
     expect(postedBody).toMatchObject({ name: '15W LED Bulb', brand: 'Philips', uom: 'PCS' });
-    expect(postedBody?.code).toBeUndefined();
+    // The cleared code is omitted from the create body (a copy needs its own code).
+    expect(postedBody).not.toHaveProperty('code');
   });
 
   it('surfaces the server 409 message on a duplicate', async () => {

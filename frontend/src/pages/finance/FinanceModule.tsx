@@ -5,7 +5,7 @@ import {
   ErrorState,
   Loading,
   PageHeader,
-  SelectField,
+  SearchableSelect,
   StatePanel,
   Table,
   TextField,
@@ -240,19 +240,17 @@ export function FinanceModule() {
 
       {/* --- Per-project P&L table --- */}
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
-        <SelectField
+        <SearchableSelect
           label="Client"
           value={clientId}
-          onChange={(e) => setClientId(e.target.value)}
-        >
-          <option value="">All clients</option>
-          {(clientsQuery.data ?? []).map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-              {c.active ? '' : ' (inactive)'}
-            </option>
-          ))}
-        </SelectField>
+          onChange={setClientId}
+          noneLabel="All clients"
+          placeholder="All clients"
+          options={(clientsQuery.data ?? []).map((c) => ({
+            value: String(c.id),
+            label: `${c.code} — ${c.name}${c.active ? '' : ' (inactive)'}`,
+          }))}
+        />
         <TextField
           label="From date"
           type="date"

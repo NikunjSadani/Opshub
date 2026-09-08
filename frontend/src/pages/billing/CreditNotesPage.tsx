@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, Route, Routes } from 'react-router-dom';
 import {
   Badge,
   ErrorState,
   Loading,
   PageHeader,
+  SearchableSelect,
   SelectField,
   StatePanel,
   Table,
@@ -14,6 +15,7 @@ import {
   Td,
 } from '../../ui';
 import { useBillingInvoicesQuery } from '../../api/billingInvoices';
+import { useClientsQuery } from '../../api/projects';
 import {
   useCreditNotesQuery,
   type CreditNoteFilters,
@@ -44,7 +46,20 @@ function Register() {
 
   // The invoice filter lists CONFIRMED invoices (the only ones a CN can credit).
   const invoicesQuery = useBillingInvoicesQuery({ status: 'CONFIRMED' });
+  // Load every confirmed-invoice page so the searchable filter can target any invoice.
+  useEffect(() => {
+    if (invoicesQuery.hasNextPage && !invoicesQuery.isFetchingNextPage) {
+      void invoicesQuery.fetchNextPage();
+    }
+  }, [invoicesQuery.hasNextPage, invoicesQuery.isFetchingNextPage, invoicesQuery.fetchNextPage]);
   const invoices = useMemo(() => invoicesQuery.data?.pages.flat() ?? [], [invoicesQuery.data]);
+  // Resolve each invoice's client code for a "number — CLIENT" picker label (the row carries
+  // only client_id).
+  const clientsQuery = useClientsQuery();
+  const clientById = useMemo(
+    () => new Map((clientsQuery.data ?? []).map((c) => [String(c.id), c])),
+    [clientsQuery.data],
+  );
 
   const filters: CreditNoteFilters = { status, invoice_id: invoiceId };
   const query = useCreditNotesQuery(filters);
@@ -78,19 +93,22 @@ function Register() {
             </option>
           ))}
         </SelectField>
-        <SelectField
+        <SearchableSelect
           label="Credited invoice"
           value={invoiceId}
-          onChange={(e) => setInvoiceId(e.target.value)}
+          onChange={setInvoiceId}
           disabled={invoicesQuery.isPending}
-        >
-          <option value="">All invoices</option>
-          {invoices.map((inv) => (
-            <option key={inv.id} value={inv.id}>
-              {inv.invoice_number ?? `Invoice #${inv.id}`}
-            </option>
-          ))}
-        </SelectField>
+          error={invoicesQuery.isError ? "Couldn't load invoices." : undefined}
+          noneLabel="All invoices"
+          placeholder="Search an invoice…"
+          options={invoices.map((inv) => ({
+            value: String(inv.id),
+            // number — CLIENT code, so it's filterable by either and unambiguous.
+            label: `${inv.invoice_number ?? `Invoice #${inv.id}`}${
+              clientById.get(inv.client_id)?.code ? ` — ${clientById.get(inv.client_id)!.code}` : ''
+            }`,
+          }))}
+        />
       </div>
 
       {query.isPending ? (

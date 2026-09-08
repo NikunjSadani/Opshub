@@ -55,6 +55,16 @@ async function selectProduct(page: Page, index: number, keyword: string): Promis
   await page.getByRole('option', { name: new RegExp(keyword) }).first().click();
 }
 
+/** Pick from an entity SearchableSelect combobox (Client / Project — label "CODE — Name"):
+ * open, filter by a distinctive substring, then click the first listbox option. Scoped to the
+ * combobox's own listbox so it never matches a native <select> option elsewhere. */
+async function pickCombo(page: Page, nameRe: RegExp, filterText: string): Promise<void> {
+  const combo = page.getByRole('combobox', { name: nameRe });
+  await combo.click();          // auto-waits until enabled
+  await combo.fill(filterText);
+  await page.getByRole('listbox').getByRole('option').first().click();
+}
+
 test.describe('Sales Orders — Wave 1 (admin end-to-end)', () => {
   test('create a PO, find it in the register + quote search, short-close + void, add a client GSTIN', async ({
     page,
@@ -74,14 +84,11 @@ test.describe('Sales Orders — Wave 1 (admin end-to-end)', () => {
 
     await page.getByLabel('PO number').fill(PO_NUMBER);
 
-    // Client select — disambiguated by the option that only it carries.
-    const clientSelect = page.locator('select', {
-      has: page.locator('option', { hasText: CLIENT_NAME }),
-    });
-    await pickOption(clientSelect, CLIENT_NAME);
-
-    // Project select loads (ACTIVE-only) after the client is chosen.
-    await pickOption(page.getByLabel('Project'), PROJECT_CODE);
+    // Client + Project are searchable comboboxes now. The required Client is disambiguated
+    // from "Client GSTIN (optional)" by its required asterisk.
+    await pickCombo(page, /^Client ?\*/, CLIENT_NAME);
+    // Project loads (ACTIVE-only) after the client is chosen; its click waits for it to enable.
+    await pickCombo(page, /^Project ?\*/, PROJECT_CODE);
 
     // Today's date (relative — never a hardcoded fixed date that rots).
     const today = new Date().toISOString().slice(0, 10);

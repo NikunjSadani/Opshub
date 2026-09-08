@@ -75,10 +75,11 @@ test.describe('Expense / cost-allocation', () => {
     await page.goto('/m/projects');
     await page.getByRole('button', { name: 'New project' }).click();
     const projectDialog = page.getByRole('dialog', { name: 'New project' });
-    const clientValue = await projectDialog
-      .locator('option', { hasText: CLIENT_CODE })
-      .getAttribute('value');
-    await projectDialog.getByLabel('Client').selectOption(clientValue!);
+    // The dialog's Client picker is a searchable combobox: open, filter by code, pick it.
+    const clientCombo = projectDialog.getByRole('combobox', { name: /Client/ });
+    await clientCombo.click();
+    await clientCombo.fill(CLIENT_CODE);
+    await projectDialog.getByRole('listbox').getByRole('option').first().click();
     await projectDialog.getByLabel('Name').fill('Allocation Project');
     await projectDialog.getByRole('button', { name: 'Create project' }).click();
     await expect(page.getByRole('cell', { name: PROJECT_CODE, exact: true })).toBeVisible();

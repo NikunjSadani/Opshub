@@ -43,6 +43,17 @@ function renderWithProviders(node: ReactNode, initialEntries: string[] = ['/']) 
   );
 }
 
+/** Pick an option from a SearchableSelect combobox (Client / Purchase order / Project are
+ * searchable): focus to open the listbox, then mousedown the matching option (commits on
+ * mousedown). The picker is disabled until its options query resolves — wait first. */
+async function pickCombo(labelRe: RegExp, optionRe: RegExp) {
+  const combo = screen.getByRole('combobox', { name: labelRe });
+  await waitFor(() => expect(combo).toBeEnabled());
+  fireEvent.focus(combo);
+  const opt = await screen.findByRole('option', { name: optionRe });
+  fireEvent.mouseDown(opt);
+}
+
 const CLIENTS = [
   { id: 1, name: 'Britannia', code: 'BRI', pan: null, credit_terms_days: null, active: true },
 ];
@@ -292,8 +303,6 @@ describe('InvoiceUpload', () => {
 
     renderWithProviders(<InvoiceUpload />);
 
-    await screen.findByRole('option', { name: /BRI — Britannia/i });
-
     const input = document.getElementById('billing-files') as HTMLInputElement;
     fireEvent.change(input, {
       target: { files: [new File(['x'], 'good.pdf', { type: 'application/pdf' })] },
@@ -304,7 +313,7 @@ describe('InvoiceUpload', () => {
     expect(uploadBtn).toBeDisabled();
 
     // Choosing the client enables it.
-    fireEvent.change(screen.getByLabelText(/Client/i), { target: { value: '1' } });
+    await pickCombo(/client/i, /BRI — Britannia/i);
     expect(uploadBtn).toBeEnabled();
 
     fireEvent.click(uploadBtn);
@@ -347,16 +356,14 @@ describe('InvoiceUpload', () => {
     );
 
     renderWithProviders(<InvoiceUpload />);
-    await screen.findByRole('option', { name: /BRI — Britannia/i });
 
     // Before a client is chosen, there is no Project picker.
     expect(screen.queryByLabelText(/^Project/i)).not.toBeInTheDocument();
 
     // Choosing the client reveals the Project picker with that client's ACTIVE projects.
-    fireEvent.change(screen.getByLabelText(/Client/i), { target: { value: '1' } });
-    const projectSelect = await screen.findByLabelText(/^Project/i);
-    await screen.findByRole('option', { name: /BRI-001 — Q2 Activation/i });
-    fireEvent.change(projectSelect, { target: { value: '10' } });
+    await pickCombo(/client/i, /BRI — Britannia/i);
+    await screen.findByLabelText(/^Project/i);
+    await pickCombo(/^Project/i, /BRI-001 — Q2 Activation/i);
 
     // Choose a file and upload.
     const input = document.getElementById('billing-files') as HTMLInputElement;
@@ -386,16 +393,13 @@ describe('InvoiceUpload', () => {
     );
 
     renderWithProviders(<InvoiceUpload />);
-    await screen.findByRole('option', { name: /BRI — Britannia/i });
 
-    fireEvent.change(screen.getByLabelText(/Client/i), { target: { value: '1' } });
+    await pickCombo(/client/i, /BRI — Britannia/i);
     // No PO chosen yet → the Project picker is present.
     expect(await screen.findByLabelText(/^Project/i)).toBeInTheDocument();
 
-    // Wait for the client's PO options to load, then select one; its project wins, so the
-    // Project picker hides.
-    await screen.findByRole('option', { name: /PO-2026-050/i });
-    fireEvent.change(screen.getByLabelText(/Purchase order/i), { target: { value: '50' } });
+    // Select a PO; its project wins, so the Project picker hides.
+    await pickCombo(/purchase order/i, /PO-2026-050/i);
     await waitFor(() =>
       expect(screen.queryByLabelText(/^Project/i)).not.toBeInTheDocument(),
     );

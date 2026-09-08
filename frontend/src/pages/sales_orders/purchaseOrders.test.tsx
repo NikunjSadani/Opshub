@@ -157,6 +157,17 @@ async function selectProduct(match: RegExp, type?: string) {
   fireEvent.mouseDown(opt);
 }
 
+/** Pick an option from a SearchableSelect combobox (Client / Project are now searchable):
+ * focus to open the listbox, then mousedown the matching option (commits on mousedown). The
+ * picker is disabled until its options query resolves — wait, else focus is a no-op. */
+async function pickCombo(labelRe: RegExp, optionRe: RegExp) {
+  const combo = screen.getByRole('combobox', { name: labelRe });
+  await waitFor(() => expect(combo).toBeEnabled());
+  fireEvent.focus(combo);
+  const opt = await screen.findByRole('option', { name: optionRe });
+  fireEvent.mouseDown(opt);
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -250,8 +261,8 @@ function stubCreateForm(level: Level) {
 
 /** Fill the header (client + project + date) plus one valid line's required money. */
 async function fillMinimalValidForm() {
-  await selectByOption(/BRI — Britannia/, '10');
-  await selectByOption(/BRI-001 — Q3 Trade Rewards/, '20');
+  await pickCombo(/^client ?\*/i, /BRI — Britannia/);
+  await pickCombo(/^project ?\*/i, /BRI-001 — Q3 Trade Rewards/);
   fireEvent.change(screen.getByLabelText(/^po date/i), { target: { value: '2026-05-10' } });
   await selectProduct(/Widget/);
   fireEvent.change(screen.getByLabelText(/ordered qty/i), { target: { value: '2' } });
@@ -631,8 +642,8 @@ describe('PO bulk upload', () => {
 
     renderWithProviders(<POUpload />);
 
-    await selectByOption(/BRI — Britannia/, '10');
-    await selectByOption(/BRI-001 — Q3 Trade Rewards/, '20');
+    await pickCombo(/^client ?\*/i, /BRI — Britannia/);
+    await pickCombo(/^project ?\*/i, /BRI-001 — Q3 Trade Rewards/);
 
     const fileInput = document.getElementById('po-file') as HTMLInputElement;
     fireEvent.change(fileInput, {
@@ -763,7 +774,7 @@ describe('PO create form — projects fetch error (M2)', () => {
 
     renderWithProviders(<POForm />);
 
-    await selectByOption(/BRI — Britannia/, '10');
+    await pickCombo(/^client ?\*/i, /BRI — Britannia/);
 
     // A distinct load-failure message + retry — NOT the genuinely-empty copy.
     expect(await screen.findByText(/Couldn't load projects/i)).toBeInTheDocument();
@@ -801,8 +812,8 @@ describe('PO create form — soft copy attachment (M4)', () => {
     renderWithProviders(<POForm />);
 
     fireEvent.change(await screen.findByLabelText(/po number/i), { target: { value: 'PO-NEW-2' } });
-    await selectByOption(/BRI — Britannia/, '10');
-    await selectByOption(/BRI-001 — Q3 Trade Rewards/, '20');
+    await pickCombo(/^client ?\*/i, /BRI — Britannia/);
+    await pickCombo(/^project ?\*/i, /BRI-001 — Q3 Trade Rewards/);
     fireEvent.change(screen.getByLabelText(/^po date/i), { target: { value: '2026-05-10' } });
     await selectProduct(/Widget/);
     fireEvent.change(screen.getByLabelText(/ordered qty/i), { target: { value: '2' } });

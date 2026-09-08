@@ -5,7 +5,7 @@ import {
   Button,
   ConfirmDialog,
   PageHeader,
-  SelectField,
+  SearchableSelect,
   StatePanel,
   useToast,
 } from '../../ui';
@@ -174,46 +174,37 @@ export function InvoiceUpload() {
 
       <div className="max-w-2xl">
         <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <SelectField
+          <SearchableSelect
             label="Client"
             required
             value={clientId}
-            onChange={(e) => onClientChange(e.target.value)}
+            onChange={onClientChange}
             disabled={clientsQuery.isPending || noClients}
             hint="Which client this batch of invoices is billed to."
-          >
-            <option value="">
-              {clientsQuery.isPending ? 'Loading clients…' : 'Select a client…'}
-            </option>
-            {clients.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.code} — {c.name}
-              </option>
-            ))}
-          </SelectField>
-          <SelectField
+            placeholder={clientsQuery.isPending ? 'Loading clients…' : 'Select a client…'}
+            options={clients.map((c) => ({ value: String(c.id), label: `${c.code} — ${c.name}` }))}
+          />
+          <SearchableSelect
             label="Purchase order (optional)"
             value={poId}
-            onChange={(e) => setPoId(e.target.value)}
+            onChange={setPoId}
             disabled={!clientId || posQuery.isPending}
             hint="Match invoice lines against this PO's open lines."
-          >
-            <option value="">
-              {!clientId
+            noneLabel="No PO (match later)"
+            placeholder={
+              !clientId
                 ? 'Choose a client first'
                 : posQuery.isPending
                   ? 'Loading purchase orders…'
                   : pos.length === 0
                     ? 'No purchase orders for this client'
-                    : 'No PO (match later)'}
-            </option>
-            {pos.map((po) => (
-              <option key={po.id} value={po.id}>
-                {po.po_number}
-                {po.project_code ? ` — ${po.project_code}` : ''}
-              </option>
-            ))}
-          </SelectField>
+                    : 'Search a purchase order…'
+            }
+            options={pos.map((po) => ({
+              value: String(po.id),
+              label: `${po.po_number}${po.project_code ? ` — ${po.project_code}` : ''}`,
+            }))}
+          />
         </div>
 
         {/* Direct project attribution — only for a PO-less batch. When a PO is chosen its
@@ -221,26 +212,25 @@ export function InvoiceUpload() {
             projects. */}
         {clientId && !poId && (
           <div className="mb-4">
-            <SelectField
+            <SearchableSelect
               label="Project (optional)"
               value={projectId}
-              onChange={(e) => setProjectId(e.target.value)}
+              onChange={setProjectId}
               disabled={!clientId || projectsQuery.isPending}
               hint="Attribute this invoice's revenue to a project (optional — used for P&L)."
-            >
-              <option value="">
-                {projectsQuery.isPending
+              noneLabel="No project"
+              placeholder={
+                projectsQuery.isPending
                   ? 'Loading projects…'
                   : activeProjects.length === 0
                     ? 'No active projects for this client'
-                    : 'No project'}
-              </option>
-              {activeProjects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.code} — {p.name}
-                </option>
-              ))}
-            </SelectField>
+                    : 'Search a project…'
+              }
+              options={activeProjects.map((p) => ({
+                value: String(p.id),
+                label: `${p.code} — ${p.name}`,
+              }))}
+            />
           </div>
         )}
 

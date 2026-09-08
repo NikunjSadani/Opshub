@@ -43,6 +43,17 @@ function renderWithProviders(node: ReactNode, initialEntries: string[] = ['/']) 
   );
 }
 
+/** Pick an option from a SearchableSelect combobox (Credited invoice is searchable):
+ * focus to open the listbox, then mousedown the matching option (commits on mousedown).
+ * The picker is disabled until its options query resolves — wait first. */
+async function pickCombo(labelRe: RegExp, optionRe: RegExp) {
+  const combo = screen.getByRole('combobox', { name: labelRe });
+  await waitFor(() => expect(combo).toBeEnabled());
+  fireEvent.focus(combo);
+  const opt = await screen.findByRole('option', { name: optionRe });
+  fireEvent.mouseDown(opt);
+}
+
 const CLIENTS = [
   { id: 1, name: 'Britannia', code: 'BRI', pan: null, credit_terms_days: null, active: true },
 ];
@@ -271,9 +282,6 @@ describe('CreditNoteUpload', () => {
 
     renderWithProviders(<CreditNoteUpload />);
 
-    // Wait for the CONFIRMED invoice to load into the picker.
-    await screen.findByRole('option', { name: /CINV-2026-005/i });
-
     const input = document.getElementById('cn-files') as HTMLInputElement;
     fireEvent.change(input, {
       target: {
@@ -289,7 +297,7 @@ describe('CreditNoteUpload', () => {
     expect(uploadBtn).toBeDisabled();
 
     // Choosing the credited invoice enables it.
-    fireEvent.change(screen.getByLabelText(/Credited invoice/i), { target: { value: '50' } });
+    await pickCombo(/credited invoice/i, /CINV-2026-005/i);
     expect(uploadBtn).toBeEnabled();
 
     fireEvent.click(uploadBtn);
@@ -321,11 +329,10 @@ describe('CreditNoteUpload', () => {
 
     renderWithProviders(<CreditNoteUpload />);
 
-    await screen.findByRole('option', { name: /CINV-2026-005/i });
     fireEvent.change(document.getElementById('cn-files') as HTMLInputElement, {
       target: { files: [new File(['x'], 'good.pdf', { type: 'application/pdf' })] },
     });
-    fireEvent.change(screen.getByLabelText(/Credited invoice/i), { target: { value: '50' } });
+    await pickCombo(/credited invoice/i, /CINV-2026-005/i);
 
     // Even with an invoice + file, a viewer cannot upload — the button stays disabled.
     const uploadBtn = screen.getByRole('button', { name: /upload 1 file/i });

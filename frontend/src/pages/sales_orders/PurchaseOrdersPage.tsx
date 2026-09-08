@@ -6,6 +6,7 @@ import {
   ErrorState,
   Loading,
   PageHeader,
+  SearchableSelect,
   SelectField,
   StatePanel,
   Table,
@@ -122,41 +123,37 @@ function Register({ canOperate }: { canOperate: boolean }) {
           placeholder="PO number"
           maxLength={80}
         />
-        <SelectField
+        <SearchableSelect
           label="Client"
           value={clientId}
-          onChange={(e) => {
-            setClientId(e.target.value);
+          onChange={(v) => {
+            setClientId(v);
             setProjectId('');
           }}
           error={clientsQuery.isError ? "Couldn't load clients." : undefined}
-        >
-          <option value="">
-            {clientsQuery.isError ? 'Failed to load clients' : 'All clients'}
-          </option>
-          {(clientsQuery.data ?? []).map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.code} — {c.name}
-            </option>
-          ))}
-        </SelectField>
-        <SelectField
+          noneLabel="All clients"
+          placeholder={clientsQuery.isError ? 'Failed to load clients' : 'All clients'}
+          options={(clientsQuery.data ?? []).map((c) => ({
+            value: String(c.id),
+            label: `${c.code} — ${c.name}`,
+          }))}
+        />
+        <SearchableSelect
           label="Project"
           value={projectId}
-          onChange={(e) => setProjectId(e.target.value)}
+          onChange={setProjectId}
           disabled={!clientId || projectsQuery.isError}
           hint={!clientId ? 'Pick a client to filter by project.' : undefined}
           error={clientId && projectsQuery.isError ? "Couldn't load projects." : undefined}
-        >
-          <option value="">
-            {clientId && projectsQuery.isError ? 'Failed to load projects' : 'All projects'}
-          </option>
-          {(projectsQuery.data ?? []).map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.code} — {p.name}
-            </option>
-          ))}
-        </SelectField>
+          noneLabel="All projects"
+          placeholder={
+            clientId && projectsQuery.isError ? 'Failed to load projects' : 'All projects'
+          }
+          options={(projectsQuery.data ?? []).map((p) => ({
+            value: String(p.id),
+            label: `${p.code} — ${p.name}`,
+          }))}
+        />
         <SelectField
           label="Status"
           value={status}

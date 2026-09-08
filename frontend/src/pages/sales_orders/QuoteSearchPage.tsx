@@ -6,7 +6,7 @@ import {
   ErrorState,
   Loading,
   PageHeader,
-  SelectField,
+  SearchableSelect,
   StatePanel,
   Table,
   TextField,
@@ -116,21 +116,18 @@ export function QuoteSearchPage() {
           placeholder="e.g. Apparel"
           maxLength={80}
         />
-        <SelectField
+        <SearchableSelect
           label="Client"
           value={clientId}
-          onChange={(e) => setClientId(e.target.value)}
+          onChange={setClientId}
           error={clientsQuery.isError ? "Couldn't load clients." : undefined}
-        >
-          <option value="">
-            {clientsQuery.isError ? 'Failed to load clients' : 'All clients'}
-          </option>
-          {(clientsQuery.data ?? []).map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </SelectField>
+          noneLabel="All clients"
+          placeholder={clientsQuery.isError ? 'Failed to load clients' : 'All clients'}
+          options={(clientsQuery.data ?? []).map((c) => ({
+            value: String(c.id),
+            label: `${c.code} — ${c.name}`,
+          }))}
+        />
         <div className="grid grid-cols-2 gap-2">
           <TextField
             label="Client price min (₹)"

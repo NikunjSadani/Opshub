@@ -5,7 +5,7 @@ import {
   Button,
   ErrorState,
   PageHeader,
-  SelectField,
+  SearchableSelect,
   StatePanel,
   useToast,
 } from '../../ui';
@@ -98,35 +98,30 @@ export function POUpload() {
 
       <div className="max-w-2xl">
         <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <SelectField
+          <SearchableSelect
             label="Client"
             required
             value={clientId}
-            onChange={(e) => onClientChange(e.target.value)}
+            onChange={onClientChange}
             disabled={clientsQuery.isPending}
-          >
-            <option value="">
-              {clientsQuery.isPending ? 'Loading clients…' : 'Select a client…'}
-            </option>
-            {(clientsQuery.data ?? []).map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.code} — {c.name}
-              </option>
-            ))}
-          </SelectField>
+            placeholder={clientsQuery.isPending ? 'Loading clients…' : 'Select a client…'}
+            options={(clientsQuery.data ?? []).map((c) => ({
+              value: String(c.id),
+              label: `${c.code} — ${c.name}`,
+            }))}
+          />
           <div>
-            <SelectField
+            <SearchableSelect
               label="Project"
               required
               value={projectId}
-              onChange={(e) => setProjectId(e.target.value)}
+              onChange={setProjectId}
               disabled={!clientId || projectsQuery.isPending || projectsQuery.isError}
               error={
                 clientId && projectsQuery.isError ? "Couldn't load projects." : undefined
               }
-            >
-              <option value="">
-                {!clientId
+              placeholder={
+                !clientId
                   ? 'Select a client first…'
                   : projectsQuery.isPending
                     ? 'Loading projects…'
@@ -134,14 +129,13 @@ export function POUpload() {
                       ? 'Failed to load projects'
                       : projects.length === 0
                         ? 'No active projects for this client'
-                        : 'Select a project…'}
-              </option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.code} — {p.name}
-                </option>
-              ))}
-            </SelectField>
+                        : 'Select a project…'
+              }
+              options={projects.map((p) => ({
+                value: String(p.id),
+                label: `${p.code} — ${p.name}`,
+              }))}
+            />
             {clientId && projectsQuery.isError && (
               <button
                 type="button"

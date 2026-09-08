@@ -6,6 +6,7 @@ import {
   ErrorState,
   Loading,
   PageHeader,
+  SearchableSelect,
   SelectField,
   StatePanel,
   Table,
@@ -108,27 +109,29 @@ function Register() {
             </option>
           ))}
         </SelectField>
-        <SelectField label="Client" value={clientId} onChange={(e) => onClientChange(e.target.value)}>
-          <option value="">All clients</option>
-          {(clientsQuery.data ?? []).map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.code} — {c.name}
-            </option>
-          ))}
-        </SelectField>
-        <SelectField
+        <SearchableSelect
+          label="Client"
+          value={clientId}
+          onChange={onClientChange}
+          noneLabel="All clients"
+          placeholder="Search a client…"
+          options={(clientsQuery.data ?? []).map((c) => ({
+            value: String(c.id),
+            label: `${c.code} — ${c.name}`,
+          }))}
+        />
+        <SearchableSelect
           label="Purchase order"
           value={poId}
-          onChange={(e) => setPoId(e.target.value)}
+          onChange={setPoId}
           disabled={posQuery.isPending}
-        >
-          <option value="">All purchase orders</option>
-          {(posQuery.data ?? []).map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.po_number}
-            </option>
-          ))}
-        </SelectField>
+          noneLabel="All purchase orders"
+          placeholder="Search a purchase order…"
+          options={(posQuery.data ?? []).map((p) => ({
+            value: String(p.id),
+            label: `${p.po_number}${p.project_code ? ` — ${p.project_code}` : ''}`,
+          }))}
+        />
       </div>
 
       {query.isPending ? (

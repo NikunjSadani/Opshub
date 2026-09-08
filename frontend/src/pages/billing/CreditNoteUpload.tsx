@@ -1,10 +1,10 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Badge,
   Button,
   PageHeader,
-  SelectField,
+  SearchableSelect,
   StatePanel,
   useToast,
 } from '../../ui';
@@ -35,6 +35,14 @@ export function CreditNoteUpload() {
 
   // A credit note is issued against a CONFIRMED sales invoice — only those are choosable.
   const invoicesQuery = useBillingInvoicesQuery({ status: 'CONFIRMED' });
+  // Load EVERY confirmed-invoice page (not just the first ~100) so the searchable picker can
+  // reach any invoice — this is a REQUIRED field, so a missing invoice would hard-block the
+  // upload. (Server-side invoice search is the future optimisation if the set grows large.)
+  useEffect(() => {
+    if (invoicesQuery.hasNextPage && !invoicesQuery.isFetchingNextPage) {
+      void invoicesQuery.fetchNextPage();
+    }
+  }, [invoicesQuery.hasNextPage, invoicesQuery.isFetchingNextPage, invoicesQuery.fetchNextPage]);
   const invoices = useMemo(() => invoicesQuery.data?.pages.flat() ?? [], [invoicesQuery.data]);
   const clientsQuery = useClientsQuery();
   const clientById = useMemo(
@@ -108,33 +116,31 @@ export function CreditNoteUpload() {
 
       <div className="max-w-2xl">
         <div className="mb-4">
-          <SelectField
+          <SearchableSelect
             label="Credited invoice"
             required
             value={invoiceId}
-            onChange={(e) => setInvoiceId(e.target.value)}
+            onChange={setInvoiceId}
             disabled={invoicesQuery.isPending || invoicesQuery.isError || noInvoices}
             hint="Which CONFIRMED sales invoice this batch of credit notes is issued against."
-          >
-            <option value="">
-              {invoicesQuery.isPending
+            placeholder={
+              invoicesQuery.isPending
                 ? 'Loading invoices…'
                 : invoicesQuery.isError
                   ? 'Could not load invoices'
-                  : 'Select a confirmed invoice…'}
-            </option>
-            {invoices.map((inv) => {
+                  : 'Select a confirmed invoice…'
+            }
+            options={invoices.map((inv) => {
               const client = clientById.get(String(inv.client_id));
               const label = inv.invoice_number ?? `Invoice #${inv.id}`;
-              return (
-                <option key={inv.id} value={inv.id}>
-                  {label}
-                  {client ? ` — ${client.code}` : ''}
-                  {inv.grand_total_paise != null ? ` (${rupees(inv.grand_total_paise)})` : ''}
-                </option>
-              );
+              return {
+                value: String(inv.id),
+                label: `${label}${client ? ` — ${client.code}` : ''}${
+                  inv.grand_total_paise != null ? ` (${rupees(inv.grand_total_paise)})` : ''
+                }`,
+              };
             })}
-          </SelectField>
+          />
         </div>
 
         {invoicesQuery.isError && (

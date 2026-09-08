@@ -8,6 +8,7 @@ import {
   Loading,
   Modal,
   PageHeader,
+  SearchableSelect,
   SelectField,
   StatePanel,
   Table,
@@ -110,19 +111,18 @@ function ArRegister() {
       />
 
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <SelectField
+        <SearchableSelect
           label="Client"
           value={clientId}
-          onChange={(e) => setClientId(e.target.value)}
+          onChange={setClientId}
           error={clientsQuery.isError ? "Couldn't load clients." : undefined}
-        >
-          <option value="">{clientsQuery.isError ? 'Failed to load clients' : 'All clients'}</option>
-          {(clientsQuery.data ?? []).map((c: Client) => (
-            <option key={c.id} value={c.id}>
-              {c.code} — {c.name}
-            </option>
-          ))}
-        </SelectField>
+          noneLabel={clientsQuery.isError ? 'Failed to load clients' : 'All clients'}
+          placeholder="Search a client…"
+          options={(clientsQuery.data ?? []).map((c: Client) => ({
+            value: String(c.id),
+            label: `${c.code} — ${c.name}`,
+          }))}
+        />
         <SelectField
           label="Status"
           value={status}
@@ -654,24 +654,23 @@ function ApplyAdvanceModal({
           </StatePanel>
         ) : (
           <>
-            <SelectField
+            <SearchableSelect
               label="Advance"
               value={advanceId}
               required
-              onChange={(e) => {
+              onChange={(v) => {
                 setTouched(true);
-                setAdvanceId(e.target.value);
+                setAdvanceId(v);
               }}
-            >
-              <option value="">Select an advance…</option>
-              {advances.map((a) => (
-                <option key={a.advance_id} value={a.advance_id}>
-                  {[a.reference, formatDate(a.received_on)].filter(Boolean).join(' · ') ||
-                    `Advance #${a.advance_id}`}{' '}
-                  — remaining {rupees(a.remaining_paise)}
-                </option>
-              ))}
-            </SelectField>
+              placeholder="Select an advance…"
+              options={advances.map((a) => ({
+                value: String(a.advance_id),
+                label: `${
+                  [a.reference, formatDate(a.received_on)].filter(Boolean).join(' · ') ||
+                  `Advance #${a.advance_id}`
+                } — remaining ${rupees(a.remaining_paise)}`,
+              }))}
+            />
             <TextField
               label="Amount (₹)"
               value={amount}

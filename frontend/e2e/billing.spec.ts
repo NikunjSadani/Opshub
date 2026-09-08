@@ -1,4 +1,4 @@
-import { test, expect, type Locator, type APIRequestContext } from '@playwright/test';
+import { test, expect, type Locator, type Page, type APIRequestContext } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -51,11 +51,17 @@ async function apiPost(request: APIRequestContext, path: string, data: unknown):
   return res.json();
 }
 
-/** Select an <option> by (substring) visible text on a native <select>, waiting for it. */
-async function pickOption(select: Locator, optionText: string): Promise<void> {
-  const opt = select.locator('option', { hasText: optionText }).first();
-  await opt.waitFor({ state: 'attached' });
-  await select.selectOption((await opt.getAttribute('value'))!);
+/** Pick from an entity SearchableSelect combobox (Client / PO / Advance — searchable now):
+ * open, filter by a distinctive substring, then click the first option in its own listbox
+ * (scoped so a native <select> option elsewhere never matches). `root` defaults to the page
+ * but can be a dialog to scope the combobox lookup. */
+async function pickCombo(
+  root: Page | Locator, nameRe: RegExp, filterText: string,
+): Promise<void> {
+  const combo = root.getByRole('combobox', { name: nameRe });
+  await combo.click();          // auto-waits until enabled
+  await combo.fill(filterText);
+  await root.getByRole('listbox').getByRole('option').first().click();
 }
 
 test.describe('Billing & Finance — Wave 2 money flows (admin end-to-end)', () => {
@@ -94,16 +100,9 @@ test.describe('Billing & Finance — Wave 2 money flows (admin end-to-end)', () 
     await page.goto('/m/billing/upload');
     await expect(page.getByRole('heading', { name: 'Upload client invoices' })).toBeVisible();
 
-    // Locate each <select> by an option only it carries (getByLabel('Client') also matches
-    // the PO select, whose placeholder option reads "Choose a client first").
-    const clientSelect = page.locator('select', {
-      has: page.locator('option', { hasText: CLIENT_NAME }),
-    });
-    await pickOption(clientSelect, CLIENT_NAME);
-    const poSelect = page.locator('select', {
-      has: page.locator('option', { hasText: PO_NUMBER }),
-    });
-    await pickOption(poSelect, PO_NUMBER);
+    // Client + PO are searchable comboboxes now; the PO one enables after a client is chosen.
+    await pickCombo(page, /^Client/, CLIENT_NAME);
+    await pickCombo(page, /Purchase order/, PO_NUMBER);
     await page.setInputFiles('#billing-files', INVOICE);
     await page.getByRole('button', { name: /^Upload \d+ file/ }).click();
 
@@ -180,7 +179,7 @@ test.describe('Billing & Finance — Wave 2 money flows (admin end-to-end)', () 
 
     await page.getByRole('button', { name: 'Record advance' }).click();
     const advDialog = page.getByRole('dialog', { name: 'Record advance' });
-    await pickOption(advDialog.getByLabel('Client'), CLIENT_CODE);
+    await pickCombo(advDialog, /Client/, CLIENT_CODE);
     await advDialog.getByLabel('Amount (₹)').fill('4000');
     await advDialog.getByLabel('Reference').fill('ADV-BLG');
     await advDialog.getByRole('button', { name: 'Record advance' }).click();
@@ -201,9 +200,8 @@ test.describe('Billing & Finance — Wave 2 money flows (admin end-to-end)', () 
 
     await page.getByRole('button', { name: 'Apply advance' }).click();
     const applyDialog = page.getByRole('dialog', { name: 'Apply advance' });
-    // The Amount field's hint text contains the word "Advance", so getByLabel('Advance')
-    // is ambiguous — the dialog has exactly one <select> (the advance picker), so target it.
-    await pickOption(applyDialog.locator('select'), 'ADV-BLG');
+    // The advance picker is a searchable combobox (Amount is a textbox, so no ambiguity).
+    await pickCombo(applyDialog, /Advance/, 'ADV-BLG');
     await applyDialog.getByLabel('Amount (₹)').fill('4000');
     await applyDialog.getByRole('button', { name: 'Apply advance' }).click();
     await expect(applyDialog).toBeHidden();

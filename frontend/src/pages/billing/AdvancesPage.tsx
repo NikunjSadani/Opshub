@@ -6,7 +6,7 @@ import {
   Loading,
   Modal,
   PageHeader,
-  SelectField,
+  SearchableSelect,
   StatePanel,
   Table,
   Td,
@@ -91,19 +91,18 @@ export function AdvancesPage() {
       />
 
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <SelectField
+        <SearchableSelect
           label="Client"
           value={clientId}
-          onChange={(e) => setClientId(e.target.value)}
+          onChange={setClientId}
           error={clientsQuery.isError ? "Couldn't load clients." : undefined}
-        >
-          <option value="">{clientsQuery.isError ? 'Failed to load clients' : 'All clients'}</option>
-          {(clientsQuery.data ?? []).map((c: Client) => (
-            <option key={c.id} value={c.id}>
-              {c.code} — {c.name}
-            </option>
-          ))}
-        </SelectField>
+          noneLabel={clientsQuery.isError ? 'Failed to load clients' : 'All clients'}
+          placeholder="Search a client…"
+          options={(clientsQuery.data ?? []).map((c: Client) => ({
+            value: String(c.id),
+            label: `${c.code} — ${c.name}`,
+          }))}
+        />
       </div>
 
       {query.isPending ? (
@@ -256,20 +255,18 @@ function RecordAdvanceModal({
       }
     >
       <div className="space-y-3">
-        <SelectField
+        <SearchableSelect
           label="Client"
           value={clientId}
           required
-          onChange={(e) => setClientId(e.target.value)}
+          onChange={setClientId}
           error={clientsQuery.isError ? "Couldn't load clients." : undefined}
-        >
-          <option value="">Select a client…</option>
-          {(clientsQuery.data ?? []).map((c: Client) => (
-            <option key={c.id} value={c.id}>
-              {c.code} — {c.name}
-            </option>
-          ))}
-        </SelectField>
+          placeholder="Select a client…"
+          options={(clientsQuery.data ?? []).map((c: Client) => ({
+            value: String(c.id),
+            label: `${c.code} — ${c.name}`,
+          }))}
+        />
         <TextField
           label="Amount (₹)"
           value={amount}

@@ -6,6 +6,7 @@ import {
   ErrorState,
   Loading,
   PageHeader,
+  SearchableSelect,
   SelectField,
   StatePanel,
   Table,
@@ -201,32 +202,30 @@ export function Register() {
           onChange={(e) => setDateTo(e.target.value)}
           min={dateFrom || undefined}
         />
-        <SelectField
+        <SearchableSelect
           label="Project"
           value={projectId}
-          onChange={(e) => setProjectId(e.target.value)}
-        >
-          <option value="">All projects</option>
-          {(projectsQuery.data ?? []).map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.code} — {p.name}
-              {p.status !== 'ACTIVE' ? ` (${p.status.toLowerCase()})` : ''}
-            </option>
-          ))}
-        </SelectField>
-        <SelectField
+          onChange={setProjectId}
+          noneLabel="All projects"
+          placeholder="All projects"
+          options={(projectsQuery.data ?? []).map((p) => ({
+            value: String(p.id),
+            label: `${p.code} — ${p.name}${
+              p.status !== 'ACTIVE' ? ` (${p.status.toLowerCase()})` : ''
+            }`,
+          }))}
+        />
+        <SearchableSelect
           label="Payment method"
           value={paymentMethodId}
-          onChange={(e) => setPaymentMethodId(e.target.value)}
-        >
-          <option value="">All payment methods</option>
-          {(methodsQuery.data ?? []).map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name}
-              {m.active ? '' : ' (inactive)'}
-            </option>
-          ))}
-        </SelectField>
+          onChange={setPaymentMethodId}
+          noneLabel="All payment methods"
+          placeholder="All payment methods"
+          options={(methodsQuery.data ?? []).map((m) => ({
+            value: String(m.id),
+            label: `${m.name}${m.active ? '' : ' (inactive)'}`,
+          }))}
+        />
       </div>
 
       {query.isPending ? (

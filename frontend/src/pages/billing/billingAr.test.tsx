@@ -265,11 +265,19 @@ describe('Apply advance', () => {
     // Suggestion pre-fills: advance 501 selected, amount ₹500.00.
     const amount = within(dialog).getByLabelText(/amount/i) as HTMLInputElement;
     await waitFor(() => expect(amount.value).toBe('500.00'));
-    const advanceSelect = within(dialog).getByRole('combobox') as HTMLSelectElement;
-    expect(advanceSelect.value).toBe('501');
+    // Open the Advance combobox and confirm it pre-selected the suggested advance (501 → ADV-A).
+    const advanceCombo = within(dialog).getByRole('combobox', { name: /advance/i });
+    fireEvent.focus(advanceCombo);
+    await waitFor(() =>
+      expect(within(dialog).getByRole('option', { name: /ADV-A/i })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      ),
+    );
 
-    // Operator overrides both: advance 502, amount ₹300.
-    fireEvent.change(advanceSelect, { target: { value: '502' } });
+    // Operator overrides both: advance 502 (ADV-B), amount ₹300. Mousedown commits the
+    // option (SearchableSelect commits on mousedown).
+    fireEvent.mouseDown(within(dialog).getByRole('option', { name: /ADV-B/i }));
     fireEvent.change(amount, { target: { value: '300' } });
     fireEvent.click(within(dialog).getByRole('button', { name: /apply advance/i }));
 

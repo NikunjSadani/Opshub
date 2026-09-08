@@ -356,36 +356,31 @@ export function POForm() {
             placeholder="e.g. PO-2026-001"
             hint="Optional — you can add it later from the PO page."
           />
-          <SelectField
+          <SearchableSelect
             label="Client"
             required
             value={clientId}
-            onChange={(e) => onClientChange(e.target.value)}
+            onChange={onClientChange}
             disabled={clientsQuery.isPending}
-          >
-            <option value="">
-              {clientsQuery.isPending ? 'Loading clients…' : 'Select a client…'}
-            </option>
-            {(clientsQuery.data ?? []).map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.code} — {c.name}
-              </option>
-            ))}
-          </SelectField>
+            placeholder={clientsQuery.isPending ? 'Loading clients…' : 'Select a client…'}
+            options={(clientsQuery.data ?? []).map((c) => ({
+              value: String(c.id),
+              label: `${c.code} — ${c.name}`,
+            }))}
+          />
           <div>
-            <SelectField
+            <SearchableSelect
               label="Project"
               required
               value={projectId}
-              onChange={(e) => setProjectId(e.target.value)}
+              onChange={setProjectId}
               disabled={!clientId || projectsQuery.isPending || projectsQuery.isError}
               hint={!clientId ? 'Choose a client first.' : undefined}
               error={
                 clientId && projectsQuery.isError ? "Couldn't load projects." : undefined
               }
-            >
-              <option value="">
-                {!clientId
+              placeholder={
+                !clientId
                   ? 'Select a client first…'
                   : projectsQuery.isPending
                     ? 'Loading projects…'
@@ -393,14 +388,13 @@ export function POForm() {
                       ? 'Failed to load projects'
                       : projects.length === 0
                         ? 'No active projects for this client'
-                        : 'Select a project…'}
-              </option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.code} — {p.name}
-                </option>
-              ))}
-            </SelectField>
+                        : 'Select a project…'
+              }
+              options={projects.map((p) => ({
+                value: String(p.id),
+                label: `${p.code} — ${p.name}`,
+              }))}
+            />
             {clientId && projectsQuery.isError && (
               <button
                 type="button"
@@ -412,28 +406,27 @@ export function POForm() {
             )}
           </div>
           <div>
-            <SelectField
+            <SearchableSelect
               label="Client GSTIN (optional)"
               value={gstinId}
-              onChange={(e) => setGstinId(e.target.value)}
+              onChange={setGstinId}
               disabled={!clientId || gstinsQuery.isPending || gstinsQuery.isError}
               error={clientId && gstinsQuery.isError ? "Couldn't load GSTINs." : undefined}
-            >
-              <option value="">
-                {!clientId
+              noneLabel="No specific GSTIN"
+              placeholder={
+                !clientId
                   ? 'Choose a client first…'
                   : gstinsQuery.isError
                     ? 'Failed to load GSTINs'
-                    : 'No specific GSTIN'}
-              </option>
-              {gstins.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.gstin}
-                  {g.legal_name ? ` — ${g.legal_name}` : ''}
-                  {g.is_default ? ' (default)' : ''}
-                </option>
-              ))}
-            </SelectField>
+                    : 'No specific GSTIN'
+              }
+              options={gstins.map((g) => ({
+                value: String(g.id),
+                label: `${g.gstin}${g.legal_name ? ` — ${g.legal_name}` : ''}${
+                  g.is_default ? ' (default)' : ''
+                }`,
+              }))}
+            />
             {clientId && gstinsQuery.isError && (
               <button
                 type="button"

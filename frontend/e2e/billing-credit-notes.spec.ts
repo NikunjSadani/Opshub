@@ -1,4 +1,4 @@
-import { test, expect, type Locator, type APIRequestContext } from '@playwright/test';
+import { test, expect, type Locator, type Page, type APIRequestContext } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { readFileSync } from 'node:fs';
@@ -54,11 +54,16 @@ async function apiPost(request: APIRequestContext, path: string, data: unknown):
   return res.json();
 }
 
-/** Select an <option> by (substring) visible text on a native <select>, waiting for it. */
-async function pickOption(select: Locator, optionText: string): Promise<void> {
-  const opt = select.locator('option', { hasText: optionText }).first();
-  await opt.waitFor({ state: 'attached' });
-  await select.selectOption((await opt.getAttribute('value'))!);
+/** Pick from an entity SearchableSelect combobox (Client / PO / Credited invoice — searchable
+ * now): open, filter by a distinctive substring, then click the first option in its own
+ * listbox (scoped so a native <select> option elsewhere never matches). */
+async function pickCombo(
+  root: Page | Locator, nameRe: RegExp, filterText: string,
+): Promise<void> {
+  const combo = root.getByRole('combobox', { name: nameRe });
+  await combo.click();          // auto-waits until enabled
+  await combo.fill(filterText);
+  await root.getByRole('listbox').getByRole('option').first().click();
 }
 
 /** Map the (single) unmatched line select to the first real PO line, if not already set. */
@@ -136,14 +141,8 @@ test.describe('Billing — client credit-note capture (admin end-to-end)', () =>
     // ---- upload the invoice PDF through the real capture path, then match + confirm ----
     await page.goto('/m/billing/upload');
     await expect(page.getByRole('heading', { name: 'Upload client invoices' })).toBeVisible();
-    const invClientSelect = page.locator('select', {
-      has: page.locator('option', { hasText: CLIENT_NAME }),
-    });
-    await pickOption(invClientSelect, CLIENT_NAME);
-    const poSelect = page.locator('select', {
-      has: page.locator('option', { hasText: PO_NUMBER }),
-    });
-    await pickOption(poSelect, PO_NUMBER);
+    await pickCombo(page, /^Client/, CLIENT_NAME);
+    await pickCombo(page, /Purchase order/, PO_NUMBER);
     await page.setInputFiles('#billing-files', INVOICE);
     await page.getByRole('button', { name: /^Upload \d+ file/ }).click();
     await expect(page.getByText('Needs match').first()).toBeVisible({ timeout: 20_000 });
@@ -167,11 +166,8 @@ test.describe('Billing — client credit-note capture (admin end-to-end)', () =>
     await page.goto('/m/billing/credit-notes/upload');
     await expect(page.getByRole('heading', { name: 'Upload credit notes' })).toBeVisible();
 
-    // The "Credited invoice" select lists only CONFIRMED invoices; ours now shows up.
-    const cnInvoiceSelect = page.locator('select', {
-      has: page.locator('option', { hasText: INVOICE_NUMBER }),
-    });
-    await pickOption(cnInvoiceSelect, INVOICE_NUMBER);
+    // The "Credited invoice" combobox lists only CONFIRMED invoices; ours now shows up.
+    await pickCombo(page, /Credited invoice/, INVOICE_NUMBER);
     await page.setInputFiles('#cn-files', INVOICE);
     await page.getByRole('button', { name: /^Upload \d+ file/ }).click();
 

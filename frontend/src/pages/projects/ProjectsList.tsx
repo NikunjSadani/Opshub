@@ -6,6 +6,7 @@ import {
   Loading,
   Modal,
   PageHeader,
+  SearchableSelect,
   SelectField,
   StatePanel,
   Table,
@@ -147,20 +148,15 @@ function NewProjectModal({
       }
     >
       <div className="space-y-3">
-        <SelectField
+        <SearchableSelect
           label="Client"
           required
           value={clientId}
           hint="The project code is generated as <CLIENT_CODE>-<number>."
-          onChange={(e) => setClientId(e.target.value)}
-        >
-          <option value="">Select a client…</option>
-          {clients.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.code} — {c.name}
-            </option>
-          ))}
-        </SelectField>
+          onChange={setClientId}
+          placeholder="Select a client…"
+          options={clients.map((c) => ({ value: String(c.id), label: `${c.code} — ${c.name}` }))}
+        />
         <TextField
           label="Name"
           required
@@ -354,18 +350,14 @@ export function ProjectsList() {
       />
 
       <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        <SelectField
+        <SearchableSelect
           label="Client"
           value={clientId}
-          onChange={(e) => setClientId(e.target.value)}
-        >
-          <option value="">All clients</option>
-          {clients.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.code} — {c.name}
-            </option>
-          ))}
-        </SelectField>
+          onChange={setClientId}
+          noneLabel="All clients"
+          placeholder="All clients"
+          options={clients.map((c) => ({ value: String(c.id), label: `${c.code} — ${c.name}` }))}
+        />
         <SelectField
           label="Status"
           value={status}
