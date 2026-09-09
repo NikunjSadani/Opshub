@@ -656,3 +656,239 @@ describe('InvoiceReview — detail + match', () => {
     expect(screen.queryByLabelText('Project attribution')).not.toBeInTheDocument();
   });
 });
+
+describe('InvoiceReview — manual line editor', () => {
+  function renderReview() {
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/billing/:id" element={<InvoiceReview />} />
+      </Routes>,
+      ['/m/billing/5'],
+    );
+  }
+
+  /** The default extracted line (backend `LineOut`), the one seeded by `detail()`. */
+  const LINE_71 = detail().lines[0];
+
+  it('adds a line to a lineless (EXTRACTED) invoice via the header button and renders the returned detail', async () => {
+    const posted: { url: string; body: Record<string, unknown> }[] = [];
+    const addedLine = {
+      id: 90,
+      line_no: 1,
+      po_line_item_id: null,
+      match_status: 'UNMATCHED',
+      description: 'New widget',
+      hsn_sac: null,
+      quantity: '3',
+      unit: null,
+      unit_rate_paise: 10050,
+      taxable_paise: null,
+      gst_rate: null,
+      cgst_paise: null,
+      sgst_paise: null,
+      igst_paise: null,
+      line_total_paise: null,
+    };
+    // A lineless standalone (no PO) invoice in an editable status → the in-table empty
+    // state, with the Add button living in the section header.
+    const lineless = detail({ po_id: null, status: 'EXTRACTED', review_reasons: [], lines: [] });
+    const withLine = detail({ po_id: null, status: 'EXTRACTED', review_reasons: [], lines: [addedLine] });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.match(/\/billing\/invoices\/5\/lines$/) && method === 'POST') {
+          posted.push({ url, body: JSON.parse(String(init?.body)) });
+          return json(withLine);
+        }
+        if (url.match(/\/billing\/invoices\/5$/)) return json(lineless);
+        if (url.match(/\/projects(\?|$)/)) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderReview();
+
+    // Lineless → the table shows its empty state; the Add button is in the header (outside it).
+    expect(await screen.findByText('No line items')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /add line/i }));
+
+    // Fill the modal: description + a decimal quantity + a rupee unit-rate.
+    const dialog = screen.getByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/description/i), {
+      target: { value: 'New widget' },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/quantity/i), { target: { value: '3' } });
+    fireEvent.change(within(dialog).getByLabelText(/unit rate/i), { target: { value: '100.50' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /add line/i }));
+
+    // The POST carried ONLY the set keys, with ₹→paise conversion (100.50 → 10050).
+    await waitFor(() => expect(posted.length).toBe(1));
+    expect(posted[0].body).toEqual({
+      description: 'New widget',
+      quantity: '3',
+      unit_rate_paise: 10050,
+    });
+    // The returned detail (now carrying the line) renders it.
+    expect(await screen.findByText('New widget')).toBeInTheDocument();
+  });
+
+  it('keeps the add-line submit disabled until a non-empty description is entered', async () => {
+    const lineless = detail({ po_id: null, status: 'EXTRACTED', review_reasons: [], lines: [] });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.match(/\/billing\/invoices\/5$/)) return json(lineless);
+        if (url.match(/\/projects(\?|$)/)) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderReview();
+
+    expect(await screen.findByText('No line items')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /add line/i }));
+
+    const dialog = screen.getByRole('dialog');
+    const submit = within(dialog).getByRole('button', { name: /add line/i });
+    // Blocked with an empty description…
+    expect(submit).toBeDisabled();
+    // …and enabled once a description is typed.
+    fireEvent.change(within(dialog).getByLabelText(/description/i), {
+      target: { value: 'Widget' },
+    });
+    expect(submit).toBeEnabled();
+  });
+
+  it('blocks add-line submit on an invalid quantity or GST rate with an inline error', async () => {
+    const lineless = detail({ po_id: null, status: 'EXTRACTED', review_reasons: [], lines: [] });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.match(/\/billing\/invoices\/5$/)) return json(lineless);
+        if (url.match(/\/projects(\?|$)/)) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderReview();
+    expect(await screen.findByText('No line items')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /add line/i }));
+
+    const dialog = screen.getByRole('dialog');
+    const submit = within(dialog).getByRole('button', { name: /add line/i });
+    // A valid description alone enables submit…
+    fireEvent.change(within(dialog).getByLabelText(/description/i), { target: { value: 'Widget' } });
+    expect(submit).toBeEnabled();
+    // …a bad GST rate ("18%") blocks it inline (not an opaque server 422)…
+    fireEvent.change(within(dialog).getByLabelText(/GST rate/i), { target: { value: '18%' } });
+    expect(within(dialog).getByText(/GST rate from 0 to 100/i)).toBeInTheDocument();
+    expect(submit).toBeDisabled();
+    // …fixing it re-enables, and a bad quantity ("ten") blocks again inline.
+    fireEvent.change(within(dialog).getByLabelText(/GST rate/i), { target: { value: '18' } });
+    expect(submit).toBeEnabled();
+    fireEvent.change(within(dialog).getByLabelText(/quantity/i), { target: { value: 'ten' } });
+    expect(within(dialog).getByText(/a number with up to 3 decimals/i)).toBeInTheDocument();
+    expect(submit).toBeDisabled();
+  });
+
+  it('deletes a line via the confirm dialog and drops the row', async () => {
+    const deleted: string[] = [];
+    const oneLine = detail({ po_id: null, status: 'EXTRACTED', review_reasons: [], lines: [LINE_71] });
+    const noLines = detail({ po_id: null, status: 'EXTRACTED', review_reasons: [], lines: [] });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.match(/\/billing\/invoices\/5\/lines\/71$/) && method === 'DELETE') {
+          deleted.push(url);
+          return json(noLines);
+        }
+        if (url.match(/\/billing\/invoices\/5$/)) return json(oneLine);
+        if (url.match(/\/projects(\?|$)/)) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderReview();
+
+    expect(await screen.findByText('Biscuits carton')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /delete line 1/i }));
+
+    // Confirm the deletion in the dialog.
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByText(/Delete line 1\?/i)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: /delete line/i }));
+
+    // The DELETE fired and the returned (now-empty) detail drops the row.
+    await waitFor(() => expect(deleted.length).toBe(1));
+    await waitFor(() =>
+      expect(screen.queryByText('Biscuits carton')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText('No line items')).toBeInTheDocument();
+  });
+
+  it('edits a line: pre-fills from the line and PATCHes the converted body', async () => {
+    const patched: Record<string, unknown>[] = [];
+    const oneLine = detail({ po_id: null, status: 'EXTRACTED', review_reasons: [], lines: [LINE_71] });
+    const edited = detail({
+      po_id: null,
+      status: 'EXTRACTED',
+      review_reasons: [],
+      lines: [{ ...LINE_71, description: 'Biscuits carton XL' }],
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.match(/\/billing\/invoices\/5\/lines\/71$/) && method === 'PATCH') {
+          patched.push(JSON.parse(String(init?.body)));
+          return json(edited);
+        }
+        if (url.match(/\/billing\/invoices\/5$/)) return json(oneLine);
+        if (url.match(/\/projects(\?|$)/)) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderReview();
+
+    expect(await screen.findByText('Biscuits carton')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /edit line 1/i }));
+
+    // The form pre-fills from the line (paise→₹ on money).
+    const dialog = screen.getByRole('dialog');
+    const desc = within(dialog).getByLabelText(/description/i) as HTMLInputElement;
+    expect(desc.value).toBe('Biscuits carton');
+    fireEvent.change(desc, { target: { value: 'Biscuits carton XL' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /save line/i }));
+
+    // The PATCH body carries the edited description + the round-tripped ₹→paise money.
+    await waitFor(() => expect(patched.length).toBe(1));
+    expect(patched[0]).toEqual({
+      description: 'Biscuits carton XL',
+      hsn_sac: '1905',
+      quantity: '100',
+      unit: 'NOS',
+      gst_rate: '18.00',
+      unit_rate_paise: 10000,
+      taxable_paise: 1000000,
+      cgst_paise: 90000,
+      sgst_paise: 90000,
+      igst_paise: 0,
+      line_total_paise: 1180000,
+    });
+    expect(await screen.findByText('Biscuits carton XL')).toBeInTheDocument();
+  });
+});

@@ -810,3 +810,245 @@ def test_po_less_confirmed_appears_in_ar_and_zero_invoiced_qty(client: TestClien
     # §6 rollup: its lines carry po_line_item_id NULL, so they add 0 to any PO line's qty.
     assert service.invoiced_qty_for_po_line(db, widget_line_id) == Decimal("0")
     db.close()
+
+
+# ------------------------------------------- manual line editor (add / edit / delete)
+
+_LINE_BODY: dict[str, Any] = {
+    "description": "Manual widget", "hsn_sac": "847130", "quantity": 3, "unit": "NOS",
+    "unit_rate_paise": 100000, "taxable_paise": 300000, "gst_rate": 18,
+    "cgst_paise": 0, "sgst_paise": 0, "igst_paise": 54000, "line_total_paise": 354000,
+}
+
+
+def _add_line(client: TestClient, inv_id: int, **overrides: Any) -> Any:
+    body = {**_LINE_BODY, **overrides}
+    return client.post(f"/api/v1/billing/invoices/{inv_id}/lines", json=body)
+
+
+def test_add_line_to_lineless_extracted_po_less_matches(client: TestClient) -> None:
+    # A PO-less LINELESS extracted invoice reads as EXTRACTED (confirm blocks on 'needs a line').
+    inv_id = _upload(client, _spec(invoice_number="CINV-ADD-NOPO", lines=[]), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    assert client.get(f"/api/v1/billing/invoices/{inv_id}").json()["status"] == "EXTRACTED"
+
+    r = _add_line(client, inv_id)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # PO-less -> the added line has nothing to match against, so the invoice reads MATCHED.
+    assert body["status"] == "MATCHED"
+    assert len(body["lines"]) == 1
+    ln = body["lines"][0]
+    assert ln["line_no"] == 1 and ln["match_status"] == "UNMATCHED"
+    assert ln["po_line_item_id"] is None
+    assert ln["description"] == "Manual widget"
+    assert Decimal(str(ln["quantity"])) == Decimal("3")
+    assert ln["unit_rate_paise"] == 100000 and ln["line_total_paise"] == 354000
+    assert Decimal(str(ln["gst_rate"])) == Decimal("18")
+
+
+def test_add_line_to_lineless_extracted_po_linked_needs_match(client: TestClient) -> None:
+    # A PO-linked LINELESS extracted invoice: the added UNMATCHED line -> NEEDS_MATCH.
+    inv_id = _upload(client, _spec(invoice_number="CINV-ADD-PO", lines=[])
+                     ).json()["outcomes"][0]["invoice_id"]
+    assert client.get(f"/api/v1/billing/invoices/{inv_id}").json()["status"] == "EXTRACTED"
+    r = _add_line(client, inv_id)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "NEEDS_MATCH"
+
+
+def test_add_line_empty_description_rejected(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="CINV-ADD-EMPTY", lines=[]), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    # a blank / whitespace description is a 400 (blocks the junk-line-to-satisfy-confirm trick)
+    r = _add_line(client, inv_id, description="   ")
+    assert r.status_code == 400, r.text
+    assert "description" in r.json()["detail"].lower()
+    # an omitted description (None) is also a 400
+    r = client.post(f"/api/v1/billing/invoices/{inv_id}/lines",
+                    json={"quantity": 1, "unit_rate_paise": 100})
+    assert r.status_code == 400, r.text
+
+
+def test_add_line_out_of_range_values_rejected(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="CINV-ADD-RANGE", lines=[]), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    # money out of range
+    r = _add_line(client, inv_id, unit_rate_paise=10**15 + 1)
+    assert r.status_code == 400, r.text
+    assert "unit_rate_paise" in r.json()["detail"]
+    # quantity out of range (negative)
+    r = _add_line(client, inv_id, quantity=-1)
+    assert r.status_code == 400, r.text
+    assert "quantity" in r.json()["detail"].lower()
+    # quantity over the column magnitude
+    r = _add_line(client, inv_id, quantity="100000000000")
+    assert r.status_code == 400, r.text
+    # gst_rate > 100
+    r = _add_line(client, inv_id, gst_rate=150)
+    assert r.status_code == 400, r.text
+    assert "gst_rate" in r.json()["detail"]
+
+
+def test_edit_line_persists_without_changing_match_status(client: TestClient) -> None:
+    # a matched line on a normal PO-linked invoice
+    inv_id = _upload(client, _spec(invoice_number="CINV-EDIT")
+                     ).json()["outcomes"][0]["invoice_id"]
+    detail = client.get(f"/api/v1/billing/invoices/{inv_id}").json()
+    line = detail["lines"][0]
+    assert line["match_status"] == "MATCHED"
+    r = client.patch(
+        f"/api/v1/billing/invoices/{inv_id}/lines/{line['id']}",
+        json={"description": "Edited widget", "quantity": 5, "line_total_paise": 999})
+    assert r.status_code == 200, r.text
+    edited = next(ln for ln in r.json()["lines"] if ln["id"] == line["id"])
+    assert edited["description"] == "Edited widget"
+    assert Decimal(str(edited["quantity"])) == Decimal("5")
+    assert edited["line_total_paise"] == 999
+    # untouched fields stay; match state is NOT altered by an edit
+    assert edited["unit_rate_paise"] == line["unit_rate_paise"]
+    assert edited["match_status"] == "MATCHED"
+    assert edited["po_line_item_id"] == client.app.state.widget_line_id
+
+
+def test_edit_line_blank_description_rejected(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="CINV-EDIT-BLANK")
+                     ).json()["outcomes"][0]["invoice_id"]
+    line_id = client.get(f"/api/v1/billing/invoices/{inv_id}").json()["lines"][0]["id"]
+    r = client.patch(f"/api/v1/billing/invoices/{inv_id}/lines/{line_id}",
+                     json={"description": ""})
+    assert r.status_code == 400, r.text
+    assert "description" in r.json()["detail"].lower()
+
+
+def test_delete_line_and_last_line_reverts_to_extracted(client: TestClient) -> None:
+    # two lines: delete the leftover, then delete the last -> back to EXTRACTED (lineless)
+    inv_id = _upload(client, _spec(invoice_number="CINV-DEL", lines=[
+        {"description": "Widget WID-1", "hsn": "847130", "unit_rate_paise": 100000, "qty": 2},
+        {"description": "Second item", "hsn": "000000", "unit_rate_paise": 500, "qty": 1},
+    ]), po_id=None).json()["outcomes"][0]["invoice_id"]
+    detail = client.get(f"/api/v1/billing/invoices/{inv_id}").json()
+    assert len(detail["lines"]) == 2
+    first_id, second_id = detail["lines"][0]["id"], detail["lines"][1]["id"]
+
+    r = client.delete(f"/api/v1/billing/invoices/{inv_id}/lines/{second_id}")
+    assert r.status_code == 200, r.text
+    remaining = r.json()["lines"]
+    assert len(remaining) == 1 and remaining[0]["id"] == first_id
+    # line_no is NOT renumbered — the survivor keeps line_no 1 (gaps are fine)
+    assert remaining[0]["line_no"] == 1
+
+    r = client.delete(f"/api/v1/billing/invoices/{inv_id}/lines/{first_id}")
+    assert r.status_code == 200, r.text
+    assert r.json()["lines"] == []
+    assert r.json()["status"] == "EXTRACTED"
+
+
+def test_line_edit_blocked_on_confirmed_invoice(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="CINV-CONF"), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    line_id = client.get(f"/api/v1/billing/invoices/{inv_id}").json()["lines"][0]["id"]
+    assert _confirm(client, inv_id).status_code == 200
+    # add / edit / delete are all 409 on the immutable CONFIRMED record
+    assert _add_line(client, inv_id).status_code == 409
+    assert client.patch(f"/api/v1/billing/invoices/{inv_id}/lines/{line_id}",
+                        json={"description": "x"}).status_code == 409
+    assert client.delete(
+        f"/api/v1/billing/invoices/{inv_id}/lines/{line_id}").status_code == 409
+
+
+def test_line_editor_rbac_viewer_forbidden(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="CINV-RBAC"), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    line_id = client.get(f"/api/v1/billing/invoices/{inv_id}").json()["lines"][0]["id"]
+    _as(client, VIEWER)
+    assert _add_line(client, inv_id).status_code == 403
+    assert client.patch(f"/api/v1/billing/invoices/{inv_id}/lines/{line_id}",
+                        json={"description": "x"}).status_code == 403
+    assert client.delete(
+        f"/api/v1/billing/invoices/{inv_id}/lines/{line_id}").status_code == 403
+
+
+def test_line_editor_unknown_line_404(client: TestClient) -> None:
+    inv_id = _upload(client, _spec(invoice_number="CINV-404"), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    assert client.patch(f"/api/v1/billing/invoices/{inv_id}/lines/999999",
+                        json={"description": "x"}).status_code == 404
+    assert client.delete(
+        f"/api/v1/billing/invoices/{inv_id}/lines/999999").status_code == 404
+
+
+def test_rescue_path_add_line_then_confirm(client: TestClient) -> None:
+    # THE FEATURE: a PO-less LINELESS extracted invoice (required fields clean) cannot confirm
+    # (no lines) -> add a line -> confirm now succeeds. The whole point of the manual editor.
+    inv_id = _upload(client, _spec(invoice_number="CINV-RESCUE", lines=[]), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    blocked = _confirm(client, inv_id)
+    assert blocked.status_code == 409, blocked.text
+    assert "at least one line" in blocked.json()["detail"].lower()
+
+    r = _add_line(client, inv_id)
+    assert r.status_code == 200 and r.json()["status"] == "MATCHED"
+
+    r = _confirm(client, inv_id)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "CONFIRMED"
+    assert r.json()["confirmed_by"] == "ops" and r.json()["confirmed_at"] is not None
+
+
+def test_add_line_rejects_negative_money(client: TestClient) -> None:
+    # A client invoice LINE has no legitimate negative amount (credits are separate credit
+    # notes) — a negative money field is a clean 400, not a persisted nonsense value.
+    inv_id = _upload(client, _spec(invoice_number="CINV-NEG", lines=[]), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    for field in ("unit_rate_paise", "taxable_paise", "line_total_paise"):
+        r = _add_line(client, inv_id, **{field: -500})
+        assert r.status_code == 400, f"{field}: {r.text}"
+        assert field in r.json()["detail"]
+
+
+def test_add_line_rejects_content_free_description(client: TestClient) -> None:
+    # A punctuation-only description must NOT satisfy the 'a line needs a description' gate
+    # (that would let a content-free line confirm a lineless invoice). A real one is accepted.
+    inv_id = _upload(client, _spec(invoice_number="CINV-DESC", lines=[]), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    for junk in (".", "-", "  ...  "):
+        r = _add_line(client, inv_id, description=junk)
+        assert r.status_code == 400, f"{junk!r}: {r.text}"
+    # a description with any alphanumeric content is fine (e.g. an operator's "n/a")
+    assert _add_line(client, inv_id, description="n/a").status_code == 200
+
+
+def test_line_write_rejects_over_scale_quantity_and_gst(client: TestClient) -> None:
+    # quantity is Numeric(14,3) and gst_rate Numeric(5,2): an over-scale value is REJECTED
+    # (not silently rounded), so the stored value the §6 rollup sums equals what was entered.
+    inv_id = _upload(client, _spec(invoice_number="CINV-SCALE", lines=[]), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    assert _add_line(client, inv_id, quantity="10.6667").status_code == 400
+    assert _add_line(client, inv_id, gst_rate="18.999").status_code == 400
+    # exactly at the column scale is accepted and stored verbatim (no rounding drift)
+    r = _add_line(client, inv_id, quantity="10.667", gst_rate="18.50")
+    assert r.status_code == 200, r.text
+    ln = r.json()["lines"][0]
+    assert Decimal(str(ln["quantity"])) == Decimal("10.667")
+    assert Decimal(str(ln["gst_rate"])) == Decimal("18.50")
+
+
+def test_edit_line_audits_before_and_after_money_values(client: TestClient) -> None:
+    # A money mutation's audit row must carry the old + new values, not just the field names,
+    # so a line-amount change is reconstructable from the audit trail.
+    inv_id = _upload(client, _spec(invoice_number="CINV-AUDIT"), po_id=None
+                     ).json()["outcomes"][0]["invoice_id"]
+    line = client.get(f"/api/v1/billing/invoices/{inv_id}").json()["lines"][0]
+    old_total = line["line_total_paise"]
+    r = client.patch(f"/api/v1/billing/invoices/{inv_id}/lines/{line['id']}",
+                     json={"line_total_paise": 777})
+    assert r.status_code == 200, r.text
+
+    db = client.app.state.TestSession()
+    logged = db.execute(select(AuditLog)
+                        .where(AuditLog.action == "billing.invoice_line_updated")).scalars().all()
+    assert len(logged) == 1
+    changed = logged[0].detail["changed"]
+    assert changed["line_total_paise"] == {"old": old_total, "new": 777}
+    db.close()

@@ -894,6 +894,180 @@ def apply_manual_match(
     return invoice
 
 
+# --------------------------------------------------- manual line editing
+
+# The money paise columns on a line a human may write (all BigInteger, SIGNED). Each is
+# magnitude-bounded to the money ceiling so a hostile / typo'd value is a clean 400, never
+# an int8-overflow DB 500 (mirrors `_coerce`'s money bound on the field envelope).
+_LINE_MONEY_FIELDS: frozenset[str] = frozenset({
+    "unit_rate_paise", "taxable_paise", "cgst_paise", "sgst_paise",
+    "igst_paise", "line_total_paise",
+})
+# The free-text line columns (pydantic already caps their length at the route; here we only
+# strip and fold "" -> None).
+_LINE_TEXT_FIELDS: frozenset[str] = frozenset({"description", "hsn_sac", "unit"})
+
+
+def _require_description(desc: Any) -> None:
+    """A manual line must carry a REAL description — at least one alphanumeric char. This blocks
+    a blank / whitespace / punctuation-only ('.', '-') line added purely to satisfy the confirm
+    >=1-line gate (a content-free line would defeat the gate's data-quality intent)."""
+    if desc is None or not any(ch.isalnum() for ch in str(desc)):
+        raise BillingBadRequest("a line needs a description")
+
+
+def _line_audit_value(value: Any) -> Any:
+    """JSON-safe rendering of a line field for the audit detail (Decimal -> str)."""
+    return str(value) if isinstance(value, Decimal) else value
+
+
+def _lock_editable_invoice(db: Session, invoice: SalesInvoice) -> SalesInvoice:
+    """Re-read the invoice under a row lock and re-check it is still in-review (M3), mirroring
+    confirm/cancel/delete. Without it a line add/edit/delete could race off a stale snapshot and
+    silently REVERT a concurrently-CONFIRMED invoice back to in-review (changing its §6 quantity
+    inputs / line count while confirmed_at stays populated). Returns the locked instance."""
+    locked = db.execute(
+        select(SalesInvoice).where(SalesInvoice.id == invoice.id).with_for_update()
+    ).scalar_one_or_none()
+    if locked is None:
+        raise BillingNotFound("invoice not found")
+    if locked.status not in _EDITABLE_STATUSES:
+        raise BillingConflict(
+            f"invoice is {locked.status}; lines can be edited only on an in-review invoice")
+    return locked
+
+
+def _validate_line_write(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate + coerce a MANUAL line-item write (add or partial update), returning only the
+    keys PRESENT in ``payload`` (so a partial update touches only the columns it names).
+
+    Rejects (BillingBadRequest, -> 400) rather than silently fitting: user-entered money out
+    of the money ceiling, a negative / over-large quantity, or a gst_rate outside 0..100 (the
+    extractor's `_fit_numeric` silently NULLs a misparse — but a human's value is a mistake to
+    surface, not to swallow). Text is stripped; "" folds to None. line_no / match_status /
+    po_line_item_id are NOT writable here (they are managed by the match endpoint)."""
+    out: dict[str, Any] = {}
+    for name in _LINE_MONEY_FIELDS:
+        if name not in payload:
+            continue
+        value = payload[name]
+        if value is not None:
+            iv = int(value)
+            # A client invoice LINE has no legitimate negative amount — credits are captured as
+            # separate credit notes, never negative lines — so reject (400) rather than persist
+            # nonsense. Also magnitude-bound so a typo can't int8-overflow the DB (a clean 400).
+            if iv < 0 or iv > _MAX_MONEY_PAISE:
+                raise BillingBadRequest(f"{name} must be a non-negative amount within range")
+        out[name] = None if value is None else int(value)
+    if "quantity" in payload:
+        qty = payload["quantity"]
+        if qty is not None:
+            qty = Decimal(qty)
+            if not Decimal("0") <= qty <= _QTY_ABS_MAX:
+                raise BillingBadRequest("quantity out of range")
+            # The column is Numeric(14,3); REJECT an over-scale value rather than let the DB
+            # silently round it. The §6 invoiced-qty rollup sums exactly what is stored, so a
+            # silent round would diverge the rollup from what the operator entered (and SQLite,
+            # which keeps full precision, would hide that divergence from the tests).
+            if qty != qty.quantize(Decimal("0.001")):
+                raise BillingBadRequest("quantity supports at most 3 decimal places")
+        out["quantity"] = qty
+    if "gst_rate" in payload:
+        rate = payload["gst_rate"]
+        if rate is not None:
+            rate = Decimal(rate)
+            if not Decimal("0") <= rate <= Decimal("100"):
+                raise BillingBadRequest("gst_rate must be between 0 and 100")
+            # Numeric(5,2): reject over-scale rather than silently round (mirrors quantity).
+            if rate != rate.quantize(Decimal("0.01")):
+                raise BillingBadRequest("gst_rate supports at most 2 decimal places")
+        out["gst_rate"] = rate
+    for name in _LINE_TEXT_FIELDS:
+        if name not in payload:
+            continue
+        value = payload[name]
+        out[name] = None if value is None else (str(value).strip() or None)
+    return out
+
+
+def add_line(
+    db: Session, invoice: SalesInvoice, payload: dict[str, Any], *, actor_uid: str | None,
+) -> SalesInvoice:
+    """Add a MANUAL line item to an in-review invoice, then re-derive the status.
+
+    Editable only in-review (else 409). A line needs a real description (else 400) — this
+    blocks adding a blank junk line purely to satisfy the confirm >=1-line gate. The new line
+    is UNMATCHED with no PO line (the operator maps it via the match endpoint if PO-linked);
+    its ``line_no`` is the next after the current max (gaps from deletes are fine)."""
+    invoice = _lock_editable_invoice(db, invoice)
+    _require_description(payload.get("description"))
+    fields = _validate_line_write(payload)
+    line_no = max((ln.line_no for ln in invoice.lines), default=0) + 1
+    invoice.lines.append(SalesInvoiceLine(
+        invoice_id=invoice.id, line_no=line_no,
+        match_status=LineMatchStatus.UNMATCHED.value, po_line_item_id=None,
+        **fields,
+    ))
+    invoice.status = _derive_status(invoice)
+    _audit(db, "billing.invoice_line_added", actor_uid, invoice.id,
+           {"line_no": line_no,
+            "values": {k: _line_audit_value(v) for k, v in fields.items()}})
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+def update_line(
+    db: Session, invoice: SalesInvoice, line_id: int, payload: dict[str, Any],
+    *, actor_uid: str | None,
+) -> SalesInvoice:
+    """Edit an existing line's descriptive / money / tax fields (partial update), then
+    re-derive the status. Editable only in-review (else 409); an unknown line is 404.
+
+    Only the fields SUPPLIED change. A supplied ``description`` must be non-empty (else 400).
+    line_no / match_status / po_line_item_id are NOT touched here (the match endpoint owns
+    them) — so editing a line never alters its PO-match state."""
+    invoice = _lock_editable_invoice(db, invoice)
+    line = next((ln for ln in invoice.lines if ln.id == line_id), None)
+    if line is None:
+        raise BillingNotFound("invoice line not found")
+    if "description" in payload:
+        _require_description(payload["description"])
+    fields = _validate_line_write(payload)
+    before = {attr: getattr(line, attr) for attr in fields}
+    for attr, value in fields.items():
+        setattr(line, attr, value)
+    invoice.status = _derive_status(invoice)
+    _audit(db, "billing.invoice_line_updated", actor_uid, invoice.id,
+           {"line_id": line_id,
+            "changed": {attr: {"old": _line_audit_value(before[attr]),
+                               "new": _line_audit_value(value)}
+                        for attr, value in fields.items()}})
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
+def delete_line(
+    db: Session, invoice: SalesInvoice, line_id: int, *, actor_uid: str | None,
+) -> SalesInvoice:
+    """Delete one line from an in-review invoice (cascade delete-orphan drops the DB row),
+    then re-derive the status. Editable only in-review (else 409); an unknown line is 404.
+
+    Remaining lines are NOT renumbered — line_no stays stable and gaps are acceptable.
+    Deleting the last line drops the invoice back to EXTRACTED (a lineless in-review state)."""
+    invoice = _lock_editable_invoice(db, invoice)
+    line = next((ln for ln in invoice.lines if ln.id == line_id), None)
+    if line is None:
+        raise BillingNotFound("invoice line not found")
+    invoice.lines.remove(line)
+    invoice.status = _derive_status(invoice)
+    _audit(db, "billing.invoice_line_deleted", actor_uid, invoice.id, {"line_id": line_id})
+    db.commit()
+    db.refresh(invoice)
+    return invoice
+
+
 # --------------------------------------------------- §6 invoiced-qty rollup
 
 def invoiced_qty_for_po_line(db: Session, po_line_id: int) -> Decimal:

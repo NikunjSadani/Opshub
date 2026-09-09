@@ -7,9 +7,11 @@ import {
   ConfirmDialog,
   ErrorState,
   Loading,
+  Modal,
   PageHeader,
   StatePanel,
   Table,
+  TextField,
   THead,
   Th,
   Tr,
@@ -20,17 +22,21 @@ import { usePermissions } from '../../auth/AuthProvider';
 import { usePurchaseOrderQuery, type POLine } from '../../api/purchaseOrders';
 import { useProjectsQuery } from '../../api/projects';
 import {
+  useAddInvoiceLine,
   useBillingInvoiceQuery,
   useCancelInvoice,
   useDeleteInvoice,
+  useDeleteInvoiceLine,
   useManualMatch,
   useRematch,
   useSetInvoiceProject,
   useSubmitReview,
+  useUpdateInvoiceLine,
   type BillingCorrection,
   type BillingFieldOut,
   type BillingInvoiceDetail,
   type BillingLineOut,
+  type LineWrite,
 } from '../../api/billingInvoices';
 import { BILLING_BASE } from './billingFormat';
 import {
@@ -176,28 +182,292 @@ function poLineLabel(l: POLine): string {
   return `${name} · qty ${l.ordered_qty} · ${money(l.sell_price_paise)}`;
 }
 
+// --- manual line-item editor --------------------------------------------------
+
+/** Form values for the add/edit line modal. Every input is a string; money is in ₹. */
+interface LineFormValues {
+  description: string;
+  hsn_sac: string;
+  quantity: string;
+  unit: string;
+  unit_rate: string;
+  taxable: string;
+  gst_rate: string;
+  cgst: string;
+  sgst: string;
+  igst: string;
+  line_total: string;
+}
+
+/** The integer-paise money keys on the wire (a narrow subset of LineWrite). */
+type LineMoneyKey =
+  | 'unit_rate_paise'
+  | 'taxable_paise'
+  | 'cgst_paise'
+  | 'sgst_paise'
+  | 'igst_paise'
+  | 'line_total_paise';
+
+/** The money form-fields, each mapped to its integer-paise LineWrite key + label. */
+const LINE_MONEY_FIELDS: {
+  key: keyof LineFormValues;
+  paiseKey: LineMoneyKey;
+  label: string;
+}[] = [
+  { key: 'unit_rate', paiseKey: 'unit_rate_paise', label: 'Unit rate (₹)' },
+  { key: 'taxable', paiseKey: 'taxable_paise', label: 'Taxable (₹)' },
+  { key: 'cgst', paiseKey: 'cgst_paise', label: 'CGST (₹)' },
+  { key: 'sgst', paiseKey: 'sgst_paise', label: 'SGST (₹)' },
+  { key: 'igst', paiseKey: 'igst_paise', label: 'IGST (₹)' },
+  { key: 'line_total', paiseKey: 'line_total_paise', label: 'Line total (₹)' },
+];
+
+const EMPTY_LINE_FORM: LineFormValues = {
+  description: '',
+  hsn_sac: '',
+  quantity: '',
+  unit: '',
+  unit_rate: '',
+  taxable: '',
+  gst_rate: '',
+  cgst: '',
+  sgst: '',
+  igst: '',
+  line_total: '',
+};
+
+/** Format an integer-paise money value into a rupee string for editing (blank when null). */
+function paiseToRupeeInput(paise: number | null): string {
+  return paise == null ? '' : (paise / 100).toFixed(2);
+}
+
+/** Pre-fill the form from an existing line (paise→₹ for money; strings verbatim). */
+function lineToForm(line: BillingLineOut): LineFormValues {
+  return {
+    description: line.description ?? '',
+    hsn_sac: line.hsn_sac ?? '',
+    quantity: line.quantity ?? '',
+    unit: line.unit ?? '',
+    unit_rate: paiseToRupeeInput(line.unit_rate_paise),
+    taxable: paiseToRupeeInput(line.taxable_paise),
+    gst_rate: line.gst_rate ?? '',
+    cgst: paiseToRupeeInput(line.cgst_paise),
+    sgst: paiseToRupeeInput(line.sgst_paise),
+    igst: paiseToRupeeInput(line.igst_paise),
+    line_total: paiseToRupeeInput(line.line_total_paise),
+  };
+}
+
+/**
+ * Build the wire LineWrite from the form: description always sent (required, trimmed),
+ * every other key sent ONLY when the operator left a non-empty value — money converted
+ * ₹→paise via parseRupeesToPaise, quantity/gst_rate sent as trimmed strings. Assumes the
+ * caller has already blocked submit on a blank description / an unparseable money field.
+ */
+function formToLineWrite(v: LineFormValues): LineWrite {
+  const body: LineWrite = { description: v.description.trim() };
+  if (v.hsn_sac.trim()) body.hsn_sac = v.hsn_sac.trim();
+  if (v.quantity.trim()) body.quantity = v.quantity.trim();
+  if (v.unit.trim()) body.unit = v.unit.trim();
+  if (v.gst_rate.trim()) body.gst_rate = v.gst_rate.trim();
+  for (const { key, paiseKey } of LINE_MONEY_FIELDS) {
+    const raw = v[key].trim();
+    if (raw === '') continue;
+    const paise = parseRupeesToPaise(raw);
+    if (paise != null) body[paiseKey] = paise;
+  }
+  return body;
+}
+
+// Client-side scale/range checks that MIRROR the backend guards, so a natural mistake gets an
+// inline error instead of an opaque 422: quantity is Numeric(14,3), gst_rate Numeric(5,2) in
+// 0..100. Both are non-negative (a line has no negative amount — credits are separate notes).
+const QTY_RE = /^\d+(\.\d{1,3})?$/;
+const GST_RE = /^\d+(\.\d{1,2})?$/;
+
+function quantityError(raw: string): string | undefined {
+  const v = raw.trim();
+  if (v === '' || QTY_RE.test(v)) return undefined;
+  return 'Enter a quantity — a number with up to 3 decimals.';
+}
+function gstRateError(raw: string): string | undefined {
+  const v = raw.trim();
+  if (v === '') return undefined;
+  if (!GST_RE.test(v) || Number(v) > 100) return 'Enter a GST rate from 0 to 100 (up to 2 decimals).';
+  return undefined;
+}
+
+/**
+ * Modal form to add a new line item or edit an existing one. Money inputs are RUPEES,
+ * validated with parseRupeesToPaise (an inline error on an unparseable amount); submit is
+ * disabled while the description is empty or any money field is invalid.
+ */
+function LineFormModal({
+  open,
+  mode,
+  initialLine,
+  saving,
+  onSubmit,
+  onClose,
+}: {
+  open: boolean;
+  mode: 'add' | 'edit';
+  initialLine: BillingLineOut | null;
+  saving: boolean;
+  onSubmit: (body: LineWrite) => void;
+  onClose: () => void;
+}) {
+  const [values, setValues] = useState<LineFormValues>(EMPTY_LINE_FORM);
+  // The Description required-error shows only once the field has been touched (or a submit
+  // attempted), so a freshly-opened Add form isn't greeted by a red error on a pristine field.
+  const [descTouched, setDescTouched] = useState(false);
+  // Re-seed the form each time the modal opens (add → blank, edit → the line's values).
+  const seed = mode === 'edit' && initialLine ? lineToForm(initialLine) : EMPTY_LINE_FORM;
+  const [seeded, setSeeded] = useState(false);
+  if (open && !seeded) {
+    setValues(seed);
+    setSeeded(true);
+    setDescTouched(false);
+  }
+  if (!open && seeded) setSeeded(false);
+
+  function set(key: keyof LineFormValues, value: string) {
+    setValues((prev) => ({ ...prev, [key]: value }));
+  }
+
+  const moneyErrors = new Set(
+    LINE_MONEY_FIELDS.filter(({ key }) => {
+      const raw = values[key].trim();
+      return raw !== '' && parseRupeesToPaise(raw) == null;
+    }).map(({ key }) => key),
+  );
+  const qtyErr = quantityError(values.quantity);
+  const gstErr = gstRateError(values.gst_rate);
+  const descEmpty = values.description.trim() === '';
+  const canSubmit = !descEmpty && moneyErrors.size === 0 && !qtyErr && !gstErr && !saving;
+
+  function submit() {
+    if (!canSubmit) return;
+    onSubmit(formToLineWrite(values));
+  }
+
+  const moneyError = 'Enter a valid rupee amount (numbers, up to 2 decimals).';
+
+  return (
+    <Modal
+      open={open}
+      title={mode === 'add' ? 'Add line item' : `Edit line ${initialLine?.line_no ?? ''}`}
+      onClose={onClose}
+      busy={saving}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button onClick={submit} disabled={!canSubmit} loading={saving}>
+            {mode === 'add' ? 'Add line' : 'Save line'}
+          </Button>
+        </>
+      }
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          submit();
+        }}
+        className="space-y-3"
+      >
+        <TextField
+          label="Description"
+          required
+          maxLength={500}
+          value={values.description}
+          onChange={(e) => set('description', e.target.value)}
+          onBlur={() => setDescTouched(true)}
+          error={descTouched && descEmpty ? 'Description is required.' : undefined}
+        />
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <TextField
+            label="HSN/SAC"
+            maxLength={10}
+            value={values.hsn_sac}
+            onChange={(e) => set('hsn_sac', e.target.value)}
+          />
+          <TextField
+            label="Quantity"
+            inputMode="decimal"
+            value={values.quantity}
+            onChange={(e) => set('quantity', e.target.value)}
+            error={qtyErr}
+          />
+          <TextField
+            label="Unit"
+            maxLength={20}
+            value={values.unit}
+            onChange={(e) => set('unit', e.target.value)}
+          />
+          <TextField
+            label="GST rate (%)"
+            inputMode="decimal"
+            value={values.gst_rate}
+            onChange={(e) => set('gst_rate', e.target.value)}
+            error={gstErr}
+          />
+          {LINE_MONEY_FIELDS.map(({ key, label }) => (
+            <TextField
+              key={key}
+              label={label}
+              inputMode="decimal"
+              placeholder="0.00"
+              value={values[key]}
+              onChange={(e) => set(key, e.target.value)}
+              error={moneyErrors.has(key) ? moneyError : undefined}
+            />
+          ))}
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
 function LinesMatchTable({
   invoice,
   poLines,
   poLoading,
   canOperate,
+  isEditableStatus,
   onMap,
+  onEdit,
+  onDelete,
   mappingLineId,
 }: {
   invoice: BillingInvoiceDetail;
   poLines: POLine[];
   poLoading: boolean;
   canOperate: boolean;
+  isEditableStatus: boolean;
   onMap: (line: BillingLineOut, poLineItemId: string) => void;
+  onEdit: (line: BillingLineOut) => void;
+  onDelete: (line: BillingLineOut) => void;
   mappingLineId: string | null;
 }) {
   if (invoice.lines.length === 0) {
-    return <StatePanel title="No line items">No line items were extracted for this invoice.</StatePanel>;
+    // Neutral copy: the invoice may be lineless because none were extracted OR because they
+    // were deleted — don't claim "none were extracted". Point operators to the Add line button.
+    return (
+      <StatePanel title="No line items">
+        {canOperate && isEditableStatus
+          ? 'This invoice has no line items — use “Add line” above to add one.'
+          : 'This invoice has no line items.'}
+      </StatePanel>
+    );
   }
 
   const poLineById = new Map(poLines.map((l) => [String(l.id), l]));
   const openLines = poLines.filter((l) => l.line_status === 'OPEN');
   const noPo = invoice.po_id == null;
+  // The per-line Edit/Delete affordances only when the operator can act on an editable invoice.
+  const canEditLines = canOperate && isEditableStatus;
 
   return (
     <Table>
@@ -211,6 +481,7 @@ function LinesMatchTable({
           <Th className="text-right">Line total</Th>
           {/* No PO to match against on a standalone invoice — drop the Match column. */}
           {!noPo && <Th>Match</Th>}
+          {canEditLines && <Th className="text-right">Actions</Th>}
         </Tr>
       </THead>
       <tbody>
@@ -266,6 +537,28 @@ function LinesMatchTable({
                   </div>
                 </Td>
               )}
+              {canEditLines && (
+                <Td className="text-right">
+                  <div className="flex items-center justify-end gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Edit line ${l.line_no}`}
+                      onClick={() => onEdit(l)}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Delete line ${l.line_no}`}
+                      onClick={() => onDelete(l)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </Td>
+              )}
             </Tr>
           );
         })}
@@ -294,6 +587,9 @@ export function InvoiceReview() {
   const manualMatch = useManualMatch();
   const cancel = useCancelInvoice();
   const del = useDeleteInvoice();
+  const addLine = useAddInvoiceLine();
+  const updateLine = useUpdateInvoiceLine();
+  const deleteLine = useDeleteInvoiceLine();
   // A PO-less invoice can be attributed directly to one of its client's ACTIVE projects.
   // Scoped to the invoice's client; only used/rendered on the standalone (no-PO) path.
   const projectsQuery = useProjectsQuery({
@@ -306,6 +602,12 @@ export function InvoiceReview() {
   const [mappingLineId, setMappingLineId] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // The line editor: `null` closed, `{ mode:'add' }` a new line, `{ mode:'edit', line }` an
+  // existing one. `deleteLineTarget` drives the per-line delete confirm dialog.
+  const [lineForm, setLineForm] = useState<{ mode: 'add' | 'edit'; line: BillingLineOut | null } | null>(
+    null,
+  );
+  const [deleteLineTarget, setDeleteLineTarget] = useState<BillingLineOut | null>(null);
 
   function setEdit(fieldPath: string, value: string) {
     setEdits((prev) => ({ ...prev, [fieldPath]: value }));
@@ -490,6 +792,54 @@ export function InvoiceReview() {
     });
   }
 
+  function onSubmitLine(body: LineWrite) {
+    const editing = lineForm?.mode === 'edit' ? lineForm.line : null;
+    if (editing) {
+      updateLine.mutate(
+        { invoiceId: invoice!.id, lineId: editing.id, body },
+        {
+          onSuccess: () => {
+            setLineForm(null);
+            toast.success('Line updated.');
+          },
+          onError: (err) => toast.error(errorMessage(err)),
+        },
+      );
+    } else {
+      addLine.mutate(
+        { invoiceId: invoice!.id, body },
+        {
+          onSuccess: () => {
+            setLineForm(null);
+            toast.success('Line added.');
+          },
+          onError: (err) => toast.error(errorMessage(err)),
+        },
+      );
+    }
+  }
+
+  function onDeleteLine() {
+    const line = deleteLineTarget;
+    if (!line) return;
+    deleteLine.mutate(
+      { invoiceId: invoice!.id, lineId: line.id },
+      {
+        onSuccess: () => {
+          setDeleteLineTarget(null);
+          toast.success('Line deleted.');
+          // The deleted row held the focused Delete button and now unmounts, so move focus to
+          // a stable anchor (the Add line button) instead of letting it fall to <body>.
+          requestAnimationFrame(() => document.getElementById('invoice-add-line')?.focus());
+        },
+        onError: (err) => {
+          setDeleteLineTarget(null);
+          toast.error(errorMessage(err));
+        },
+      },
+    );
+  }
+
   const confirmReason = hasMoneyError
     ? 'Fix the highlighted amount to confirm.'
     : !hasLines
@@ -597,18 +947,40 @@ export function InvoiceReview() {
           <h2 className="text-sm font-semibold text-slate-900">
             {noPo ? 'Line items' : 'Line items & PO matching'}
           </h2>
-          {!noPo && isEditableStatus && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={onRematch}
-              disabled={!canOperate || rematch.isPending}
-              loading={rematch.isPending}
-            >
-              Re-match
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {/* Add lives in the header (OUTSIDE the table) so a lineless invoice — whose
+                table early-returns a "No line items" panel — can still get its first line. */}
+            {canOperate && isEditableStatus && (
+              <Button
+                id="invoice-add-line"
+                variant="secondary"
+                size="sm"
+                onClick={() => setLineForm({ mode: 'add', line: null })}
+                disabled={addLine.isPending}
+              >
+                Add line
+              </Button>
+            )}
+            {!noPo && isEditableStatus && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={onRematch}
+                disabled={!canOperate || rematch.isPending}
+                loading={rematch.isPending}
+              >
+                Re-match
+              </Button>
+            )}
+          </div>
         </div>
+        {canOperate && isEditableStatus && (
+          <p className="mb-2 text-xs text-slate-400">
+            {noPo
+              ? "Editing lines doesn't change the invoice's grand total (the receivable) — the lines are a record of what's billed."
+              : "Editing lines doesn't change the invoice's grand total (the receivable) — it drives PO matching and the invoiced-quantity rollup."}
+          </p>
+        )}
         {noPo ? (
           <div className="mb-2 space-y-2">
             <div
@@ -671,7 +1043,10 @@ export function InvoiceReview() {
           poLines={poLines}
           poLoading={invoice.po_id != null && poQuery.isPending}
           canOperate={canOperate}
+          isEditableStatus={isEditableStatus}
           onMap={onMap}
+          onEdit={(line) => setLineForm({ mode: 'edit', line })}
+          onDelete={(line) => setDeleteLineTarget(line)}
           mappingLineId={mappingLineId}
         />
       </div>
@@ -756,6 +1131,30 @@ export function InvoiceReview() {
         onCancel={() => setConfirmDelete(false)}
         onConfirm={onDeleteInvoice}
         message="This permanently deletes the invoice and its source PDF. This cannot be undone."
+      />
+
+      <LineFormModal
+        open={lineForm != null}
+        mode={lineForm?.mode ?? 'add'}
+        initialLine={lineForm?.line ?? null}
+        saving={addLine.isPending || updateLine.isPending}
+        onSubmit={onSubmitLine}
+        onClose={() => setLineForm(null)}
+      />
+
+      <ConfirmDialog
+        open={deleteLineTarget != null}
+        title="Delete this line?"
+        confirmLabel="Delete line"
+        danger
+        loading={deleteLine.isPending}
+        onCancel={() => setDeleteLineTarget(null)}
+        onConfirm={onDeleteLine}
+        message={
+          deleteLineTarget
+            ? `Delete line ${deleteLineTarget.line_no}? This can't be undone.`
+            : ''
+        }
       />
     </div>
   );

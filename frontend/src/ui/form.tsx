@@ -1,3 +1,4 @@
+import { useId } from 'react';
 import type { InputHTMLAttributes, ReactNode, SelectHTMLAttributes, TextareaHTMLAttributes } from 'react';
 
 /** Form controls with a consistent label/error scaffold. */
@@ -6,12 +7,15 @@ function Field({
   label,
   required,
   error,
+  errorId,
   hint,
   children,
 }: {
   label: string;
   required?: boolean;
   error?: string;
+  /** id of the error text, so the control can point `aria-describedby` at it for AT. */
+  errorId?: string;
   hint?: string;
   children: ReactNode;
 }) {
@@ -23,7 +27,7 @@ function Field({
       </span>
       {children}
       {error ? (
-        <span className="mt-1 block text-xs text-rose-600">{error}</span>
+        <span id={errorId} className="mt-1 block text-xs text-rose-600">{error}</span>
       ) : (
         hint && <span className="mt-1 block text-xs text-slate-400">{hint}</span>
       )}
@@ -42,10 +46,20 @@ export interface TextFieldProps extends Omit<InputHTMLAttributes<HTMLInputElemen
   hint?: string;
 }
 
-export function TextField({ label, error, hint, required, className = '', ...rest }: TextFieldProps) {
+export function TextField({ label, error, hint, required, className = '', id, ...rest }: TextFieldProps) {
+  const reactId = useId();
+  const inputId = id ?? reactId;
+  const errorId = `${inputId}-error`;
   return (
-    <Field label={label} required={required} error={error} hint={hint}>
-      <input {...rest} required={required} className={`${CONTROL} ${error ? bad : ok} ${className}`} />
+    <Field label={label} required={required} error={error} errorId={errorId} hint={hint}>
+      <input
+        {...rest}
+        id={inputId}
+        required={required}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errorId : undefined}
+        className={`${CONTROL} ${error ? bad : ok} ${className}`}
+      />
     </Field>
   );
 }
@@ -56,10 +70,20 @@ export interface TextAreaProps extends TextareaHTMLAttributes<HTMLTextAreaElemen
   hint?: string;
 }
 
-export function TextArea({ label, error, hint, required, className = '', ...rest }: TextAreaProps) {
+export function TextArea({ label, error, hint, required, className = '', id, ...rest }: TextAreaProps) {
+  const reactId = useId();
+  const areaId = id ?? reactId;
+  const errorId = `${areaId}-error`;
   return (
-    <Field label={label} required={required} error={error} hint={hint}>
-      <textarea {...rest} required={required} className={`${CONTROL} ${error ? bad : ok} ${className}`} />
+    <Field label={label} required={required} error={error} errorId={errorId} hint={hint}>
+      <textarea
+        {...rest}
+        id={areaId}
+        required={required}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errorId : undefined}
+        className={`${CONTROL} ${error ? bad : ok} ${className}`}
+      />
     </Field>
   );
 }
@@ -71,10 +95,20 @@ export interface SelectFieldProps extends SelectHTMLAttributes<HTMLSelectElement
   children: ReactNode;
 }
 
-export function SelectField({ label, error, hint, required, className = '', children, ...rest }: SelectFieldProps) {
+export function SelectField({ label, error, hint, required, className = '', id, children, ...rest }: SelectFieldProps) {
+  const reactId = useId();
+  const selectId = id ?? reactId;
+  const errorId = `${selectId}-error`;
   return (
-    <Field label={label} required={required} error={error} hint={hint}>
-      <select {...rest} required={required} className={`${CONTROL} ${error ? bad : ok} ${className}`}>
+    <Field label={label} required={required} error={error} errorId={errorId} hint={hint}>
+      <select
+        {...rest}
+        id={selectId}
+        required={required}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errorId : undefined}
+        className={`${CONTROL} ${error ? bad : ok} ${className}`}
+      >
         {children}
       </select>
     </Field>

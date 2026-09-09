@@ -7,6 +7,9 @@
   PATCH  /billing/invoices/{id}/project           -> set/change/clear project attribution (OPERATE)
   POST   /billing/invoices/{id}/match             -> re-run the auto-matcher (OPERATE)
   PATCH  /billing/invoices/{id}/lines/{lineId}/match -> manual map to a PO line (OPERATE)
+  POST   /billing/invoices/{id}/lines             -> add a manual line item (OPERATE)
+  PATCH  /billing/invoices/{id}/lines/{lineId}     -> edit a line item (OPERATE)
+  DELETE /billing/invoices/{id}/lines/{lineId}     -> delete a line item (OPERATE)
   POST   /billing/invoices/{id}/cancel            -> soft-cancel (MANAGE)
   DELETE /billing/invoices/{id}                   -> delete (supports delete-and-re-upload) (MANAGE)
 
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import Annotated, Any
 from uuid import uuid4
@@ -192,6 +196,24 @@ class ReviewPatchBody(BaseModel):
 
 class ManualMatchBody(BaseModel):
     po_line_item_id: int
+
+
+class LineWriteBody(BaseModel):
+    """A manual line-item write (add or partial edit). Every field optional; paise on the
+    wire (mirrors ``LineOut``). For an edit only the SUPPLIED fields change; on add an unset
+    field defaults to None. line_no / match_status / po_line_item_id are NOT writable here."""
+
+    description: str | None = Field(default=None, max_length=500)
+    hsn_sac: str | None = Field(default=None, max_length=10)
+    quantity: Decimal | None = None
+    unit: str | None = Field(default=None, max_length=20)
+    unit_rate_paise: int | None = None
+    taxable_paise: int | None = None
+    gst_rate: Decimal | None = None
+    cgst_paise: int | None = None
+    sgst_paise: int | None = None
+    igst_paise: int | None = None
+    line_total_paise: int | None = None
 
 
 class SetProjectBody(BaseModel):
@@ -423,6 +445,75 @@ def manual_match(
     try:
         service.apply_manual_match(
             db, invoice, line_id, body.po_line_item_id, actor_uid=user.firebase_uid)
+    except service.BillingError as err:
+        raise _map_service_error(err) from err
+    db.refresh(invoice)
+    return invoice
+
+
+# ------------------------------------------------------------------- manual line editing
+# NOTE: the `/lines/{line_id}/match` route above is a DISTINCT path from the bare
+# `/lines/{line_id}` below (no collision) — it is registered first to be safe.
+
+@router.post("/billing/invoices/{invoice_id}/lines", response_model=InvoiceDetailOut)
+def add_line(
+    invoice_id: int,
+    body: LineWriteBody,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SalesInvoice:
+    """Add a manual line item to an in-review invoice (OPERATE). A line needs a description;
+    the status is re-derived (MATCHED for a PO-less invoice, NEEDS_MATCH for a PO-linked one).
+    """
+    rbac.require_level(user, rbac.BILLING, Level.OPERATE)
+    invoice = _get_invoice(db, invoice_id)
+    try:
+        service.add_line(db, invoice, body.model_dump(), actor_uid=user.firebase_uid)
+    except service.BillingError as err:
+        raise _map_service_error(err) from err
+    db.refresh(invoice)
+    return invoice
+
+
+@router.patch(
+    "/billing/invoices/{invoice_id}/lines/{line_id}", response_model=InvoiceDetailOut
+)
+def update_line(
+    invoice_id: int,
+    line_id: int,
+    body: LineWriteBody,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SalesInvoice:
+    """Edit an existing invoice line (OPERATE, partial update — only supplied fields change).
+    Does not touch the line's PO-match state; the status is re-derived."""
+    rbac.require_level(user, rbac.BILLING, Level.OPERATE)
+    invoice = _get_invoice(db, invoice_id)
+    try:
+        service.update_line(
+            db, invoice, line_id, body.model_dump(exclude_unset=True),
+            actor_uid=user.firebase_uid)
+    except service.BillingError as err:
+        raise _map_service_error(err) from err
+    db.refresh(invoice)
+    return invoice
+
+
+@router.delete(
+    "/billing/invoices/{invoice_id}/lines/{line_id}", response_model=InvoiceDetailOut
+)
+def delete_line(
+    invoice_id: int,
+    line_id: int,
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> SalesInvoice:
+    """Delete one invoice line (OPERATE). Remaining lines keep their line_no; deleting the
+    last line drops the invoice back to EXTRACTED. The status is re-derived."""
+    rbac.require_level(user, rbac.BILLING, Level.OPERATE)
+    invoice = _get_invoice(db, invoice_id)
+    try:
+        service.delete_line(db, invoice, line_id, actor_uid=user.firebase_uid)
     except service.BillingError as err:
         raise _map_service_error(err) from err
     db.refresh(invoice)

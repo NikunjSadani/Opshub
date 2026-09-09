@@ -444,6 +444,103 @@ export function useManualMatch(): UseMutationResult<
 }
 
 /**
+ * A manual line-item write from the review screen's line editor. All fields are
+ * OPTIONAL on the wire except `description`, which the backend requires (non-empty) on
+ * an ADD. Money is INTEGER PAISE (`*_paise`), `quantity`/`gst_rate` are decimal STRINGS
+ * (e.g. "10.5" / "18"). The UI edits money in rupees and converts via `parseRupeesToPaise`
+ * before building this; it OMITS every key the operator left empty (a partial PATCH only
+ * touches the keys sent). Mirrors the backend LineWrite; these edits are pre-confirm and
+ * never touch the AR / PO rollup (only a CONFIRM does), so the hooks below do NOT run the
+ * cross-module invalidation.
+ */
+export interface LineWrite {
+  description?: string;
+  hsn_sac?: string;
+  quantity?: string;
+  unit?: string;
+  unit_rate_paise?: number;
+  taxable_paise?: number;
+  gst_rate?: string;
+  cgst_paise?: number;
+  sgst_paise?: number;
+  igst_paise?: number;
+  line_total_paise?: number;
+}
+
+/**
+ * Add a manual line item to a still-editable invoice (OPERATE, POST
+ * /billing/invoices/{id}/lines). Reachable even on a lineless (EXTRACTED) invoice — this
+ * is how it gets its first line. `description` is required + non-empty (backend 400s a
+ * blank add); 400s out-of-range money/qty/gst; 409s a non-editable invoice. Seeds the
+ * response detail into the cache and refreshes the register (the derived status may change).
+ */
+export function useAddInvoiceLine(): UseMutationResult<
+  BillingInvoiceDetail,
+  ApiError,
+  { invoiceId: string; body: LineWrite }
+> {
+  const { post } = useApi();
+  const qc = useQueryClient();
+  return useMutation<BillingInvoiceDetail, ApiError, { invoiceId: string; body: LineWrite }>({
+    mutationFn: ({ invoiceId, body }) =>
+      post<BillingInvoiceDetail>(`/billing/invoices/${invoiceId}/lines`, body),
+    onSuccess: (invoice) => {
+      qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}
+
+/**
+ * Edit one manual line item (OPERATE, PATCH /billing/invoices/{id}/lines/{lineId}). The
+ * body is a partial LineWrite — only the keys the operator set are sent. 400s out-of-range
+ * money/qty/gst; 404s an unknown line; 409s a non-editable invoice. Seeds the response
+ * detail into the cache and refreshes the register.
+ */
+export function useUpdateInvoiceLine(): UseMutationResult<
+  BillingInvoiceDetail,
+  ApiError,
+  { invoiceId: string; lineId: string; body: LineWrite }
+> {
+  const { patch } = useApi();
+  const qc = useQueryClient();
+  return useMutation<
+    BillingInvoiceDetail,
+    ApiError,
+    { invoiceId: string; lineId: string; body: LineWrite }
+  >({
+    mutationFn: ({ invoiceId, lineId, body }) =>
+      patch<BillingInvoiceDetail>(`/billing/invoices/${invoiceId}/lines/${lineId}`, body),
+    onSuccess: (invoice) => {
+      qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}
+
+/**
+ * Delete one manual line item (OPERATE, DELETE /billing/invoices/{id}/lines/{lineId} →
+ * the updated BillingInvoiceDetail). 404s an unknown line; 409s a non-editable invoice.
+ * Seeds the response detail into the cache and refreshes the register.
+ */
+export function useDeleteInvoiceLine(): UseMutationResult<
+  BillingInvoiceDetail,
+  ApiError,
+  { invoiceId: string; lineId: string }
+> {
+  const { del } = useApi();
+  const qc = useQueryClient();
+  return useMutation<BillingInvoiceDetail, ApiError, { invoiceId: string; lineId: string }>({
+    mutationFn: ({ invoiceId, lineId }) =>
+      del<BillingInvoiceDetail>(`/billing/invoices/${invoiceId}/lines/${lineId}`),
+    onSuccess: (invoice) => {
+      qc.setQueryData(billingInvoiceKeys.detail(invoice.id), invoice);
+      void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
+    },
+  });
+}
+
+/**
  * Assign / change / clear the direct project attribution on a PO-less, still-editable
  * invoice (OPERATE, PATCH /billing/invoices/{id}/project). The argument is the project's
  * numeric id, or null to clear (fall back to unattributed); the backend 400s unless it is
