@@ -12,11 +12,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.modules.sales_orders import po_routes, products_routes, quote_routes
+from app.modules.sales_orders import (
+    po_routes,
+    products_routes,
+    project_products_routes,
+    quote_routes,
+)
 
 MODULE_KEY = "sales_orders"
 
 router = APIRouter()
 router.include_router(products_routes.router)
+router.include_router(project_products_routes.router)
 router.include_router(po_routes.router)
 router.include_router(quote_routes.router)

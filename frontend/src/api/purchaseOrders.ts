@@ -362,15 +362,27 @@ export function usePurchaseOrderQuery(id: string | null): UseQueryResult<PODetai
  * `/products?q=<query>&active=true&limit=200`. An empty query loads the first page.
  * `keepPreviousData` keeps the last results on screen while the next page loads so the
  * list doesn't flicker as the operator types.
+ *
+ * Optional `projectId` scopes the picker to a project's TAGGED (curated) products: when
+ * it's a non-empty string it's appended as `project_id`, and the backend returns only
+ * that project's tagged active products while the query is EMPTY, falling back to the
+ * full catalogue as soon as the operator types. It's part of the query key so a scoped
+ * result never cross-contaminates the unscoped (any-catalogue) cache. Omit it for a
+ * plain full-catalogue search — existing callers keep working unchanged.
  */
-export function useProductSearch(query: string): UseQueryResult<PickerProduct[], Error> {
+export function useProductSearch(
+  query: string,
+  projectId?: string,
+): UseQueryResult<PickerProduct[], Error> {
   const { get } = useApi();
   const q = query.trim();
+  const pid = projectId?.trim() ?? '';
   return useQuery<PickerProduct[], Error>({
-    queryKey: [...poKeys.products, 'search', q] as const,
+    queryKey: [...poKeys.products, 'search', q, pid] as const,
     queryFn: ({ signal }) => {
       const params = new URLSearchParams({ active: 'true', limit: '200' });
       if (q) params.set('q', q);
+      if (pid) params.set('project_id', pid);
       return get<PickerProduct[]>(`/products?${params.toString()}`, signal);
     },
     placeholderData: (prev) => prev,

@@ -71,6 +71,9 @@ ACTION_CATALOG: dict[str, _ModuleReq | _PlatformReq] = {
     "po.short_close": _ModuleReq(SALES_ORDERS, Level.MANAGE),
     "po.void": _ModuleReq(SALES_ORDERS, Level.MANAGE),
     "product.manage": _ModuleReq(SALES_ORDERS, Level.MANAGE),
+    # Tagging a product to a project curates that project's PO product picker — an
+    # operational curation feeding PO entry (not a master edit), so OPERATE like po.create.
+    "product.tag": _ModuleReq(SALES_ORDERS, Level.OPERATE),
     "quote.search": _ModuleReq(SALES_ORDERS, Level.VIEW),
     # --- Billing / AR (client invoice capture, payments, advances) ---
     "invoice.upload": _ModuleReq(BILLING, Level.OPERATE),

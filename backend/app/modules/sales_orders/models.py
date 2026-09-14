@@ -101,6 +101,33 @@ class Product(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class ProjectProduct(Base):
+    """Tags a Product to a Project (M:N) — curates that project's PO product picker.
+
+    A product is a SHARED master reused across clients/projects, so this is a tag link,
+    never a re-parenting: one product can be tagged to many projects and vice-versa.
+    Cross-module: `project_id` references `project.id` by id (no ORM relationship, per the
+    module-boundary rule); the tagged product IS same-module, so it maps a relationship.
+    Both FKs cascade on delete so a hard-deleted project/product drops its tag rows."""
+
+    __tablename__ = "project_product"
+    __table_args__ = (
+        UniqueConstraint("project_id", "product_id", name="uq_project_product"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), index=True
+    )
+    product_id: Mapped[int] = mapped_column(
+        ForeignKey("product.id", ondelete="CASCADE"), index=True
+    )
+    created_by: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    product: Mapped[Product] = relationship()
+
+
 class PurchaseOrder(Base):
     """A client's purchase order. `po_number` is the client's own reference."""
 

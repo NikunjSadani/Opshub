@@ -1,26 +1,62 @@
-import { type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   Badge,
+  Button,
   ErrorState,
   Loading,
   PageHeader,
+  SearchableSelect,
   StatePanel,
   Table,
   Td,
   THead,
   Th,
   Tr,
+  useToast,
+  type SearchableSelectOption,
 } from '../../ui';
+import { ApiError } from '../../api/client';
+import { usePermissions } from '../../auth/AuthProvider';
 import { useProjectQuery } from '../../api/projects';
 import {
   PO_STATUS_LABEL,
   PO_STATUS_TONE,
+  useProductSearch,
   usePurchaseOrdersQuery,
+  type PickerProduct,
   type POStatus,
 } from '../../api/purchaseOrders';
+import {
+  useProjectProductsQuery,
+  useTagProduct,
+  useUntagProduct,
+} from '../../api/projectProducts';
+import type { Product } from '../../api/products';
 import { SALES_ORDERS_BASE, rupees } from '../sales_orders/salesOrdersFormat';
 import { formatDate, PROJECT_STATUS_LABEL, PROJECT_STATUS_TONE } from './projectsFormat';
+
+/** Pull a human string out of any thrown value — never "[object Object]". */
+function errorMessage(err: unknown): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error) return err.message;
+  return 'Something went wrong.';
+}
+
+/** A concise, stable label for a product in the picker (mirrors POForm's). */
+function productLabel(p: PickerProduct): string {
+  return `${p.code ? `${p.code} — ` : ''}${p.name}${p.brand ? ` (${p.brand})` : ''}`;
+}
+
+/** Debounce a rapidly-changing value (the product-search query) by `delay` ms. */
+function useDebounced<T>(value: T, delay = 250): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
 
 const PROJECTS_BASE = '/m/projects';
 
@@ -123,6 +159,8 @@ export function ProjectDetail() {
 
       <h2 className="mb-2 text-sm font-semibold text-slate-900">Purchase orders</h2>
       <PurchaseOrdersSection projectId={id} />
+
+      <ProductsSection projectId={id} />
     </div>
   );
 }
@@ -191,5 +229,188 @@ function PurchaseOrdersSection({ projectId }: { projectId: string }) {
         {rows.length >= PROJECT_POS_LIMIT && ` (first ${PROJECT_POS_LIMIT} — narrow via the register)`}
       </p>
     </>
+  );
+}
+
+/**
+ * The project's tagged-products curation. Reads need `sales_orders` VIEW (the whole
+ * section is HIDDEN, not 403'd, for a user without it); tagging/removing need OPERATE
+ * (server-enforced `product.tag`). The tagged list includes inactive products, badged
+ * accordingly. The Add picker searches the FULL catalogue (no project scope) so an
+ * operator can tag any product.
+ */
+function ProductsSection({ projectId }: { projectId: string }) {
+  const perms = usePermissions();
+  const canView = perms.canAccessModule('sales_orders');
+  const canOperate = perms.atLeast('sales_orders', 'OPERATE');
+  const toast = useToast();
+
+  // Disabled (never fetched) when the user lacks VIEW, so we hide rather than 403.
+  const query = useProjectProductsQuery(canView ? projectId : null);
+  const tag = useTagProduct(projectId);
+  const untag = useUntagProduct(projectId);
+  // Which product row's Remove is in flight — so only that button shows a spinner and the
+  // others stay usable (a single shared pending flag would disable every row at once).
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+  if (!canView) return null;
+
+  // The ids already tagged — excluded from the Add picker so a product can't be double-added.
+  const taggedIds = new Set((query.data ?? []).map((p) => p.id));
+
+  const handleTag = (productId: string) => {
+    if (!productId) return;
+    tag.mutate(productId, {
+      onSuccess: (p) => toast.success(`Tagged ${p.name}.`),
+      onError: (err) => toast.error(errorMessage(err)),
+    });
+  };
+  const handleUntag = (product: Product) => {
+    setRemovingId(product.id);
+    untag.mutate(product.id, {
+      onSuccess: () => toast.success(`Removed ${product.name}.`),
+      onError: (err) => toast.error(errorMessage(err)),
+      onSettled: () => setRemovingId(null),
+    });
+  };
+
+  return (
+    <section className="mt-8">
+      <h2 className="mb-2 text-sm font-semibold text-slate-900">Tagged products</h2>
+
+      {canOperate && (
+        <div className="mb-3 max-w-md">
+          <AddProductPicker onSelect={handleTag} disabled={tag.isPending} excludeIds={taggedIds} />
+        </div>
+      )}
+
+      <ProductsTable
+        query={query}
+        canOperate={canOperate}
+        onRemove={handleUntag}
+        removingId={removingId}
+      />
+    </section>
+  );
+}
+
+/** The tagged-products table (Code / Name / Brand / Category / UOM), with loading /
+ * error / empty states mirroring the Purchase orders section. */
+function ProductsTable({
+  query,
+  canOperate,
+  onRemove,
+  removingId,
+}: {
+  query: ReturnType<typeof useProjectProductsQuery>;
+  canOperate: boolean;
+  onRemove: (product: Product) => void;
+  removingId: string | null;
+}) {
+  if (query.isPending) return <Loading label="Loading products…" />;
+  if (query.isError) {
+    return <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
+  }
+
+  const rows = query.data ?? [];
+  if (rows.length === 0) {
+    return (
+      <StatePanel title="No products">
+        {canOperate
+          ? 'No products tagged to this project yet — use “Add product” above to tag one.'
+          : 'No products tagged to this project yet.'}
+      </StatePanel>
+    );
+  }
+
+  return (
+    <Table>
+      <THead>
+        <Tr>
+          <Th>Code</Th>
+          <Th>Name</Th>
+          <Th>Brand</Th>
+          <Th>Category</Th>
+          <Th>UOM</Th>
+          {canOperate && <Th className="text-right">Actions</Th>}
+        </Tr>
+      </THead>
+      <tbody>
+        {rows.map((p) => (
+          <Tr key={p.id}>
+            <Td className="font-mono text-slate-700">{p.code ?? '—'}</Td>
+            <Td className="text-slate-900">
+              <span className="font-medium">{p.name}</span>
+              {p.active === false && (
+                <span className="ml-2">
+                  <Badge tone="slate">Inactive</Badge>
+                </span>
+              )}
+            </Td>
+            <Td>{p.brand ?? '—'}</Td>
+            <Td>{p.category ?? '—'}</Td>
+            <Td>{p.uom}</Td>
+            {canOperate && (
+              <Td>
+                <div className="flex justify-end">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    aria-label={`Remove ${p.name}`}
+                    loading={removingId === p.id}
+                    disabled={removingId === p.id}
+                    onClick={() => onRemove(p)}
+                    className="text-rose-600 hover:bg-rose-50"
+                  >
+                    Remove
+                  </Button>
+                </div>
+              </Td>
+            )}
+          </Tr>
+        ))}
+      </tbody>
+    </Table>
+  );
+}
+
+/** The "Add product" combobox — SERVER-searched over the FULL catalogue (no project
+ * scope) so any product can be tagged. Selecting a product tags it; the picker's own
+ * value stays cleared so it reads as an "add" action. */
+function AddProductPicker({
+  onSelect,
+  disabled,
+  excludeIds,
+}: {
+  onSelect: (productId: string) => void;
+  disabled?: boolean;
+  /** Product ids already tagged — filtered out so a product can't be double-added. */
+  excludeIds: Set<string>;
+}) {
+  const [queryText, setQueryText] = useState('');
+  const debounced = useDebounced(queryText, 250);
+  // No projectId → full catalogue (the operator may tag ANY product).
+  const search = useProductSearch(debounced);
+  const products = useMemo(() => search.data ?? [], [search.data]);
+
+  const options = useMemo<SearchableSelectOption[]>(
+    () =>
+      products
+        .filter((p) => !excludeIds.has(p.id))
+        .map((p) => ({ value: p.id, label: productLabel(p) })),
+    [products, excludeIds],
+  );
+
+  return (
+    <SearchableSelect
+      label="Add product"
+      value={null}
+      onChange={onSelect}
+      onQueryChange={setQueryText}
+      options={options}
+      disabled={disabled}
+      placeholder="Search products to tag…"
+      hint={search.isFetching ? 'Searching…' : 'Tag any catalogue product to this project.'}
+    />
   );
 }

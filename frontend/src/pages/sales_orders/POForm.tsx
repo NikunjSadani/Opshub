@@ -196,7 +196,10 @@ export function POForm() {
   // the latest result page.
   const [productQuery, setProductQuery] = useState('');
   const debouncedProductQuery = useDebounced(productQuery, 250);
-  const productsQuery = useProductSearch(debouncedProductQuery);
+  // Scope the picker to the chosen project's TAGGED products: with an empty query the
+  // backend returns just this project's curated set; typing falls back to the full
+  // catalogue. Empty projectId ('' before a project is chosen) → unscoped full search.
+  const productsQuery = useProductSearch(debouncedProductQuery, projectId);
   const products = useMemo(() => productsQuery.data ?? [], [productsQuery.data]);
   const [selectedProducts, setSelectedProducts] = useState<Record<string, PickerProduct>>({});
 
@@ -583,7 +586,13 @@ export function POForm() {
                         onChange={(id) => selectProduct(line.key, id)}
                         onQueryChange={setProductQuery}
                         placeholder="Search products…"
-                        hint={productsQuery.isFetching ? 'Searching…' : undefined}
+                        hint={
+                          productsQuery.isFetching
+                            ? 'Searching…'
+                            : projectId
+                              ? 'Type to search all products'
+                              : undefined
+                        }
                       />
                     </div>
                     <TextField

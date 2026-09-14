@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { AuthProvider } from '../../auth/AuthProvider';
@@ -14,7 +14,8 @@ function json(data: unknown, status = 200) {
   });
 }
 
-/** `GET /me` granting VIEW on projects (reads only need VIEW). */
+/** `GET /me` granting VIEW on projects (reads only need VIEW). No sales_orders access,
+ * so the "Products" section stays hidden and never fetches `/project-products`. */
 function meResponse(): Response {
   return json({
     id: 1,
@@ -27,6 +28,46 @@ function meResponse(): Response {
     platform: [],
   });
 }
+
+/** `GET /me` granting projects VIEW + sales_orders OPERATE — sees the Products section
+ * and may tag/remove (backend gates `product.tag` at OPERATE). */
+function meResponseOperate(): Response {
+  return json({
+    id: 1,
+    email: 'op@example.com',
+    name: 'Olga Operator',
+    role_id: 3,
+    role_name: 'Sales Operator',
+    is_administrator: false,
+    module_levels: { projects: 'VIEW', sales_orders: 'OPERATE' },
+    platform: [],
+  });
+}
+
+const PROD_A = {
+  id: 21,
+  code: 'P-A',
+  name: 'Alpha Widget',
+  brand: 'Acme',
+  model_number: null,
+  category: 'Widgets',
+  uom: 'PCS',
+  hsn: null,
+  active: true,
+  created_at: '2026-01-01T00:00:00Z',
+};
+const PROD_B = {
+  id: 22,
+  code: 'P-B',
+  name: 'Beta Gadget',
+  brand: 'Beta',
+  model_number: null,
+  category: 'Gadgets',
+  uom: 'PCS',
+  hsn: null,
+  active: true,
+  created_at: '2026-01-01T00:00:00Z',
+};
 
 const PROJECT = {
   id: 11,
@@ -149,5 +190,97 @@ describe('ProjectDetail', () => {
     expect(
       await screen.findByText('No purchase orders for this project yet.'),
     ).toBeInTheDocument();
+  });
+
+  it('hides the Products section for a user without sales_orders access', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.match(/\/purchase-orders\?/) && url.includes('project_id=11')) return json([]);
+        if (url.match(/\/projects\/11$/)) return json(PROJECT);
+        if (url.endsWith('/me')) return meResponse();
+        // A `/project-products` call here would mean we failed to hide the section.
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderDetail(<ProjectDetail />);
+
+    expect(await screen.findByText('BRI-001')).toBeInTheDocument();
+    // Purchase orders heading is present; the Tagged products section is not.
+    expect(screen.getByText('Purchase orders')).toBeInTheDocument();
+    expect(screen.queryByText('Tagged products')).not.toBeInTheDocument();
+  });
+
+  it('renders tagged products and lets an OPERATE user tag then remove one', async () => {
+    // The project's tagged set, mutated by POST/DELETE so a refetch reflects the change.
+    const tagged: Array<typeof PROD_A> = [PROD_A];
+    const catalogue = [PROD_A, PROD_B];
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/me')) return meResponseOperate();
+      if (url.match(/\/projects\/11$/)) return json(PROJECT);
+      if (url.match(/\/purchase-orders\?/)) return json([]);
+      // Order matters: match `/project-products` BEFORE `/products` (substring overlap).
+      if (url.match(/\/project-products\?/) && method === 'GET') return json(tagged.slice());
+      if (url.match(/\/project-products$/) && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { project_id: number; product_id: number };
+        const prod = catalogue.find((p) => p.id === body.product_id) ?? PROD_B;
+        if (!tagged.some((t) => t.id === prod.id)) tagged.push(prod);
+        return json(prod, 201);
+      }
+      const del = url.match(/\/project-products\/11\/(\d+)$/);
+      if (del && method === 'DELETE') {
+        const pid = Number(del[1]);
+        const idx = tagged.findIndex((t) => t.id === pid);
+        if (idx >= 0) tagged.splice(idx, 1);
+        return json({ deleted: true });
+      }
+      // The add-picker's full-catalogue search (no project scope).
+      if (url.match(/\/products\?/) && method === 'GET') return json(catalogue.slice());
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderDetail(<ProjectDetail />);
+
+    // The section renders with the already-tagged product.
+    expect(await screen.findByText('Tagged products')).toBeInTheDocument();
+    expect(await screen.findByText('Alpha Widget')).toBeInTheDocument();
+
+    // Tag Beta Gadget via the picker: focus opens the list, mousedown commits.
+    const combo = screen.getByRole('combobox', { name: /add product/i });
+    fireEvent.focus(combo);
+    const option = await screen.findByText('P-B — Beta Gadget (Beta)');
+    fireEvent.mouseDown(option);
+
+    // POST body carries numeric project_id + product_id (the fixed wire contract).
+    await waitFor(() => {
+      const post = fetchMock.mock.calls.find(
+        (c) => String(c[0]).endsWith('/project-products') && (c[1]?.method ?? 'GET') === 'POST',
+      );
+      expect(post).toBeTruthy();
+      expect(JSON.parse(String(post?.[1]?.body))).toEqual({ project_id: 11, product_id: 22 });
+    });
+
+    // After invalidation + refetch, the newly tagged product appears in the table.
+    expect(await screen.findByText('Beta Gadget')).toBeInTheDocument();
+
+    // Remove Alpha Widget: its row's Remove button DELETEs, then it disappears.
+    const alphaRow = screen.getByText('Alpha Widget').closest('tr') as HTMLElement;
+    fireEvent.click(within(alphaRow).getByRole('button', { name: /remove/i }));
+
+    await waitFor(() => {
+      const delCall = fetchMock.mock.calls.find(
+        (c) =>
+          String(c[0]).match(/\/project-products\/11\/21$/) &&
+          (c[1]?.method ?? 'GET') === 'DELETE',
+      );
+      expect(delCall).toBeTruthy();
+    });
+    await waitFor(() => expect(screen.queryByText('Alpha Widget')).not.toBeInTheDocument());
   });
 });

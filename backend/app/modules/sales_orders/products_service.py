@@ -23,7 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.modules.sales_orders.models import Product
+from app.modules.sales_orders.models import Product, ProjectProduct
 from app.platform import audit
 
 _MAX_NAME_LEN = 200
@@ -169,17 +169,50 @@ def list_products(
     active: bool | None = None,
     limit: int = 50,
     offset: int = 0,
+    project_id: int | None = None,
 ) -> list[Product]:
     """List/search products. `q` is a LIKE-escaped substring across name/brand/
-    model_number; `category` and `active` are exact filters. Newest first."""
-    stmt = select(Product).order_by(Product.id.desc())
-    if q:
-        like = f"%{_escape_like(q.strip())}%"
-        stmt = stmt.where(
-            Product.name.ilike(like, escape="\\")
-            | Product.brand.ilike(like, escape="\\")
-            | Product.model_number.ilike(like, escape="\\")
+    model_number; `category` and `active` are exact filters.
+
+    Picker curation: when `project_id` is given AND `q` is empty/blank AND that project
+    has at least one tagged product, this returns ONLY that project's TAGGED products
+    (still honoring `active`/`category`), ordered by name — the "curated default" an empty
+    search box shows on a project's PO form. A project with NO tags falls back to the full
+    catalogue, so an untagged project's picker behaves exactly like the un-scoped catalogue
+    (the curation only NARROWS a picker once the project is tagged — no rollout regression
+    where every existing project would otherwise open an empty picker). In every other case
+    (a non-blank `q`, or no `project_id`) behavior is unchanged: the FULL catalogue is
+    searched (newest first), keeping every product reachable by typing.
+    """
+    curated = project_id is not None and not (q and q.strip())
+    if curated:
+        # Only curate when the project actually has tags — else fall through to the full
+        # catalogue (untagged project == plain picker; no empty-dropdown rollout cliff).
+        has_tags = (
+            db.execute(
+                select(ProjectProduct.id)
+                .where(ProjectProduct.project_id == project_id)
+                .limit(1)
+            ).first()
+            is not None
         )
+        curated = has_tags
+    if curated:
+        stmt = (
+            select(Product)
+            .join(ProjectProduct, ProjectProduct.product_id == Product.id)
+            .where(ProjectProduct.project_id == project_id)
+            .order_by(Product.name)
+        )
+    else:
+        stmt = select(Product).order_by(Product.id.desc())
+        if q:
+            like = f"%{_escape_like(q.strip())}%"
+            stmt = stmt.where(
+                Product.name.ilike(like, escape="\\")
+                | Product.brand.ilike(like, escape="\\")
+                | Product.model_number.ilike(like, escape="\\")
+            )
     if category:
         stmt = stmt.where(func.lower(Product.category) == category.strip().lower())
     if active is not None:

@@ -88,10 +88,12 @@ def list_products(
     active: Annotated[bool | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    project_id: Annotated[int | None, Query()] = None,
 ) -> list[Product]:
     _require_view(user)
     return service.list_products(
-        db, q=q, category=category, active=active, limit=limit, offset=offset
+        db, q=q, category=category, active=active, limit=limit, offset=offset,
+        project_id=project_id,
     )
 
 
