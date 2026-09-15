@@ -330,6 +330,49 @@ describe('InvoiceUpload', () => {
     expect((postedForm as unknown as FormData).get('client_id')).toBe('1');
   });
 
+  it('surfaces the duplicate list (not a bare error) when the WHOLE batch is a 409', async () => {
+    // When every file is a duplicate the backend returns 409 — but its body still carries
+    // the per-file outcomes. The screen must show the friendly "matched an existing invoice"
+    // list (with a link to the original), not a raw "Upload failed: 409".
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.includes('/billing/invoices') && method === 'POST') {
+          return json(
+            {
+              batch_id: 8,
+              invoice_count: 1,
+              outcomes: [
+                { file_id: 1, filename: 'dupe.pdf', invoice_id: null, status: 'DUPLICATE', duplicate_of: 99, buyer_gstin: null, invoice_number: 'CINV-OLD', grand_total_paise: 250000, review_reasons: [], message: null },
+              ],
+            },
+            409,
+          );
+        }
+        if (url.includes('/purchase-orders')) return json(PURCHASE_ORDERS);
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.includes('/projects')) return json(PROJECTS);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<InvoiceUpload />);
+    const input = document.getElementById('billing-files') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(['x'], 'dupe.pdf', { type: 'application/pdf' })] },
+    });
+    await pickCombo(/client/i, /BRI — Britannia/i);
+    fireEvent.click(screen.getByRole('button', { name: /upload 1 file/i }));
+
+    // The duplicate row + the existing-invoice link render — the 409 was handled as a result.
+    expect(await screen.findByText('dupe.pdf')).toBeInTheDocument();
+    expect(screen.getByText('Duplicate')).toBeInTheDocument();
+    expect(screen.getByText(/Matches existing invoice CINV-OLD/i)).toBeInTheDocument();
+  });
+
   it('with a client and no PO, shows the ACTIVE-project picker and sends the chosen project_id', async () => {
     let postedForm: FormData | null = null;
     vi.stubGlobal(

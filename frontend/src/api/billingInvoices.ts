@@ -350,14 +350,32 @@ export function useUploadBillingInvoices(): UseMutationResult<
   const { postForm } = useApi();
   const qc = useQueryClient();
   return useMutation<BillingUploadBatch, ApiError, BillingUploadArgs>({
-    mutationFn: ({ files, clientId, poId, projectId }) => {
+    mutationFn: async ({ files, clientId, poId, projectId }) => {
       const form = new FormData();
       for (const f of files) form.append('files', f);
       form.append('client_id', clientId);
       if (poId) form.append('po_id', poId);
       // A PO already carries the project; only a PO-less batch sends a direct attribution.
       if (!poId && projectId) form.append('project_id', projectId);
-      return postForm<BillingUploadBatch>('/billing/invoices', form);
+      try {
+        return await postForm<BillingUploadBatch>('/billing/invoices', form);
+      } catch (err) {
+        // When the WHOLE batch is duplicates the backend returns 409 — but the body still
+        // carries the per-file outcomes (each DUPLICATE, with the existing invoice's id).
+        // Surface it as a normal result so the screen shows the friendly "matched an existing
+        // invoice — resolve below" list (with a link to the original) rather than a bare
+        // "Upload failed: 409". Any other 409 (or a 409 without outcomes) still throws.
+        if (
+          err instanceof ApiError &&
+          err.status === 409 &&
+          err.body != null &&
+          typeof err.body === 'object' &&
+          Array.isArray((err.body as { outcomes?: unknown }).outcomes)
+        ) {
+          return err.body as BillingUploadBatch;
+        }
+        throw err;
+      }
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: billingInvoiceKeys.all });
