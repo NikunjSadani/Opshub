@@ -342,8 +342,9 @@ describe('InvoiceUpload', () => {
         if (url.includes('/billing/invoices') && method === 'POST') {
           return json(
             {
+              // An all-duplicate batch persists nothing, so the backend reports count 0.
               batch_id: 8,
-              invoice_count: 1,
+              invoice_count: 0,
               outcomes: [
                 { file_id: 1, filename: 'dupe.pdf', invoice_id: null, status: 'DUPLICATE', duplicate_of: 99, buyer_gstin: null, invoice_number: 'CINV-OLD', grand_total_paise: 250000, review_reasons: [], message: null },
               ],

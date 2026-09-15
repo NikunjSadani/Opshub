@@ -364,15 +364,14 @@ export function useUploadBillingInvoices(): UseMutationResult<
         // carries the per-file outcomes (each DUPLICATE, with the existing invoice's id).
         // Surface it as a normal result so the screen shows the friendly "matched an existing
         // invoice — resolve below" list (with a link to the original) rather than a bare
-        // "Upload failed: 409". Any other 409 (or a 409 without outcomes) still throws.
-        if (
-          err instanceof ApiError &&
-          err.status === 409 &&
-          err.body != null &&
-          typeof err.body === 'object' &&
-          Array.isArray((err.body as { outcomes?: unknown }).outcomes)
-        ) {
-          return err.body as BillingUploadBatch;
+        // "Upload failed: 409". Any other 409 (or a 409 without a NON-EMPTY outcomes list)
+        // still throws — requiring ≥1 outcome guards `confirmReplace`'s `outcomes[0]` against a
+        // hypothetical empty-body 409.
+        if (err instanceof ApiError && err.status === 409 && err.body != null && typeof err.body === 'object') {
+          const body = err.body as { outcomes?: unknown };
+          if (Array.isArray(body.outcomes) && body.outcomes.length > 0) {
+            return body as BillingUploadBatch;
+          }
         }
         throw err;
       }
