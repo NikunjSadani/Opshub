@@ -10,6 +10,7 @@ the `uq_project_product` unique constraint and the FK cascades are genuinely tes
 from __future__ import annotations
 
 from collections.abc import Iterator
+from decimal import Decimal
 
 import pytest
 from fastapi import FastAPI
@@ -122,18 +123,18 @@ def test_tag_then_list_and_idempotent(client: TestClient) -> None:
 
     r = client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
     assert r.status_code == 201, r.text
-    assert r.json()["id"] == pid
+    assert r.json()["product_id"] == pid
 
     listed = client.get("/api/v1/project-products", params={"project_id": proj})
     assert listed.status_code == 200
-    assert [p["id"] for p in listed.json()] == [pid]
+    assert [p["product_id"] for p in listed.json()] == [pid]
 
     # Re-tagging the same pair is idempotent: 200 (not 201), still exactly one row.
     again = client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
     assert again.status_code == 200, again.text
-    assert again.json()["id"] == pid
+    assert again.json()["product_id"] == pid
     listed2 = client.get("/api/v1/project-products", params={"project_id": proj})
-    assert [p["id"] for p in listed2.json()] == [pid]
+    assert [p["product_id"] for p in listed2.json()] == [pid]
 
 
 def test_untag_is_idempotent(client: TestClient) -> None:
@@ -217,7 +218,7 @@ def test_picker_respects_active_but_management_list_shows_all(client: TestClient
     assert picker.json() == []
     # Management list shows ALL tags including inactive (FE marks them).
     mgmt = client.get("/api/v1/project-products", params={"project_id": proj})
-    assert [p["id"] for p in mgmt.json()] == [inactive]
+    assert [p["product_id"] for p in mgmt.json()] == [inactive]
     assert mgmt.json()[0]["active"] is False
 
 
@@ -264,3 +265,236 @@ def test_operator_can_tag_and_untag(client: TestClient) -> None:
     assert tag.status_code == 201, tag.text
     untag = client.delete(f"/api/v1/project-products/{proj}/{pid}")
     assert untag.status_code == 200 and untag.json() == {"deleted": True}
+
+
+# --------------------------------------------------------------- pricing template
+
+# A full template; `sell_price_paise`/`freight_paise` are the ADMIN-ONLY actuals.
+_TEMPLATE: dict[str, object] = {
+    "description": "Diwali Mixer",
+    "uom": "PCS",
+    "cost_price_paise": 3000,
+    "original_cost_price_paise": 3200,
+    "client_sell_price_paise": 5000,
+    "vendor_sell_price_paise": 4800,
+    "sell_price_paise": 6000,        # ACTUAL — admin-only
+    "client_freight_paise": 50,
+    "vendor_freight_paise": 40,
+    "freight_paise": 99,             # ACTUAL — admin-only
+    "packaging_paise": 10,
+    "handling_paise": 20,
+    "other_paise": 5,
+    "tax_rate": "18",
+}
+
+
+def _sole(client: TestClient, proj: int) -> dict[str, object]:
+    """The single tag row on `proj` (as the current caller sees it — masked or not)."""
+    rows = client.get("/api/v1/project-products", params={"project_id": proj}).json()
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_tag_with_pricing_returns_fields_and_idempotent_no_overwrite(client: TestClient) -> None:
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Diwali Mixer")
+
+    r = client.post(
+        "/api/v1/project-products",
+        json={"project_id": proj, "product_id": pid, **_TEMPLATE},
+    )
+    assert r.status_code == 201, r.text
+    row = r.json()
+    assert row["product_id"] == pid
+    assert row["name"] == "Diwali Mixer"      # joined product identity
+    assert row["active"] is True
+    assert row["cost_price_paise"] == 3000
+    assert row["client_sell_price_paise"] == 5000
+    assert row["sell_price_paise"] == 6000    # admin sees the actual
+    assert row["freight_paise"] == 99
+    assert row["packaging_paise"] == 10
+    assert Decimal(str(row["tax_rate"])) == Decimal("18")
+
+    got = _sole(client, proj)
+    assert got["cost_price_paise"] == 3000
+    assert got["other_paise"] == 5
+
+    # Re-tag with DIFFERENT pricing -> idempotent 200, ORIGINAL fields untouched.
+    again = client.post(
+        "/api/v1/project-products",
+        json={"project_id": proj, "product_id": pid,
+              "cost_price_paise": 111, "sell_price_paise": 222},
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["cost_price_paise"] == 3000   # NOT overwritten by the re-tag
+    assert again.json()["sell_price_paise"] == 6000   # NOT overwritten
+
+
+def test_patch_updates_subset_leaves_rest(client: TestClient) -> None:
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Kettle")
+    client.post("/api/v1/project-products",
+                json={"project_id": proj, "product_id": pid, **_TEMPLATE})
+
+    r = client.patch(f"/api/v1/project-products/{proj}/{pid}",
+                     json={"cost_price_paise": 3500, "tax_rate": "12"})
+    assert r.status_code == 200, r.text
+    row = r.json()
+    assert row["cost_price_paise"] == 3500              # changed
+    assert Decimal(str(row["tax_rate"])) == Decimal("12")
+    assert row["client_sell_price_paise"] == 5000       # untouched
+    assert row["packaging_paise"] == 10                 # untouched
+    assert row["sell_price_paise"] == 6000              # untouched actual (admin sees)
+
+
+def test_patch_non_tagged_is_404(client: TestClient) -> None:
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Never Tagged")
+    r = client.patch(f"/api/v1/project-products/{proj}/{pid}",
+                     json={"cost_price_paise": 1})
+    assert r.status_code == 404, r.text
+
+
+# --------------------------------------------------------------- actual masking
+
+def test_actuals_masked_for_non_admin_read(client: TestClient) -> None:
+    """A non-admin (OPERATE, no platform IAM) reads the two ACTUAL fields as null while
+    every visible tier shows; an admin sees the actuals."""
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Masked Mixer")
+    client.post("/api/v1/project-products",
+                json={"project_id": proj, "product_id": pid, **_TEMPLATE})
+
+    admin_row = _sole(client, proj)
+    assert admin_row["sell_price_paise"] == 6000       # admin: actual visible
+    assert admin_row["freight_paise"] == 99
+
+    _as(client, "operator")  # OPERATE, but NOT platform IAM -> non-admin
+    row = _sole(client, proj)
+    assert row["sell_price_paise"] is None             # ACTUAL masked
+    assert row["freight_paise"] is None                # ACTUAL freight masked
+    assert row["client_sell_price_paise"] == 5000      # visible tier present
+    assert row["vendor_sell_price_paise"] == 4800
+    assert row["cost_price_paise"] == 3000
+    assert row["client_freight_paise"] == 50
+    assert row["packaging_paise"] == 10
+
+
+def test_non_admin_write_of_actuals_is_dropped(client: TestClient) -> None:
+    """A non-admin's actual sell/freight is DROPPED on both POST and PATCH (never
+    persisted); an admin can set them and a non-admin's later edit can't clear them."""
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "NonAdmin Write")  # admin creates it (product.manage)
+
+    # Non-admin tags WITH actuals -> dropped (response masked + not persisted).
+    _as(client, "operator")
+    r = client.post(
+        "/api/v1/project-products",
+        json={"project_id": proj, "product_id": pid,
+              "cost_price_paise": 3000, "client_sell_price_paise": 5000,
+              "sell_price_paise": 9999, "freight_paise": 7777},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["sell_price_paise"] is None        # masked in the response
+
+    _as(client, "admin")  # only an admin can see the stored actual
+    row = _sole(client, proj)
+    assert row["sell_price_paise"] is None              # non-admin write was NOT persisted
+    assert row["freight_paise"] is None
+    assert row["cost_price_paise"] == 3000              # visible field DID persist
+    assert row["client_sell_price_paise"] == 5000
+
+    # Admin sets the real actuals.
+    client.patch(f"/api/v1/project-products/{proj}/{pid}",
+                 json={"sell_price_paise": 6000, "freight_paise": 99})
+    row = _sole(client, proj)
+    assert row["sell_price_paise"] == 6000
+    assert row["freight_paise"] == 99
+
+    # Non-admin PATCH tries to CHANGE the actuals -> dropped; admin's value survives,
+    # while a visible field the non-admin sends DOES update.
+    _as(client, "operator")
+    resp = client.patch(f"/api/v1/project-products/{proj}/{pid}",
+                        json={"sell_price_paise": 1, "freight_paise": 2,
+                              "cost_price_paise": 4000})
+    assert resp.status_code == 200, resp.text
+    _as(client, "admin")
+    row = _sole(client, proj)
+    assert row["sell_price_paise"] == 6000             # unchanged (non-admin actual dropped)
+    assert row["freight_paise"] == 99                  # unchanged
+    assert row["cost_price_paise"] == 4000             # visible edit applied
+
+
+# --------------------------------------------------------------- bounds + RBAC
+
+def test_negative_money_is_422(client: TestClient) -> None:
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Neg Money")
+    r = client.post("/api/v1/project-products",
+                    json={"project_id": proj, "product_id": pid, "cost_price_paise": -1})
+    assert r.status_code == 422, r.text
+
+
+def test_tax_rate_over_100_is_422(client: TestClient) -> None:
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Bad Tax")
+    client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
+    r = client.patch(f"/api/v1/project-products/{proj}/{pid}", json={"tax_rate": "150"})
+    assert r.status_code == 422, r.text
+
+
+def test_over_scale_tax_is_422_not_silently_rounded(client: TestClient) -> None:
+    # tax_rate is Numeric(5,2); an over-scale value must be a clean 422, never a silent DB
+    # round (SQLite keeps full precision and would hide a round from the test).
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Scale Tax")
+    client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
+    r = client.patch(f"/api/v1/project-products/{proj}/{pid}", json={"tax_rate": "18.999"})
+    assert r.status_code == 422, r.text
+
+
+def test_money_over_ceiling_is_422_not_500(client: TestClient) -> None:
+    # A money value beyond the int8 ceiling degrades to a clean 422, never a DB-overflow 500.
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Huge Money")
+    r = client.post(
+        "/api/v1/project-products",
+        json={"project_id": proj, "product_id": pid, "cost_price_paise": 10**16},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_tax_rate_serialized_as_string(client: TestClient) -> None:
+    # The FE contract types tax_rate as `string | null` and calls .trim() on it — the wire
+    # value must be a JSON STRING, not a bare number.
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Str Tax")
+    client.post("/api/v1/project-products",
+                json={"project_id": proj, "product_id": pid, "tax_rate": "18"})
+    row = client.get("/api/v1/project-products", params={"project_id": proj}).json()[0]
+    assert isinstance(row["tax_rate"], str)
+
+
+def test_viewer_403_on_post_and_patch(client: TestClient) -> None:
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "RBAC Guarded")
+    client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
+
+    _as(client, "viewer")  # VIEW only -> no product.tag
+    post = client.post("/api/v1/project-products",
+                       json={"project_id": proj, "product_id": pid, "cost_price_paise": 1})
+    assert post.status_code == 403
+    patch = client.patch(f"/api/v1/project-products/{proj}/{pid}",
+                         json={"cost_price_paise": 1})
+    assert patch.status_code == 403

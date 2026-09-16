@@ -32,6 +32,12 @@ async function apiPost(request: APIRequestContext, path: string, data: unknown):
   return res.json();
 }
 
+async function apiPatch(request: APIRequestContext, path: string, data: unknown): Promise<any> {
+  const res = await request.patch(`/api/v1${path}`, { headers: DEV_ADMIN, data });
+  expect(res.ok(), `PATCH ${path} -> ${res.status()} ${await res.text()}`).toBeTruthy();
+  return res.json();
+}
+
 /** Pick from a SearchableSelect combobox: open, filter, click the first option in its listbox. */
 async function pickCombo(root: Page | Locator, nameRe: RegExp, filterText: string): Promise<void> {
   const combo = root.getByRole('combobox', { name: nameRe });
@@ -93,5 +99,39 @@ test.describe('Sales Orders — tag products to projects (admin end-to-end)', ()
     await expect(taggedRowAgain).toHaveCount(1);
     await taggedRowAgain.getByRole('button', { name: 'Remove' }).click();
     await expect(page.getByText(/No products tagged to this project yet/)).toBeVisible();
+  });
+
+  test('a project pricing template pre-fills a New PO line (qty blank)', async ({
+    page,
+    request,
+  }) => {
+    // Distinct codes/keywords so this never collides with the tagging test in the shared DB.
+    const CLIENT = { code: 'TPL', name: 'Template Client' };
+    const PRODUCT = 'Templatable Sprocket';
+
+    // ---- seed product + client + project; TAG the product, then set a template price ----
+    const product = await apiPost(request, '/products', { name: PRODUCT, uom: 'PCS', brand: 'Acme' });
+    const client = await apiPost(request, '/projects/clients', { name: CLIENT.name, code: CLIENT.code });
+    const project = await apiPost(request, '/projects', { client_id: client.id, name: 'Template Project' });
+    await apiPost(request, '/project-products', { project_id: project.id, product_id: product.id });
+    // ₹12,345.00 client sell → the line input should pre-fill "12345.00".
+    await apiPatch(request, `/project-products/${project.id}/${product.id}`, {
+      client_sell_price_paise: 1234500,
+      cost_price_paise: 1000000,
+      tax_rate: '18',
+    });
+
+    // ---- New PO for that project → "Load this project's products" → line pre-filled ----
+    await page.goto('/m/sales_orders/new');
+    await expect(page.getByRole('heading', { name: 'New purchase order' })).toBeVisible();
+    await pickCombo(page, /^Client ?\*/, CLIENT.name);
+    await pickCombo(page, /^Project ?\*/, `${CLIENT.code}-001`);
+
+    await page.getByRole('button', { name: /Load this project's products/i }).click();
+
+    // The template money maps onto the line's rupee inputs; ordered qty is left blank.
+    await expect(page.getByLabel(/Client sell/i).first()).toHaveValue('12345.00');
+    await expect(page.getByLabel(/Our CP/i).first()).toHaveValue('10000.00');
+    await expect(page.getByLabel(/Ordered qty/i).first()).toHaveValue('');
   });
 });

@@ -64,6 +64,32 @@ const PROJECTS = [
 const PRODUCTS = [
   { id: '5', code: 'P1', name: 'Widget', brand: 'Acme', model_number: null, uom: 'PCS' },
 ];
+
+/** A project's tagged product WITH a pricing template (ProjectProductOut). Money is paise;
+ * sell_price_paise/freight_paise are the admin-only actuals. */
+const TEMPLATE_PRODUCT = {
+  product_id: 5,
+  code: 'P1',
+  name: 'Widget',
+  brand: 'Acme',
+  model_number: null,
+  category: 'Widgets',
+  active: true,
+  description: 'Templated blue widget',
+  uom: 'BOX',
+  cost_price_paise: 10000, // Our CP ₹100.00
+  original_cost_price_paise: 9000,
+  client_sell_price_paise: 25000, // Client sell ₹250.00
+  vendor_sell_price_paise: 20000,
+  sell_price_paise: 24000, // Actual sell ₹240.00 (admin-only)
+  client_freight_paise: 1000,
+  vendor_freight_paise: 800,
+  freight_paise: 900, // Actual freight ₹9.00 (admin-only)
+  packaging_paise: 500,
+  handling_paise: 0,
+  other_paise: 0,
+  tax_rate: '18.00',
+};
 const CLIENT_DETAIL = {
   id: '10',
   name: 'Britannia',
@@ -245,6 +271,8 @@ function stubCreateForm(level: Level) {
       state.urls.push(url);
       const method = (init?.method ?? 'GET').toUpperCase();
       if (url.endsWith('/me')) return meResponse(level);
+      // No pricing template by default — the "Load this project's products" button hides.
+      if (url.includes('/project-products')) return json([]);
       if (/\/projects\/clients\/\d+/.test(url)) return json(CLIENT_DETAIL);
       if (url.includes('/projects/clients')) return json(CLIENTS);
       if (url.includes('/projects')) return json(PROJECTS);
@@ -385,6 +413,78 @@ describe('PO create form', () => {
     await waitFor(() =>
       expect(state.urls.some((u) => u.includes('/products') && u.includes('q=wid'))).toBe(true),
     );
+  });
+});
+
+describe('PO create form — load this project\'s products (template pre-fill)', () => {
+  /** Stub the create form's GETs, serving this project's tagged product WITH a template. */
+  function stubLoadForm(level: Level) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse(level);
+        if (url.includes('/project-products')) return json([TEMPLATE_PRODUCT]);
+        if (/\/projects\/clients\/\d+/.test(url)) return json(CLIENT_DETAIL);
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.includes('/projects')) return json(PROJECTS);
+        if (url.includes('/products')) return json(PRODUCTS);
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+  }
+
+  it('appends a pre-filled line per tagged product with qty LEFT BLANK (non-admin)', async () => {
+    stubLoadForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+    await pickCombo(/^client ?\*/i, /BRI — Britannia/);
+    await pickCombo(/^project ?\*/i, /BRI-001 — Q3 Trade Rewards/);
+
+    // The button appears once the project's template loads; clicking it fills a line.
+    const loadBtn = await screen.findByRole('button', { name: /load this project's products/i });
+    fireEvent.click(loadBtn);
+
+    // Template money (paise) → the line's rupee inputs; description from the template.
+    expect((screen.getByLabelText(/our cp/i) as HTMLInputElement).value).toBe('100.00');
+    expect((screen.getByLabelText(/client sell/i) as HTMLInputElement).value).toBe('250.00');
+    expect((screen.getByLabelText(/vendor sell/i) as HTMLInputElement).value).toBe('200.00');
+    expect((screen.getByLabelText(/client freight/i) as HTMLInputElement).value).toBe('10.00');
+    expect((screen.getByLabelText(/tax rate/i) as HTMLInputElement).value).toBe('18.00');
+    expect((screen.getByLabelText(/description/i) as HTMLInputElement).value).toBe(
+      'Templated blue widget',
+    );
+    // ordered_qty is LEFT BLANK for the operator to enter.
+    expect((screen.getByLabelText(/ordered qty/i) as HTMLInputElement).value).toBe('');
+    // A non-admin never sees (or pre-fills) the admin-only actuals.
+    expect(screen.queryByLabelText(/actual sell/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/actual freight/i)).not.toBeInTheDocument();
+  });
+
+  it('clicking "Load this project\'s products" twice does not duplicate the line', async () => {
+    stubLoadForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+    await pickCombo(/^client ?\*/i, /BRI — Britannia/);
+    await pickCombo(/^project ?\*/i, /BRI-001 — Q3 Trade Rewards/);
+    const loadBtn = await screen.findByRole('button', { name: /load this project's products/i });
+    fireEvent.click(loadBtn);
+    fireEvent.click(loadBtn);
+    // Deduped by product_id → still exactly one line for the single template product.
+    expect(screen.getAllByLabelText(/our cp/i)).toHaveLength(1);
+  });
+
+  it('an ADMIN also gets the actual sell/freight pre-filled from the template', async () => {
+    stubLoadForm('MANAGE'); // MANAGE → platform iam → admin
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+    await pickCombo(/^client ?\*/i, /BRI — Britannia/);
+    await pickCombo(/^project ?\*/i, /BRI-001 — Q3 Trade Rewards/);
+    fireEvent.click(await screen.findByRole('button', { name: /load this project's products/i }));
+
+    expect((screen.getByLabelText(/actual sell/i) as HTMLInputElement).value).toBe('240.00');
+    expect((screen.getByLabelText(/actual freight/i) as HTMLInputElement).value).toBe('9.00');
   });
 });
 
@@ -833,6 +933,7 @@ describe('PO create form — soft copy attachment (M4)', () => {
         const url = String(input);
         const method = (init?.method ?? 'GET').toUpperCase();
         if (url.endsWith('/me')) return meResponse('OPERATE');
+        if (url.includes('/project-products')) return json([]);
         if (/\/projects\/clients\/\d+/.test(url)) return json(CLIENT_DETAIL);
         if (url.includes('/projects/clients')) return json(CLIENTS);
         if (url.includes('/products')) return json(PRODUCTS);

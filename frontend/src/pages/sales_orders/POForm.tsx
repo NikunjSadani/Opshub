@@ -25,6 +25,10 @@ import {
   type POCreateInput,
   type POLineInput,
 } from '../../api/purchaseOrders';
+import {
+  useProjectProductsQuery,
+  type ProjectProduct,
+} from '../../api/projectProducts';
 import { SALES_ORDERS_BASE } from './salesOrdersFormat';
 
 function errorMessage(err: unknown): string {
@@ -93,6 +97,62 @@ function blankLine(): LineRow {
     handling: '',
     other: '',
     taxRate: '',
+  };
+}
+
+/** Integer paise → a rupee INPUT string ("123.45"), blank when null. */
+function paiseToRupeeInput(paise: number | null): string {
+  return paise == null ? '' : (paise / 100).toFixed(2);
+}
+
+/** A line the operator has not touched (all fields blank) — safe to drop when we load a
+ * project's template so the initial blank line doesn't leave a stray empty row. */
+function isBlankLine(l: LineRow): boolean {
+  return (
+    !l.productId &&
+    !l.description.trim() &&
+    !l.uom.trim() &&
+    !l.qty.trim() &&
+    !l.originalCost.trim() &&
+    !l.cost.trim() &&
+    !l.clientSell.trim() &&
+    !l.vendorSell.trim() &&
+    !l.actualSell.trim() &&
+    !l.clientFreight.trim() &&
+    !l.vendorFreight.trim() &&
+    !l.actualFreight.trim() &&
+    !l.packaging.trim() &&
+    !l.handling.trim() &&
+    !l.other.trim() &&
+    !l.taxRate.trim()
+  );
+}
+
+/**
+ * Map a project's tagged product + its pricing template onto a pre-filled PO line
+ * (paise→₹ for money; ordered_qty LEFT BLANK for the operator). The admin-only actuals
+ * are pre-filled ONLY for an admin — a non-admin never receives those template values
+ * (the backend masks them to null) and never has the inputs to hold them.
+ */
+function templateToLine(tp: ProjectProduct, isAdmin: boolean): LineRow {
+  return {
+    key: nextKey++,
+    productId: String(tp.product_id),
+    description: tp.description ?? tp.name,
+    uom: tp.uom ?? '',
+    qty: '',
+    originalCost: paiseToRupeeInput(tp.original_cost_price_paise),
+    cost: paiseToRupeeInput(tp.cost_price_paise),
+    clientSell: paiseToRupeeInput(tp.client_sell_price_paise),
+    vendorSell: paiseToRupeeInput(tp.vendor_sell_price_paise),
+    actualSell: isAdmin ? paiseToRupeeInput(tp.sell_price_paise) : '',
+    clientFreight: paiseToRupeeInput(tp.client_freight_paise),
+    vendorFreight: paiseToRupeeInput(tp.vendor_freight_paise),
+    actualFreight: isAdmin ? paiseToRupeeInput(tp.freight_paise) : '',
+    packaging: paiseToRupeeInput(tp.packaging_paise),
+    handling: paiseToRupeeInput(tp.handling_paise),
+    other: paiseToRupeeInput(tp.other_paise),
+    taxRate: tp.tax_rate ?? '',
   };
 }
 
@@ -203,6 +263,12 @@ export function POForm() {
   const products = useMemo(() => productsQuery.data ?? [], [productsQuery.data]);
   const [selectedProducts, setSelectedProducts] = useState<Record<string, PickerProduct>>({});
 
+  // This project's tagged products + pricing template — powers the "Load this project's
+  // products" pre-fill. Disabled (never fetched) until a project is chosen.
+  const projectProductsQuery = useProjectProductsQuery(projectId || null);
+  const templateProducts = projectProductsQuery.data ?? [];
+  const hasTemplateProducts = templateProducts.length > 0;
+
   const productOptions = useMemo<SearchableSelectOption[]>(() => {
     const map = new Map<string, string>();
     for (const p of products) map.set(p.id, productLabel(p));
@@ -223,6 +289,44 @@ export function POForm() {
   }
   function addLine() {
     setLines((prev) => [...prev, blankLine()]);
+  }
+  /**
+   * Append one pre-filled line per tagged product from this project's template. Existing
+   * operator-filled lines are preserved (never overwritten); only the pristine initial
+   * blank line is dropped. Each template product is remembered in `selectedProducts` so
+   * its picker label renders even before a search returns it.
+   */
+  function loadProjectProducts() {
+    if (templateProducts.length === 0) return;
+    // Dedup by product: keep the operator's non-blank lines, and only ADD template products
+    // not already on a line — so clicking the button twice (or after filling a batch) never
+    // duplicates a product line.
+    const kept = lines.filter((l) => !isBlankLine(l));
+    const present = new Set(kept.map((l) => l.productId).filter(Boolean));
+    const toAdd = templateProducts.filter((tp) => !present.has(String(tp.product_id)));
+    if (toAdd.length === 0) {
+      toast.info("This project's products are already loaded.");
+      return;
+    }
+    setSelectedProducts((prev) => {
+      const next = { ...prev };
+      for (const tp of toAdd) {
+        const id = String(tp.product_id);
+        next[id] = {
+          id,
+          code: tp.code,
+          name: tp.name,
+          brand: tp.brand,
+          model_number: tp.model_number,
+          uom: tp.uom ?? '',
+        };
+      }
+      return next;
+    });
+    setLines([...kept, ...toAdd.map((tp) => templateToLine(tp, isAdmin))]);
+    toast.success(
+      `Loaded ${toAdd.length} product${toAdd.length === 1 ? '' : 's'} from this project.`,
+    );
   }
   function removeLine(key: number) {
     setLines((prev) => (prev.length === 1 ? prev : prev.filter((l) => l.key !== key)));
@@ -544,11 +648,24 @@ export function POForm() {
           </p>
         </div>
 
-        <div className="mt-6 mb-2 flex items-center justify-between">
+        <div className="mt-6 mb-2 flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-semibold text-slate-900">Line items</h2>
-          <Button variant="secondary" size="sm" onClick={addLine} type="button">
-            Add line
-          </Button>
+          <div className="flex items-center gap-2">
+            {projectId && hasTemplateProducts && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={loadProjectProducts}
+                type="button"
+                title="Append a pre-filled line for each of this project's tagged products"
+              >
+                Load this project's products
+              </Button>
+            )}
+            <Button variant="secondary" size="sm" onClick={addLine} type="button">
+              Add line
+            </Button>
+          </div>
         </div>
 
         {productsQuery.isError ? (

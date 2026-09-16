@@ -6,24 +6,83 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 import { useApi, ApiError } from './client';
-import type { Product } from './products';
 import { poKeys } from './purchaseOrders';
 
 /**
- * Typed contracts + React Query hooks for tagging products to a project
- * (money-free curation). Mirrors the backend `/project-products` routes. All
- * paths are relative to `/api/v1` (added by `useApi()`).
+ * Typed contracts + React Query hooks for a project's PRODUCT TEMPLATE — the
+ * per-project curation of catalogue products PLUS a per-project pricing template that
+ * pre-fills a New PO line. Mirrors the backend `/project-products` routes. All paths
+ * are relative to `/api/v1` (added by `useApi()`).
  *
- * Ids are treated as strings on the FE (mirroring api/projects.ts + api/products.ts):
- * they only ever flow through query strings / equality checks, never arithmetic. The
- * two mutation bodies coerce to Number() only at the wire, matching the backend
- * contract (`{ project_id: number, product_id: number }`).
+ * The tagged list is `ProjectProductOut` — the product identity (keyed by
+ * `product_id`, NOT `id`) plus the optional per-project template pricing. MONEY is
+ * integer PAISE on the wire; `tax_rate` is a percent STRING; every template field is
+ * nullable so a template can be saved partially.
  *
- * The tagged list is the full ProductOut projection (reused as `Product`), so the UI
- * can show category + the active flag (an inactive-but-still-tagged product renders
- * an "Inactive" badge). Reads need `sales_orders` VIEW; both mutations need OPERATE
- * (backend gates `product.tag`) — all server-enforced.
+ * `sell_price_paise` and `freight_paise` are the ADMIN-ONLY actuals: the backend
+ * returns them `null` for non-admins and IGNORES non-admin attempts to set them, so
+ * the UI must only show/collect those two behind the same admin gate `POForm` uses
+ * (`perms.hasPlatform('iam')`).
+ *
+ * Reads need `sales_orders` VIEW; tag/untag/patch need OPERATE (backend gates
+ * `product.tag`) — all server-enforced.
  */
+
+// ------------------------------------------------------------------- DTOs
+
+/** A product tagged to a project + its (nullable) per-project pricing template. */
+export interface ProjectProduct {
+  // --- product identity (keyed by product_id, not id) ---
+  product_id: number;
+  code: string | null;
+  name: string;
+  brand: string | null;
+  model_number: string | null;
+  category: string | null;
+  active: boolean;
+  // --- per-project template pricing (all nullable) ---
+  description: string | null;
+  uom: string | null;
+  /** Our CP. */
+  cost_price_paise: number | null;
+  original_cost_price_paise: number | null;
+  client_sell_price_paise: number | null;
+  vendor_sell_price_paise: number | null;
+  /** Actual sell — ADMIN-ONLY (null for non-admins). */
+  sell_price_paise: number | null;
+  client_freight_paise: number | null;
+  vendor_freight_paise: number | null;
+  /** Actual freight — ADMIN-ONLY (null for non-admins). */
+  freight_paise: number | null;
+  packaging_paise: number | null;
+  handling_paise: number | null;
+  other_paise: number | null;
+  /** Percent as a string, e.g. "18.00". */
+  tax_rate: string | null;
+}
+
+/**
+ * A partial pricing body for PATCH. Money keys are integer PAISE; `tax_rate` a string;
+ * `description`/`uom` strings. Omit keys you don't set — the backend leaves unmentioned
+ * fields untouched. `sell_price_paise`/`freight_paise` are admin-only (send only for an
+ * admin; the backend ignores them from a non-admin).
+ */
+export interface ProjectProductPricing {
+  description?: string | null;
+  uom?: string | null;
+  cost_price_paise?: number | null;
+  original_cost_price_paise?: number | null;
+  client_sell_price_paise?: number | null;
+  vendor_sell_price_paise?: number | null;
+  sell_price_paise?: number | null;
+  client_freight_paise?: number | null;
+  vendor_freight_paise?: number | null;
+  freight_paise?: number | null;
+  packaging_paise?: number | null;
+  handling_paise?: number | null;
+  other_paise?: number | null;
+  tax_rate?: string | null;
+}
 
 // --------------------------------------------------------------- query keys
 export const projectProductKeys = {
@@ -32,28 +91,35 @@ export const projectProductKeys = {
 
 // ------------------------------------------------------------------ queries
 
-/** The products tagged to a project (incl. inactive). Disabled until a project is set. */
+/** The products tagged to a project (incl. inactive) + their template pricing.
+ * Disabled until a project is set. */
 export function useProjectProductsQuery(
   projectId: string | null,
-): UseQueryResult<Product[], Error> {
+): UseQueryResult<ProjectProduct[], Error> {
   const { get } = useApi();
-  return useQuery<Product[], Error>({
+  return useQuery<ProjectProduct[], Error>({
     queryKey: projectProductKeys.list(projectId ?? ''),
     enabled: projectId != null,
     queryFn: ({ signal }) =>
-      get<Product[]>(`/project-products?project_id=${encodeURIComponent(projectId ?? '')}`, signal),
+      get<ProjectProduct[]>(
+        `/project-products?project_id=${encodeURIComponent(projectId ?? '')}`,
+        signal,
+      ),
   });
 }
 
 // ---------------------------------------------------------------- mutations
 
-/** Tag a product to this project (OPERATE). Invalidates the project's tagged list. */
-export function useTagProduct(projectId: string): UseMutationResult<Product, ApiError, string> {
+/** Tag a product to this project (OPERATE) — tag only, no pricing (an idempotent tag
+ * that does NOT overwrite an already-tagged product's fields). Invalidates the list. */
+export function useTagProduct(
+  projectId: string,
+): UseMutationResult<ProjectProduct, ApiError, string> {
   const { post } = useApi();
   const qc = useQueryClient();
-  return useMutation<Product, ApiError, string>({
+  return useMutation<ProjectProduct, ApiError, string>({
     mutationFn: (productId) =>
-      post<Product>('/project-products', {
+      post<ProjectProduct>('/project-products', {
         project_id: Number(projectId),
         product_id: Number(productId),
       }),
@@ -61,6 +127,27 @@ export function useTagProduct(projectId: string): UseMutationResult<Product, Api
       void qc.invalidateQueries({ queryKey: projectProductKeys.list(projectId) });
       // Also refresh the PO product picker so an already-open New PO form reflects the
       // changed tags (the curated default reads from this cache).
+      void qc.invalidateQueries({ queryKey: poKeys.products });
+    },
+  });
+}
+
+/** Update a tagged product's per-project pricing template (OPERATE). Sends only the
+ * provided (partial) fields. Invalidates the list + the PO product picker. */
+export function useUpdateProjectProduct(
+  projectId: string,
+): UseMutationResult<
+  ProjectProduct,
+  ApiError,
+  { productId: string; body: ProjectProductPricing }
+> {
+  const { patch } = useApi();
+  const qc = useQueryClient();
+  return useMutation<ProjectProduct, ApiError, { productId: string; body: ProjectProductPricing }>({
+    mutationFn: ({ productId, body }) =>
+      patch<ProjectProduct>(`/project-products/${projectId}/${productId}`, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: projectProductKeys.list(projectId) });
       void qc.invalidateQueries({ queryKey: poKeys.products });
     },
   });

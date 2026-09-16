@@ -30,7 +30,8 @@ function meResponse(): Response {
 }
 
 /** `GET /me` granting projects VIEW + sales_orders OPERATE — sees the Products section
- * and may tag/remove (backend gates `product.tag` at OPERATE). */
+ * and may tag/remove/edit pricing (backend gates `product.tag` at OPERATE). No platform
+ * IAM → NOT an admin, so the admin-only Actual sell/freight inputs stay hidden. */
 function meResponseOperate(): Response {
   return json({
     id: 1,
@@ -44,30 +45,73 @@ function meResponseOperate(): Response {
   });
 }
 
-const PROD_A = {
-  id: 21,
+/** `GET /me` like {@link meResponseOperate} but WITH platform IAM → an admin, so the
+ * Actual sell/freight pricing inputs are visible. */
+function meResponseAdmin(): Response {
+  return json({
+    id: 1,
+    email: 'admin@example.com',
+    name: 'Ada Admin',
+    role_id: 1,
+    role_name: 'Administrator',
+    is_administrator: true,
+    module_levels: { projects: 'VIEW', sales_orders: 'OPERATE' },
+    platform: ['iam', 'settings'],
+  });
+}
+
+/** A tagged product WITH a pricing template (ProjectProductOut — keyed by product_id).
+ * client_sell 25000 (₹250.00), Our CP 9000 (₹90.00), tax "18.00". */
+const PP_A = {
+  product_id: 21,
   code: 'P-A',
   name: 'Alpha Widget',
   brand: 'Acme',
   model_number: null,
   category: 'Widgets',
-  uom: 'PCS',
-  hsn: null,
   active: true,
-  created_at: '2026-01-01T00:00:00Z',
+  description: null,
+  uom: null,
+  cost_price_paise: 9000,
+  original_cost_price_paise: null,
+  client_sell_price_paise: 25000,
+  vendor_sell_price_paise: null,
+  sell_price_paise: null,
+  client_freight_paise: null,
+  vendor_freight_paise: null,
+  freight_paise: null,
+  packaging_paise: null,
+  handling_paise: null,
+  other_paise: null,
+  tax_rate: '18.00',
 };
-const PROD_B = {
-  id: 22,
+/** A second tagged product with NO pricing yet (all template fields null). */
+const PP_B = {
+  product_id: 22,
   code: 'P-B',
   name: 'Beta Gadget',
   brand: 'Beta',
   model_number: null,
   category: 'Gadgets',
-  uom: 'PCS',
-  hsn: null,
   active: true,
-  created_at: '2026-01-01T00:00:00Z',
+  description: null,
+  uom: null,
+  cost_price_paise: null,
+  original_cost_price_paise: null,
+  client_sell_price_paise: null,
+  vendor_sell_price_paise: null,
+  sell_price_paise: null,
+  client_freight_paise: null,
+  vendor_freight_paise: null,
+  freight_paise: null,
+  packaging_paise: null,
+  handling_paise: null,
+  other_paise: null,
+  tax_rate: null,
 };
+/** The full catalogue as the Add picker's `/products` search returns it (PickerProduct). */
+const CAT_A = { id: '21', code: 'P-A', name: 'Alpha Widget', brand: 'Acme', model_number: null, uom: 'PCS' };
+const CAT_B = { id: '22', code: 'P-B', name: 'Beta Gadget', brand: 'Beta', model_number: null, uom: 'PCS' };
 
 const PROJECT = {
   id: 11,
@@ -215,8 +259,9 @@ describe('ProjectDetail', () => {
 
   it('renders tagged products and lets an OPERATE user tag then remove one', async () => {
     // The project's tagged set, mutated by POST/DELETE so a refetch reflects the change.
-    const tagged: Array<typeof PROD_A> = [PROD_A];
-    const catalogue = [PROD_A, PROD_B];
+    const tagged: Array<typeof PP_A | typeof PP_B> = [PP_A];
+    const ppCatalogue = [PP_A, PP_B];
+    const catalogue = [CAT_A, CAT_B];
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -228,14 +273,14 @@ describe('ProjectDetail', () => {
       if (url.match(/\/project-products\?/) && method === 'GET') return json(tagged.slice());
       if (url.match(/\/project-products$/) && method === 'POST') {
         const body = JSON.parse(String(init?.body)) as { project_id: number; product_id: number };
-        const prod = catalogue.find((p) => p.id === body.product_id) ?? PROD_B;
-        if (!tagged.some((t) => t.id === prod.id)) tagged.push(prod);
+        const prod = ppCatalogue.find((p) => p.product_id === body.product_id) ?? PP_B;
+        if (!tagged.some((t) => t.product_id === prod.product_id)) tagged.push(prod);
         return json(prod, 201);
       }
       const del = url.match(/\/project-products\/11\/(\d+)$/);
       if (del && method === 'DELETE') {
         const pid = Number(del[1]);
-        const idx = tagged.findIndex((t) => t.id === pid);
+        const idx = tagged.findIndex((t) => t.product_id === pid);
         if (idx >= 0) tagged.splice(idx, 1);
         return json({ deleted: true });
       }
@@ -247,9 +292,10 @@ describe('ProjectDetail', () => {
 
     renderDetail(<ProjectDetail />);
 
-    // The section renders with the already-tagged product.
+    // The section renders with the already-tagged product + its template Client sell.
     expect(await screen.findByText('Tagged products')).toBeInTheDocument();
     expect(await screen.findByText('Alpha Widget')).toBeInTheDocument();
+    expect(screen.getByText('₹250.00')).toBeInTheDocument(); // client_sell_price_paise 25000
 
     // Tag Beta Gadget via the picker: focus opens the list, mousedown commits.
     const combo = screen.getByRole('combobox', { name: /add product/i });
@@ -271,7 +317,7 @@ describe('ProjectDetail', () => {
 
     // Remove Alpha Widget: its row's Remove button DELETEs, then it disappears.
     const alphaRow = screen.getByText('Alpha Widget').closest('tr') as HTMLElement;
-    fireEvent.click(within(alphaRow).getByRole('button', { name: /remove/i }));
+    fireEvent.click(within(alphaRow).getByRole('button', { name: /remove alpha widget/i }));
 
     await waitFor(() => {
       const delCall = fetchMock.mock.calls.find(
@@ -282,5 +328,98 @@ describe('ProjectDetail', () => {
       expect(delCall).toBeTruthy();
     });
     await waitFor(() => expect(screen.queryByText('Alpha Widget')).not.toBeInTheDocument());
+  });
+
+  it('the Edit modal PATCHes the entered pricing as an integer-paise body', async () => {
+    let patchUrl: string | null = null;
+    let patchBody: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/me')) return meResponseOperate();
+      if (url.match(/\/projects\/11$/)) return json(PROJECT);
+      if (url.match(/\/purchase-orders\?/)) return json([]);
+      if (url.match(/\/project-products\?/) && method === 'GET') return json([PP_A]);
+      const patch = url.match(/\/project-products\/11\/(\d+)$/);
+      if (patch && method === 'PATCH') {
+        patchUrl = url;
+        patchBody = JSON.parse(String(init?.body));
+        return json({ ...PP_A, cost_price_paise: 12050, client_sell_price_paise: 30000 });
+      }
+      if (url.match(/\/products\?/) && method === 'GET') return json([CAT_A, CAT_B]);
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderDetail(<ProjectDetail />);
+
+    // Open the Edit modal on the Alpha row.
+    const alphaRow = (await screen.findByText('Alpha Widget')).closest('tr') as HTMLElement;
+    fireEvent.click(within(alphaRow).getByRole('button', { name: /edit alpha widget/i }));
+    const dialog = await screen.findByRole('dialog');
+
+    // Pre-filled from the template (paise → ₹): Our CP 9000 → 90.00, Client sell 25000 → 250.00.
+    expect((within(dialog).getByLabelText(/our cp/i) as HTMLInputElement).value).toBe('90.00');
+    expect((within(dialog).getByLabelText(/client sell/i) as HTMLInputElement).value).toBe('250.00');
+    // A non-admin never sees the admin-only actual sell/freight inputs.
+    expect(within(dialog).queryByLabelText(/actual sell/i)).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText(/actual freight/i)).not.toBeInTheDocument();
+
+    // Change Our CP → ₹120.50 and Client sell → ₹300; save.
+    fireEvent.change(within(dialog).getByLabelText(/our cp/i), { target: { value: '120.50' } });
+    fireEvent.change(within(dialog).getByLabelText(/client sell/i), { target: { value: '300' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /save pricing/i }));
+
+    await waitFor(() => expect(patchBody).not.toBeNull());
+    expect(patchUrl).toMatch(/\/project-products\/11\/21$/);
+    // Money is integer paise; tax carried as a trimmed string; blanks omitted.
+    expect(patchBody).toMatchObject({
+      cost_price_paise: 12050,
+      client_sell_price_paise: 30000,
+      tax_rate: '18.00',
+    });
+    // The admin-only actuals are never sent by a non-admin.
+    expect(patchBody).not.toHaveProperty('sell_price_paise');
+    expect(patchBody).not.toHaveProperty('freight_paise');
+  });
+
+  it('the Edit modal shows the Actual sell/freight inputs ONLY for an admin', async () => {
+    function stub(me: () => Response) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          const method = (init?.method ?? 'GET').toUpperCase();
+          if (url.endsWith('/me')) return me();
+          if (url.match(/\/projects\/11$/)) return json(PROJECT);
+          if (url.match(/\/purchase-orders\?/)) return json([]);
+          if (url.match(/\/project-products\?/) && method === 'GET') return json([PP_A]);
+          if (url.match(/\/products\?/) && method === 'GET') return json([CAT_A, CAT_B]);
+          throw new Error(`Unexpected fetch: ${method} ${url}`);
+        }),
+      );
+    }
+
+    // Non-admin (OPERATE, no platform IAM): actual inputs absent.
+    stub(meResponseOperate);
+    const { unmount } = renderDetail(<ProjectDetail />);
+    let alphaRow = (await screen.findByText('Alpha Widget')).closest('tr') as HTMLElement;
+    fireEvent.click(within(alphaRow).getByRole('button', { name: /edit alpha widget/i }));
+    let dialog = await screen.findByRole('dialog');
+    expect(within(dialog).queryByLabelText(/actual sell/i)).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText(/actual freight/i)).not.toBeInTheDocument();
+    // The visible fields are still there.
+    expect(within(dialog).getByLabelText(/client sell/i)).toBeInTheDocument();
+    unmount();
+    vi.unstubAllGlobals();
+
+    // Admin (platform IAM): actual inputs present.
+    stub(meResponseAdmin);
+    renderDetail(<ProjectDetail />);
+    alphaRow = (await screen.findByText('Alpha Widget')).closest('tr') as HTMLElement;
+    fireEvent.click(within(alphaRow).getByRole('button', { name: /edit alpha widget/i }));
+    dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByLabelText(/actual sell/i)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/actual freight/i)).toBeInTheDocument();
   });
 });

@@ -108,7 +108,16 @@ class ProjectProduct(Base):
     never a re-parenting: one product can be tagged to many projects and vice-versa.
     Cross-module: `project_id` references `project.id` by id (no ORM relationship, per the
     module-boundary rule); the tagged product IS same-module, so it maps a relationship.
-    Both FKs cascade on delete so a hard-deleted project/product drops its tag rows."""
+    Both FKs cascade on delete so a hard-deleted project/product drops its tag rows.
+
+    PRICING TEMPLATE: the pricing columns below mirror the PO line item (minus qty, which is
+    per-order). They are per-project DEFAULTS a PO pre-fills from — ALL NULLABLE (a partial
+    template is valid; the operator completes it at PO time). Money is PER-UNIT paise for
+    cost/sell tiers and PER-LINE paise for freight/packaging/handling/other, exactly like the
+    PO line. `sell_price_paise` / `freight_paise` are the ACTUAL (margin-basis) figures —
+    ADMIN-ONLY, masked to None for non-admins on read and never settable by a non-admin, same
+    as on the PO. Editing a template never touches an already-created PO (a PO snapshots its
+    own line values at creation); changing a template never rewrites price history."""
 
     __tablename__ = "project_product"
     __table_args__ = (
@@ -122,6 +131,22 @@ class ProjectProduct(Base):
     product_id: Mapped[int] = mapped_column(
         ForeignKey("product.id", ondelete="CASCADE"), index=True
     )
+    # --- pricing template (all optional; mirror the PO line, no ordered_qty) ---
+    description: Mapped[str | None] = mapped_column(String(500))
+    uom: Mapped[str | None] = mapped_column(String(20))
+    cost_price_paise: Mapped[int | None] = mapped_column(BigInteger)           # Our CP, visible
+    original_cost_price_paise: Mapped[int | None] = mapped_column(BigInteger)  # visible, optional
+    client_sell_price_paise: Mapped[int | None] = mapped_column(BigInteger)    # visible
+    vendor_sell_price_paise: Mapped[int | None] = mapped_column(BigInteger)    # visible, optional
+    sell_price_paise: Mapped[int | None] = mapped_column(BigInteger)           # ACTUAL — ADMIN-ONLY
+    client_freight_paise: Mapped[int | None] = mapped_column(BigInteger)       # visible
+    vendor_freight_paise: Mapped[int | None] = mapped_column(BigInteger)       # visible, optional
+    freight_paise: Mapped[int | None] = mapped_column(BigInteger)             # ACTUAL — ADMIN-ONLY
+    packaging_paise: Mapped[int | None] = mapped_column(BigInteger)
+    handling_paise: Mapped[int | None] = mapped_column(BigInteger)
+    other_paise: Mapped[int | None] = mapped_column(BigInteger)
+    tax_rate: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))            # GST %
+
     created_by: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
