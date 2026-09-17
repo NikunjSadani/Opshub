@@ -38,7 +38,11 @@ backend/_files/
 frontend/test-results/
 frontend/playwright-report/
 # Ignore generated fixtures (template.xlsx is written by global-setup.ts at run time)
-# and any stray artifacts, but TRACK the static invoice PDF the billing/expense specs
-# read — it isn't generated, so CI needs it committed (else 6 e2e tests ENOENT).
+# and any stray artifacts, but TRACK the static fixtures the specs read — they aren't
+# generated at run time, so CI needs them committed (else those e2e tests ENOENT):
+#   - expense-invoice.pdf (billing/expense specs)
+#   - products-bulk.xlsx / pricing-bulk.xlsx (the sales bulk-upload specs)
 frontend/e2e/fixtures/*
 !frontend/e2e/fixtures/expense-invoice.pdf
+!frontend/e2e/fixtures/products-bulk.xlsx
+!frontend/e2e/fixtures/pricing-bulk.xlsx
