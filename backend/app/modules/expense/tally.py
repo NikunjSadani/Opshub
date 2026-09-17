@@ -391,6 +391,25 @@ _RUN_WORD = r"[A-Za-z]+"
 _GLUED_RUN_RE = re.compile(rf"{_RUN_PCT}|{_RUN_MONEY}|{_RUN_WORD}")
 _LEAD_SL_RE = re.compile(r"^([0-9]+)([^0-9].*)$")
 
+# A courier/dispatch annotation Tally prints as a text-only wrapped row UNDER a product line
+# (real Bajaj phrase: "DESPATCHED BY BRAND DIRECTLY"). It reads like a description continuation
+# geometrically, so it would otherwise stitch onto the product description. Match NARROWLY —
+# only a row that BEGINS with the despatch/dispatch verb — so a legitimate wrapped description
+# fragment (e.g. "with stabilizer") is never dropped.
+# A dispatch/despatch courier annotation: STARTS with the verb AND carries a note keyword
+# (by / through / directly), e.g. "DESPATCHED BY BRAND DIRECTLY". Requiring the keyword keeps
+# a real product description that merely wraps onto a word like "Dispatch Console" / "Despatch
+# Tracker" from being dropped (erring toward keeping real text over losing it).
+_DISPATCH_NOTE_RE = re.compile(
+    r"^(?:des|dis)patch(?:ed)?\b.*\b(?:by|through|directly)\b", re.IGNORECASE
+)
+
+
+def _is_dispatch_note(text: str) -> bool:
+    """True iff `text` is a dispatch/despatch courier annotation, not a real description
+    continuation. Used to drop such a wrapped row instead of stitching it onto the line."""
+    return bool(_DISPATCH_NOTE_RE.match(text.strip()))
+
 
 def _clean_runs(text: str) -> list[str] | None:
     """Segment `text` into consecutive money / percent / alpha runs iff the WHOLE string is
@@ -620,6 +639,10 @@ def _scan_page(rows: list[list[_Word]], grid: _Grid, result: _Items) -> None:
         elif current is not None and _center(toks[0]) < grid.desc_tail_x:
             # A wrapped description continuation row (text only, no Sl) — stitch it on.
             extra = " ".join(w.text for w in toks if _center(w) < grid.desc_tail_x).strip()
+            if _is_dispatch_note(extra):
+                # A "DESPATCHED BY BRAND DIRECTLY" courier note printed under the product line:
+                # drop it rather than fold it into the description (row carries no money anyway).
+                continue
             if extra:
                 current.description = (
                     f"{current.description} {extra}".strip() if current.description else extra)

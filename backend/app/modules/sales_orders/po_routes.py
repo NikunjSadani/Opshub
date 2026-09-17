@@ -48,6 +48,10 @@ MODULE_KEY = "sales_orders"
 _UPLOAD_CHUNK = 1024 * 1024
 _XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+# Money ceiling: a per-line paise value beyond this is a clean 422, never a BigInteger (int8)
+# DB overflow -> uncaught 500. Mirrors the billing money guard in project_products_routes.
+_MAX_MONEY_PAISE = 10**15
+
 
 def _require_module(user: User) -> None:
     rbac.require_module(user, MODULE_KEY)
@@ -79,21 +83,25 @@ class POLineIn(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     uom: str | None = Field(default=None, max_length=20)
     ordered_qty: Decimal = Field(gt=0)
-    # cost tier
-    cost_price_paise: int = Field(ge=0)                               # Our CP, visible, required
-    original_cost_price_paise: int | None = Field(default=None, ge=0)  # Original CP, optional
-    # sell tiers
-    client_sell_price_paise: int = Field(ge=0)                       # client-quoted, REQUIRED
-    vendor_sell_price_paise: int | None = Field(default=None, ge=0)   # vendor sell, optional
-    sell_price_paise: int | None = Field(default=None, ge=0)          # ACTUAL — admin-only
-    # freight tiers
-    client_freight_paise: int | None = Field(default=0, ge=0)        # client freight, visible
-    vendor_freight_paise: int | None = Field(default=None, ge=0)     # vendor freight, optional
-    freight_paise: int | None = Field(default=None, ge=0)            # ACTUAL — admin-only
-    packaging_paise: int = Field(default=0, ge=0)
-    handling_paise: int = Field(default=0, ge=0)
-    other_paise: int = Field(default=0, ge=0)
-    tax_rate: Decimal = Field(default=Decimal("0"), ge=0, le=100)
+    # cost tier — Our CP (visible, required) + the original CP (optional).
+    cost_price_paise: int = Field(ge=0, le=_MAX_MONEY_PAISE)
+    original_cost_price_paise: int | None = Field(default=None, ge=0, le=_MAX_MONEY_PAISE)
+    # sell tiers — client-quoted (required, visible), vendor sell (optional),
+    # and the ACTUAL sell (admin-only).
+    client_sell_price_paise: int = Field(ge=0, le=_MAX_MONEY_PAISE)
+    vendor_sell_price_paise: int | None = Field(default=None, ge=0, le=_MAX_MONEY_PAISE)
+    sell_price_paise: int | None = Field(default=None, ge=0, le=_MAX_MONEY_PAISE)
+    # freight tiers — client freight (visible), vendor freight (optional),
+    # and the ACTUAL freight (admin-only).
+    client_freight_paise: int | None = Field(default=0, ge=0, le=_MAX_MONEY_PAISE)
+    vendor_freight_paise: int | None = Field(default=None, ge=0, le=_MAX_MONEY_PAISE)
+    freight_paise: int | None = Field(default=None, ge=0, le=_MAX_MONEY_PAISE)
+    packaging_paise: int = Field(default=0, ge=0, le=_MAX_MONEY_PAISE)
+    handling_paise: int = Field(default=0, ge=0, le=_MAX_MONEY_PAISE)
+    other_paise: int = Field(default=0, ge=0, le=_MAX_MONEY_PAISE)
+    # Numeric(5,2): reject an over-scale tax rather than let Postgres silently round it
+    # (SQLite keeps full precision, which would hide the divergence in tests).
+    tax_rate: Decimal = Field(default=Decimal("0"), ge=0, le=100, max_digits=5, decimal_places=2)
 
     def to_input(self) -> po_service.LineInput:
         return po_service.LineInput(
@@ -126,8 +134,9 @@ class POCreateIn(BaseModel):
     notes: str | None = Field(default=None, max_length=1000)
     soft_copy_file_id: int | None = None
     agency_fee_type: Literal["NONE", "PERCENT", "FIXED"] = "NONE"
-    agency_fee_percent: Decimal | None = Field(default=None, ge=0, le=100)
-    agency_fee_amount_paise: int | None = Field(default=None, ge=0)
+    agency_fee_percent: Decimal | None = Field(
+        default=None, ge=0, le=100, max_digits=6, decimal_places=3)
+    agency_fee_amount_paise: int | None = Field(default=None, ge=0, le=_MAX_MONEY_PAISE)
     lines: list[POLineIn] = Field(min_length=1)
 
 
@@ -143,8 +152,9 @@ class POAmendIn(BaseModel):
     notes: str | None = Field(default=None, max_length=1000)
     soft_copy_file_id: int | None = None
     agency_fee_type: Literal["NONE", "PERCENT", "FIXED"] | None = None
-    agency_fee_percent: Decimal | None = Field(default=None, ge=0, le=100)
-    agency_fee_amount_paise: int | None = Field(default=None, ge=0)
+    agency_fee_percent: Decimal | None = Field(
+        default=None, ge=0, le=100, max_digits=6, decimal_places=3)
+    agency_fee_amount_paise: int | None = Field(default=None, ge=0, le=_MAX_MONEY_PAISE)
     lines: list[POLineIn] | None = Field(default=None, min_length=1)
     summary: str | None = Field(default=None, max_length=500)
 

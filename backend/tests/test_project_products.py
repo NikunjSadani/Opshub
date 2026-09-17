@@ -349,6 +349,27 @@ def test_patch_updates_subset_leaves_rest(client: TestClient) -> None:
     assert row["sell_price_paise"] == 6000              # untouched actual (admin sees)
 
 
+def test_product_uom_is_product_master_independent_of_template(client: TestClient) -> None:
+    """`product_uom` reflects the Product master's own uom and is present even when the
+    template sets no `uom` override (the PO pre-fill falls back to it)."""
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Boxed Mixer", uom="BOX")
+    # Tag WITHOUT a template uom override.
+    client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
+
+    row = _sole(client, proj)
+    assert row["product_uom"] == "BOX"   # from the Product master
+    assert row["uom"] is None            # template override unset
+
+    # Default product uom is "PCS" when not given at product creation.
+    pid2 = _make_product(client, "Default Uom")
+    client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid2})
+    rows = client.get("/api/v1/project-products", params={"project_id": proj}).json()
+    got = next(r for r in rows if r["product_id"] == pid2)
+    assert got["product_uom"] == "PCS"
+
+
 def test_patch_non_tagged_is_404(client: TestClient) -> None:
     _as(client, "admin")
     proj = _project_id(client)

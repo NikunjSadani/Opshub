@@ -45,6 +45,7 @@ from app.modules.expense.tally import (
     _clean_runs,
     _Col,
     _Grid,
+    _is_dispatch_note,
     _is_item_start,
     _is_tally_tax_invoice,
     _last_money,
@@ -315,6 +316,57 @@ def test_wrapped_description_not_dropped() -> None:
     assert result.lines[1].taxable_paise.value_normalized == 250_000
     assert result.arithmetic.lines_sum_matches_taxable is True
     assert result.review_needed is False
+
+
+def test_dispatch_note_continuation_dropped_not_stitched() -> None:
+    """A 'DESPATCHED BY BRAND DIRECTLY' courier annotation (real Bajaj phrasing) printed as a
+    text-only wrapped row UNDER the product line is a dispatch note, NOT a description
+    continuation — it must be DROPPED from the extracted description (numbers untouched), so the
+    line reads just the product text rather than 'Lloyd 1.5T AC DESPATCHED BY BRAND DIRECTLY'."""
+    result, gold = _extract(_intra(
+        invoice_number="TI/2026/3010",
+        lines=[
+            TLine("Lloyd 1.5T AC", "84151010", Decimal("2"), "PCS", 4690700, Decimal("18"),
+                  wrap="DESPATCHED BY BRAND DIRECTLY"),
+            TLine("Mouse", "84716060", Decimal("5"), "PCS", 50000, Decimal("18"))]))
+    assert len(result.lines) == 2
+    assert result.lines[0].description.value_normalized == "Lloyd 1.5T AC"   # dispatch note gone
+    assert result.lines[0].taxable_paise.value_normalized == 9_381_400        # numbers unchanged
+    assert result.lines[1].taxable_paise.value_normalized == 250_000
+    assert result.arithmetic.lines_sum_matches_taxable is True
+    assert result.review_needed is False
+
+
+def test_real_description_continuation_still_stitched_not_over_trimmed() -> None:
+    """GUARD against over-trimming: a LEGITIMATE wrapped description fragment ('with stabilizer')
+    is NOT a dispatch note and must still be stitched onto the line — the narrow dispatch matcher
+    must never swallow a real continuation."""
+    result, gold = _extract(_intra(
+        invoice_number="TI/2026/3011",
+        lines=[TLine("Split AC", "84151010", Decimal("2"), "PCS", 4690700, Decimal("18"),
+                     wrap="with stabilizer")]))
+    assert len(result.lines) == 1
+    assert result.lines[0].description.value_normalized == "Split AC with stabilizer"
+    assert result.lines[0].taxable_paise.value_normalized == 9_381_400
+    assert result.review_needed is False
+
+
+def test_is_dispatch_note_matcher() -> None:
+    """The narrow matcher: a note BEGINS with the despatch/dispatch verb AND carries a note
+    keyword (by/through/directly). A real description fragment — even one that merely wraps
+    onto a word like 'Dispatch Console' — is NOT dropped."""
+    assert _is_dispatch_note("DESPATCHED BY BRAND DIRECTLY") is True
+    assert _is_dispatch_note("Dispatched by brand directly") is True
+    assert _is_dispatch_note("  Despatch through courier  ") is True
+    # Not dispatch notes — a real continuation must survive.
+    assert _is_dispatch_note("with stabilizer") is False
+    assert _is_dispatch_note("ATHLON 8GB 512 SSD DOS") is False
+    assert _is_dispatch_note("ready for dispatch soon") is False   # verb not at the start
+    assert _is_dispatch_note("dispatcher unit model X") is False   # \b guards the word boundary
+    # A real product description that wraps onto a 'Dispatch…' word must NOT be dropped —
+    # it lacks a dispatch-note keyword (the tightened matcher's over-trim guard).
+    assert _is_dispatch_note("Dispatch Console Pro") is False
+    assert _is_dispatch_note("Despatch Tracker Model X") is False
 
 
 def test_two_line_items() -> None:

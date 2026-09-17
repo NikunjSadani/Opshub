@@ -520,6 +520,25 @@ def test_bulk_upload_bad_row_error(client: TestClient, seeded: dict[str, int]) -
     assert {s["po_number"] for s in out["skipped"]} == {"ERR-1", "ERR-2"}
 
 
+def test_bulk_upload_over_scale_tax_errors(client: TestClient, seeded: dict[str, int]) -> None:
+    # A bulk row with an over-scale tax (Numeric(5,2)) errors cleanly — never a silent DB
+    # round (the same money-hygiene guard as the in-app POLineIn, applied to the bulk path).
+    _as(client, "operator")
+    data = _xlsx(_BULK_HEADER, [
+        ["TAX-1", "W1", "", "", "1", "1.00", "2.00", "", "", "", "", "18.999"],
+    ])
+    r = client.post("/api/v1/purchase-orders/upload",
+                    files={"file": ("pos.xlsx", data, "application/xlsx")},
+                    data={"client_id": seeded["client_id"],
+                          "project_id": seeded["project_id"]})
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["created"] == []
+    assert len(out["errors"]) == 1
+    assert "decimal places" in str(out["errors"]).lower()
+    assert {s["po_number"] for s in out["skipped"]} == {"TAX-1"}
+
+
 # ------------------------------------------- audit-fix regressions (Wave 1 audit)
 
 def _other_client_project(client: TestClient) -> tuple[int, int]:
@@ -965,3 +984,59 @@ def test_admin_amend_omitting_actual_preserves_margin(
     body = r.json()
     assert body["lines"][0]["ordered_qty"] == "20.000"
     assert body["lines"][0]["sell_price_paise"] == 6000  # preserved, NOT reset to 5000
+
+
+# ---------------------------------------- money-input bounds (create + amend)
+
+def test_create_rejects_over_scale_tax(client: TestClient, seeded: dict[str, int]) -> None:
+    """A tax_rate with >2 decimal places is a 422 (Numeric(5,2) scale), NOT a silent DB round."""
+    _as(client, "operator")
+    r = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        {"product_id": seeded["p1"], "ordered_qty": "1",
+         "cost_price_paise": 100, "client_sell_price_paise": 200, "tax_rate": "18.999"}]))
+    assert r.status_code == 422, r.text
+
+
+def test_create_rejects_out_of_ceiling_money(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """A money paise value beyond the int8 ceiling is a clean 422, never a DB overflow 500."""
+    _as(client, "operator")
+    r = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        {"product_id": seeded["p1"], "ordered_qty": "1",
+         "cost_price_paise": 100, "client_sell_price_paise": 10**16}]))
+    assert r.status_code == 422, r.text
+
+
+def test_amend_rejects_over_scale_tax(client: TestClient, seeded: dict[str, int]) -> None:
+    """The same over-scale tax guard applies on the amend line replacement."""
+    _as(client, "operator")
+    pid = client.post("/api/v1/purchase-orders", json=_create_body(seeded)).json()["id"]
+    r = client.patch(f"/api/v1/purchase-orders/{pid}", json={"lines": [
+        {"product_id": seeded["p1"], "ordered_qty": "1",
+         "cost_price_paise": 100, "client_sell_price_paise": 200, "tax_rate": "18.999"}]})
+    assert r.status_code == 422, r.text
+
+
+def test_amend_rejects_out_of_ceiling_money(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """The same money ceiling applies on the amend line replacement (422, not 500)."""
+    _as(client, "operator")
+    pid = client.post("/api/v1/purchase-orders", json=_create_body(seeded)).json()["id"]
+    r = client.patch(f"/api/v1/purchase-orders/{pid}", json={"lines": [
+        {"product_id": seeded["p1"], "ordered_qty": "1",
+         "cost_price_paise": 100, "client_sell_price_paise": 10**16}]})
+    assert r.status_code == 422, r.text
+
+
+def test_valid_2dp_tax_and_normal_money_succeed(
+    client: TestClient, seeded: dict[str, int]
+) -> None:
+    """No false positives: a 2-dp tax and an in-range money value still create a PO."""
+    _as(client, "operator")
+    r = client.post("/api/v1/purchase-orders", json=_create_body(seeded, lines=[
+        {"product_id": seeded["p1"], "ordered_qty": "1",
+         "cost_price_paise": 100, "client_sell_price_paise": 200, "tax_rate": "18.50"}]))
+    assert r.status_code == 201, r.text
+    assert r.json()["lines"][0]["tax_rate"] == "18.50"

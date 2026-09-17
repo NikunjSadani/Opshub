@@ -75,6 +75,7 @@ const TEMPLATE_PRODUCT = {
   model_number: null,
   category: 'Widgets',
   active: true,
+  product_uom: 'PCS',
   description: 'Templated blue widget',
   uom: 'BOX',
   cost_price_paise: 10000, // Our CP ₹100.00
@@ -473,6 +474,33 @@ describe('PO create form — load this project\'s products (template pre-fill)',
     fireEvent.click(loadBtn);
     // Deduped by product_id → still exactly one line for the single template product.
     expect(screen.getAllByLabelText(/our cp/i)).toHaveLength(1);
+  });
+
+  it("pre-fills the line UOM from the product master when the template's uom is null", async () => {
+    // Template with NO uom override but the Product master carries "CTN" (product_uom).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        if (url.includes('/project-products'))
+          return json([{ ...TEMPLATE_PRODUCT, uom: null, product_uom: 'CTN' }]);
+        if (/\/projects\/clients\/\d+/.test(url)) return json(CLIENT_DETAIL);
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.includes('/projects')) return json(PROJECTS);
+        if (url.includes('/products')) return json(PRODUCTS);
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+    await pickCombo(/^client ?\*/i, /BRI — Britannia/);
+    await pickCombo(/^project ?\*/i, /BRI-001 — Q3 Trade Rewards/);
+    fireEvent.click(await screen.findByRole('button', { name: /load this project's products/i }));
+
+    // Template uom was null → falls back to the product master's UOM.
+    expect((screen.getByLabelText(/uom/i) as HTMLInputElement).value).toBe('CTN');
   });
 
   it('an ADMIN also gets the actual sell/freight pre-filled from the template', async () => {

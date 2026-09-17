@@ -102,6 +102,9 @@ class ProjectProductOut(BaseModel):
     model_number: str | None
     category: str | None
     active: bool
+    # The Product master's own unit of measure (String(20), default "PCS") — ALWAYS
+    # present. A PO pre-fill falls back to this when the template's `uom` override is unset.
+    product_uom: str
     # --- pricing template ---
     description: str | None
     uom: str | None
@@ -133,6 +136,7 @@ def _out(tag: ProjectProduct, *, can_see_actuals: bool) -> ProjectProductOut:
         model_number=product.model_number,
         category=product.category,
         active=product.active,
+        product_uom=product.uom,
         description=tag.description,
         uom=tag.uom,
         cost_price_paise=tag.cost_price_paise,

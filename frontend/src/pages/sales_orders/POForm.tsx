@@ -139,7 +139,8 @@ function templateToLine(tp: ProjectProduct, isAdmin: boolean): LineRow {
     key: nextKey++,
     productId: String(tp.product_id),
     description: tp.description ?? tp.name,
-    uom: tp.uom ?? '',
+    // Template UOM override first, then the Product master's own UOM as the fallback.
+    uom: tp.uom ?? tp.product_uom ?? '',
     qty: '',
     originalCost: paiseToRupeeInput(tp.original_cost_price_paise),
     cost: paiseToRupeeInput(tp.cost_price_paise),

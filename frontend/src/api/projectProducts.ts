@@ -40,8 +40,12 @@ export interface ProjectProduct {
   model_number: string | null;
   category: string | null;
   active: boolean;
+  /** The Product master's own UOM (always present, e.g. "PCS") — the PO pre-fill's
+   * fallback when the template `uom` override below is null. */
+  product_uom: string;
   // --- per-project template pricing (all nullable) ---
   description: string | null;
+  /** Per-project UOM override; falls back to `product_uom` on a PO pre-fill. */
   uom: string | null;
   /** Our CP. */
   cost_price_paise: number | null;

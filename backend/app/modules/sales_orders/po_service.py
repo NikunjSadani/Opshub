@@ -215,6 +215,10 @@ def _validate_line_numbers(li: LineInput) -> None:
             raise POValidationError(f"{attr} is too large")
     if li.tax_rate < 0 or li.tax_rate > 100:
         raise POValidationError("tax_rate must be between 0 and 100")
+    # tax_rate is Numeric(5,2): reject an over-scale value rather than let Postgres silently
+    # round it (this guard also covers the bulk-.xlsx path, which routes through create_po).
+    if li.tax_rate != li.tax_rate.quantize(Decimal("0.01")):
+        raise POValidationError("tax_rate supports at most 2 decimal places")
 
 
 def _validate_agency_fee(
@@ -1120,6 +1124,8 @@ def _build_bulk_line(db: Session, cells: dict[str, str]) -> LineInput | str:
         parsed = parse_qty(tax_raw)
         if parsed is None or parsed < 0 or parsed > 100:
             return "tax_rate must be a number between 0 and 100"
+        if parsed != parsed.quantize(Decimal("0.01")):
+            return "tax_rate supports at most 2 decimal places"
         tax = parsed
 
     description = cells.get("description", "").strip() or None
