@@ -425,3 +425,107 @@ describe('ProjectDetail', () => {
     expect(within(dialog).getByLabelText(/actual freight/i)).toBeInTheDocument();
   });
 });
+
+describe('ProjectDetail — per-project pricing bulk upload', () => {
+  it('uploads the .xlsx with project_id and renders the priced / errored outcome', async () => {
+    let uploadUrl: string | null = null;
+    let projectIdField: FormDataEntryValue | null = null;
+    let fileWasSent = false;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? 'GET').toUpperCase();
+      if (url.endsWith('/me')) return meResponseOperate();
+      if (url.match(/\/projects\/11$/)) return json(PROJECT);
+      if (url.match(/\/purchase-orders\?/)) return json([]);
+      // The upload POST — match it BEFORE the `/project-products?` list GET.
+      if (url.includes('/project-products/upload') && method === 'POST') {
+        uploadUrl = url;
+        const fd = init?.body as FormData;
+        projectIdField = fd.get('project_id');
+        fileWasSent = fd.get('file') != null;
+        return json(
+          {
+            priced: ['P-A'],
+            errors: [{ row: 3, message: 'unknown product code ZZZ' }],
+          },
+          201,
+        );
+      }
+      if (url.match(/\/project-products\?/) && method === 'GET') return json([PP_A]);
+      if (url.match(/\/products\?/) && method === 'GET') return json([CAT_A, CAT_B]);
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderDetail(<ProjectDetail />);
+
+    // Open the bulk-pricing upload modal from the Tagged products section.
+    fireEvent.click(await screen.findByRole('button', { name: /upload pricing \.xlsx/i }));
+    const dialog = await screen.findByRole('dialog');
+
+    const fileInput = document.getElementById('pricing-file') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(['x'], 'pricing.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+        ],
+      },
+    });
+
+    const uploadBtn = within(dialog).getByRole('button', { name: /^upload$/i });
+    await waitFor(() => expect(uploadBtn).toBeEnabled());
+    fireEvent.click(uploadBtn);
+
+    // The priced code AND the row error (with reason) are both surfaced.
+    expect(await within(dialog).findByText('P-A')).toBeInTheDocument();
+    expect(within(dialog).getByText(/unknown product code ZZZ/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Row 3/i)).toBeInTheDocument();
+
+    // The multipart POST carried the file + this project's id.
+    expect(uploadUrl).toMatch(/\/project-products\/upload$/);
+    expect(projectIdField).toBe('11');
+    expect(fileWasSent).toBe(true);
+  });
+
+  it('"Download pricing template" GETs the auth-gated template scoped to this project', async () => {
+    URL.createObjectURL = vi.fn(() => 'blob:mock');
+    URL.revokeObjectURL = vi.fn();
+
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith('/me')) return meResponseOperate();
+        if (url.match(/\/projects\/11$/)) return json(PROJECT);
+        if (url.match(/\/purchase-orders\?/)) return json([]);
+        if (url.includes('/project-products/bulk-template.xlsx')) {
+          return new Response(new Blob(['xlsx-bytes']), {
+            status: 200,
+            headers: {
+              'content-type':
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              'content-disposition': 'attachment; filename="project-pricing-template.xlsx"',
+            },
+          });
+        }
+        if (url.match(/\/project-products\?/)) return json([PP_A]);
+        if (url.match(/\/products\?/)) return json([CAT_A, CAT_B]);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderDetail(<ProjectDetail />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /download pricing template/i }));
+
+    await waitFor(() =>
+      expect(
+        urls.some((u) => u.includes('/project-products/bulk-template.xlsx') && u.includes('project_id=11')),
+      ).toBe(true),
+    );
+  });
+});

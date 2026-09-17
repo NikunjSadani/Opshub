@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   Badge,
@@ -31,10 +31,13 @@ import {
   type POStatus,
 } from '../../api/purchaseOrders';
 import {
+  useBulkUploadPricing,
+  useDownloadPricingTemplate,
   useProjectProductsQuery,
   useTagProduct,
   useUntagProduct,
   useUpdateProjectProduct,
+  type PricingBulkResult,
   type ProjectProduct,
   type ProjectProductPricing,
 } from '../../api/projectProducts';
@@ -269,13 +272,28 @@ function ProductsSection({ projectId }: { projectId: string }) {
   const tag = useTagProduct(projectId);
   const untag = useUntagProduct(projectId);
   const update = useUpdateProjectProduct(projectId);
+  const downloadTemplate = useDownloadPricingTemplate(projectId);
   // Which product row's Remove is in flight — so only that button shows a spinner and the
   // others stay usable (a single shared pending flag would disable every row at once).
   const [removingId, setRemovingId] = useState<string | null>(null);
   // The row whose pricing template is being edited (null = modal closed).
   const [editing, setEditing] = useState<ProjectProduct | null>(null);
+  // Bulk pricing .xlsx upload modal + the in-flight template download.
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   if (!canView) return null;
+
+  const handleDownloadTemplate = async () => {
+    setDownloading(true);
+    try {
+      await downloadTemplate();
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   // The ids already tagged — excluded from the Add picker so a product can't be
   // double-added. product_id is numeric on the wire; the picker's ids are strings.
@@ -318,7 +336,24 @@ function ProductsSection({ projectId }: { projectId: string }) {
 
   return (
     <section className="mt-8">
-      <h2 className="mb-2 text-sm font-semibold text-slate-900">Tagged products</h2>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-slate-900">Tagged products</h2>
+        {canOperate && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              loading={downloading}
+              onClick={() => void handleDownloadTemplate()}
+            >
+              Download pricing template
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => setUploadOpen(true)}>
+              Upload pricing .xlsx
+            </Button>
+          </div>
+        )}
+      </div>
 
       {canOperate && (
         <div className="mb-3 max-w-md">
@@ -342,7 +377,166 @@ function ProductsSection({ projectId }: { projectId: string }) {
         onSubmit={handleSavePricing}
         onClose={() => setEditing(null)}
       />
+
+      <PricingUploadModal
+        open={uploadOpen}
+        projectId={projectId}
+        onClose={() => setUploadOpen(false)}
+      />
     </section>
+  );
+}
+
+/**
+ * Modal to bulk-upload this project's per-product PRICING TEMPLATES from an .xlsx (OPERATE).
+ * A Download-template shortcut + file input + Upload, then a full priced / errored outcome
+ * — row errors are ALWAYS shown, never hidden. Mirrors POUpload's outcome list. On success
+ * the project's tagged-product list refreshes (the mutation invalidates its query).
+ */
+function PricingUploadModal({
+  open,
+  projectId,
+  onClose,
+}: {
+  open: boolean;
+  projectId: string;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const upload = useBulkUploadPricing(projectId);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [result, setResult] = useState<PricingBulkResult | null>(null);
+
+  // Re-seed the modal each time it (re)opens: clear the previous file + outcome.
+  const [seeded, setSeeded] = useState(false);
+  if (open && !seeded) {
+    setFile(null);
+    setResult(null);
+    upload.reset();
+    setSeeded(true);
+  }
+  if (!open && seeded) setSeeded(false);
+
+  function close() {
+    if (upload.isPending) return;
+    onClose();
+  }
+
+  const canSubmit = file != null && !upload.isPending;
+
+  function onUpload() {
+    if (!canSubmit || !file) return;
+    setResult(null);
+    upload.mutate(file, {
+      onSuccess: (out) => {
+        setResult(out);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        setFile(null);
+        const errs = out.errors.length;
+        if (errs > 0) {
+          toast.info(
+            `Priced ${out.priced.length}. ${errs} row error${
+              errs === 1 ? '' : 's'
+            } — see the summary below.`,
+          );
+        } else {
+          toast.success(
+            `Priced ${out.priced.length} product${out.priced.length === 1 ? '' : 's'}.`,
+          );
+        }
+      },
+      onError: (err) => toast.error(errorMessage(err)),
+    });
+  }
+
+  return (
+    <Modal
+      open={open}
+      title="Bulk upload pricing"
+      onClose={close}
+      busy={upload.isPending}
+      footer={
+        <>
+          <Button variant="secondary" onClick={close} disabled={upload.isPending}>
+            Close
+          </Button>
+          <Button onClick={onUpload} disabled={!canSubmit} loading={upload.isPending}>
+            Upload
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <p className="text-xs text-slate-500">
+          Upload one .xlsx to set this project's per-product pricing templates. Each row is
+          matched by product code; a matched product's template is updated.
+        </p>
+        <div>
+          <label
+            htmlFor="pricing-file"
+            className="mb-1 block text-xs font-medium text-slate-600"
+          >
+            Excel file (.xlsx)
+          </label>
+          <input
+            id="pricing-file"
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-brand-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-brand-700 hover:file:bg-brand-100"
+          />
+        </div>
+
+        {result != null && (
+          <div className="space-y-4 border-t border-slate-100 pt-3">
+            <div className="flex flex-wrap gap-4 text-sm">
+              <span className="text-emerald-700">Priced: {result.priced.length}</span>
+              <span className="text-rose-700">Row errors: {result.errors.length}</span>
+            </div>
+
+            {result.priced.length > 0 && (
+              <section>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Priced
+                </h3>
+                <div className="flex flex-wrap gap-2">
+                  {result.priced.map((code) => (
+                    <Badge key={code} tone="green">
+                      {code}
+                    </Badge>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {/* Row errors are ALWAYS shown in full — never collapsed or hidden. */}
+            {result.errors.length > 0 && (
+              <section>
+                <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-rose-700">
+                  Row errors
+                </h3>
+                <ul className="divide-y divide-slate-100 rounded-xl border border-rose-200 bg-rose-50/40">
+                  {result.errors.map((e, i) => (
+                    <li key={`${e.row}-${i}`} className="px-3 py-2 text-sm">
+                      <span className="font-medium text-slate-900">Row {e.row}</span>
+                      <span className="text-slate-600"> — {e.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {result.priced.length === 0 && result.errors.length === 0 && (
+              <StatePanel title="Nothing in this file">
+                No pricing rows were found in the uploaded spreadsheet.
+              </StatePanel>
+            )}
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }
 

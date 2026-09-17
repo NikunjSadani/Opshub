@@ -6,6 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { AuthProvider } from '../../auth/AuthProvider';
 import { ToastProvider } from '../../ui';
 import { ProductsPage } from './ProductsPage';
+import { ProductsUpload } from './ProductsUpload';
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -230,8 +231,99 @@ describe('ProductsPage', () => {
 
     // The list still renders for a viewer…
     expect(await screen.findByText('15W LED Bulb')).toBeInTheDocument();
-    // …but no create/edit affordances.
+    // …but no create/edit/upload affordances.
     expect(screen.queryByRole('button', { name: /new product/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /upload \.xlsx/i })).not.toBeInTheDocument();
+  });
+});
+
+describe('Products bulk upload', () => {
+  it('posts the multipart file and renders created / updated + an error row (never hidden)', async () => {
+    let uploadMethod: string | null = null;
+    let uploadWasMultipart = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        if (url.includes('/products/upload') && method === 'POST') {
+          uploadMethod = method;
+          uploadWasMultipart = init?.body instanceof FormData;
+          return json(
+            {
+              created: ['LED-15'],
+              updated: ['EXT-BRD'],
+              errors: [{ row: 4, message: 'unknown UOM "SPOON"' }],
+            },
+            201,
+          );
+        }
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<ProductsUpload />);
+
+    const fileInput = document.getElementById('products-file') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(['x'], 'products.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+        ],
+      },
+    });
+
+    const uploadBtn = screen.getByRole('button', { name: /^upload$/i });
+    await waitFor(() => expect(uploadBtn).toBeEnabled());
+    fireEvent.click(uploadBtn);
+
+    // Created + updated codes AND the row error (with its message) are all surfaced.
+    expect(await screen.findByText('LED-15')).toBeInTheDocument();
+    expect(screen.getByText('EXT-BRD')).toBeInTheDocument();
+    expect(screen.getByText(/unknown UOM "SPOON"/i)).toBeInTheDocument();
+    expect(screen.getByText(/Row 4/i)).toBeInTheDocument();
+
+    // The file was sent as a multipart POST.
+    expect(uploadMethod).toBe('POST');
+    expect(uploadWasMultipart).toBe(true);
+  });
+
+  it('"Download template" GETs the auth-gated products template endpoint and saves the .xlsx', async () => {
+    // jsdom lacks blob-URL plumbing; stub it so the download helper's save step is inert.
+    URL.createObjectURL = vi.fn(() => 'blob:mock');
+    URL.revokeObjectURL = vi.fn();
+
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        if (url.includes('/products/bulk-template.xlsx')) {
+          return new Response(new Blob(['xlsx-bytes']), {
+            status: 200,
+            headers: {
+              'content-type':
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+              'content-disposition': 'attachment; filename="products-bulk-template.xlsx"',
+            },
+          });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(<ProductsUpload />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /download template/i }));
+
+    await waitFor(() =>
+      expect(urls.some((u) => u.endsWith('/api/v1/products/bulk-template.xlsx'))).toBe(true),
+    );
   });
 });

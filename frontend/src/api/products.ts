@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import {
   useMutation,
   useQuery,
@@ -132,6 +133,60 @@ export function useUpdateProduct(): UseMutationResult<
     mutationFn: ({ id, ...body }) => patch<Product>(`/products/${id}`, body),
     onSuccess: (product) => {
       qc.setQueryData(productKeys.detail(product.id), product);
+      void qc.invalidateQueries({ queryKey: ['products', 'list'] });
+    },
+  });
+}
+
+// --------------------------------------------------------- bulk .xlsx upload
+
+/** One row-level error in a products bulk upload (unknown/malformed row). */
+export interface ProductsBulkError {
+  row: number;
+  message: string;
+}
+
+/** The result of a products bulk .xlsx upload (backend `ProductsBulkOut`).
+ * `created`/`updated` are product CODES. */
+export interface ProductsBulkResult {
+  created: string[];
+  updated: string[];
+  errors: ProductsBulkError[];
+}
+
+/** The auth-gated endpoint that serves the products bulk-upload .xlsx template (MANAGE). */
+export const PRODUCTS_BULK_TEMPLATE_PATH = '/products/bulk-template.xlsx';
+/** The filename the products template downloads as (fallback if the server omits Content-Disposition). */
+export const PRODUCTS_BULK_TEMPLATE_FILENAME = 'products-bulk-template.xlsx';
+
+/**
+ * Download the products bulk-upload .xlsx template through the authed blob helper. The
+ * endpoint is auth-gated (MANAGE), so a bare `<a href>` would 401 — this reuses
+ * `downloadUrl`, which attaches the bearer token, streams the blob, and saves it with the
+ * server's filename. Returns a callback the button can await.
+ */
+export function useDownloadProductsTemplate(): () => Promise<void> {
+  const { downloadUrl } = useApi();
+  return useCallback(async () => {
+    await downloadUrl(PRODUCTS_BULK_TEMPLATE_PATH, PRODUCTS_BULK_TEMPLATE_FILENAME);
+  }, [downloadUrl]);
+}
+
+/**
+ * Bulk-create/update products from an .xlsx (MANAGE). Sends a multipart form with `file`.
+ * Returns the created / updated (codes) + row-error breakdown. Invalidates the product
+ * list on success.
+ */
+export function useBulkUploadProducts(): UseMutationResult<ProductsBulkResult, ApiError, File> {
+  const { postForm } = useApi();
+  const qc = useQueryClient();
+  return useMutation<ProductsBulkResult, ApiError, File>({
+    mutationFn: (file) => {
+      const form = new FormData();
+      form.append('file', file);
+      return postForm<ProductsBulkResult>('/products/upload', form);
+    },
+    onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['products', 'list'] });
     },
   });

@@ -20,10 +20,20 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Response,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
 from app.modules.sales_orders import project_products_service as service
 from app.modules.sales_orders.models import ProjectProduct
@@ -35,6 +45,9 @@ from app.platform.auth import current_user
 from app.platform.models import User
 
 router = APIRouter()
+
+_UPLOAD_CHUNK = 1024 * 1024
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 # The two ADMIN-ONLY actual columns — masked to None on read, dropped from a non-admin write.
 _ACTUAL_FIELDS = ("sell_price_paise", "freight_paise")
@@ -124,6 +137,20 @@ class ProjectProductOut(BaseModel):
     tax_rate: str | None
 
 
+class PricingBulkError(BaseModel):
+    """One per-row failure from a bulk pricing upload (1-based sheet row + message)."""
+
+    row: int
+    message: str
+
+
+class PricingBulkOut(BaseModel):
+    """Result of a bulk pricing upload: the product CODES tagged+priced, and per-row errors."""
+
+    priced: list[str]
+    errors: list[PricingBulkError]
+
+
 # ---------------------------------------------------------------- serializer
 
 def _out(tag: ProjectProduct, *, can_see_actuals: bool) -> ProjectProductOut:
@@ -207,6 +234,71 @@ def tag_project_product(
     db.refresh(tag)
     response.status_code = status.HTTP_201_CREATED if created else status.HTTP_200_OK
     return _out(tag, can_see_actuals=can_actuals)
+
+
+# ------------------------------------------------------- bulk pricing (Excel)
+# Registered BEFORE `/project-products/{project_id}/{product_id}` so the literal
+# `bulk-template.xlsx` / `upload` paths match here rather than the param route.
+
+
+@router.get("/project-products/bulk-template.xlsx")
+def download_pricing_bulk_template(
+    user: Annotated[User, Depends(current_user)],
+) -> Response:
+    """Download a ready-to-fill ``.xlsx`` template for the bulk pricing upload: the exact
+    header the parser accepts + one illustrative example row (money columns in rupees). The
+    two ADMIN-ONLY actual columns are INCLUDED for an admin and OMITTED for a non-admin (who
+    could never set them). Needs module VIEW."""
+    _require_view(user)
+    return Response(
+        content=service.build_pricing_template_xlsx(
+            include_actuals=_can_see_actuals(user)),
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition":
+                'attachment; filename="project-product-pricing-template.xlsx"',
+        },
+    )
+
+
+@router.post("/project-products/upload", response_model=PricingBulkOut)
+def upload_project_product_pricing(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    file: Annotated[UploadFile, File()],
+    project_id: Annotated[int, Form()],
+) -> PricingBulkOut:
+    """Bulk-set a project's per-product pricing templates from an .xlsx (one sheet, one
+    project — the project is a FORM field, not a sheet column). Each row resolves a product
+    (by code, else exact name), tags it to the project (idempotent), and upserts its pricing.
+
+    MASKING: a non-admin's ``actual_sell``/``actual_freight`` are DROPPED before persist (a
+    non-admin's sheet can never set the margin). Unresolved / ambiguous / malformed rows come
+    back per-row in ``errors``; ``priced`` lists the product codes successfully saved. 400 if
+    the project doesn't exist."""
+    _require_tag(user)
+    can_actuals = _can_see_actuals(user)
+
+    max_bytes = get_settings().max_upload_bytes
+    data = bytearray()
+    while chunk := file.file.read(_UPLOAD_CHUNK):
+        if len(data) + len(chunk) > max_bytes:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "file too large")
+        data.extend(chunk)
+
+    try:
+        result = service.bulk_set_pricing_from_excel(
+            db, bytes(data), project_id=project_id,
+            can_set_actuals=can_actuals, actor_uid=user.firebase_uid)
+    except service.ProjectNotFound as exc:
+        # A missing project is a clean 400 (nothing was persisted).
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    db.commit()
+    return PricingBulkOut(
+        priced=result.priced,
+        errors=[PricingBulkError(row=row, message=msg) for row, msg in result.errors],
+    )
 
 
 @router.patch(

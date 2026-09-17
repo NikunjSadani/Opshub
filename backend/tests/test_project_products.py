@@ -9,12 +9,14 @@ the `uq_project_product` unique constraint and the FK cascades are genuinely tes
 """
 from __future__ import annotations
 
+import io
 from collections.abc import Iterator
 from decimal import Decimal
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from openpyxl import Workbook, load_workbook
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -519,3 +521,245 @@ def test_viewer_403_on_post_and_patch(client: TestClient) -> None:
     patch = client.patch(f"/api/v1/project-products/{proj}/{pid}",
                          json={"cost_price_paise": 1})
     assert patch.status_code == 403
+
+
+# --------------------------------------------------------------- bulk pricing upload
+
+def _new_product(client: TestClient, name: str, **extra: object) -> dict[str, object]:
+    """Create a product and return its full row (id + code + ...)."""
+    r = client.post("/api/v1/products", json={"name": name, **extra})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def _xlsx(headers: list[str], rows: list[list[object]]) -> bytes:
+    """Build an in-memory .xlsx with the given header row + data rows."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "pricing"
+    ws.append(headers)
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _upload(client: TestClient, project_id: int, data: bytes) -> object:
+    return client.post(
+        "/api/v1/project-products/upload",
+        data={"project_id": str(project_id)},
+        files={"file": ("pricing.xlsx", data,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+
+def _row_for(client: TestClient, proj: int, product_id: int) -> dict[str, object]:
+    rows = client.get("/api/v1/project-products", params={"project_id": proj}).json()
+    return next(r for r in rows if r["product_id"] == product_id)
+
+
+def test_bulk_prices_by_code_and_by_exact_name(client: TestClient) -> None:
+    """Upload prices EXISTING products — one resolved by code, one by exact name — and both
+    are tagged + priced (the GET reflects the money)."""
+    _as(client, "admin")
+    proj = _project_id(client)
+    by_code = _new_product(client, "Mixer Grinder", code="SKU-CODE-1")
+    by_name = _new_product(client, "Unique Kettle Name")  # auto-minted code
+
+    data = _xlsx(
+        ["product_code", "product_name", "cost_price", "client_sell", "tax_rate"],
+        [
+            ["SKU-CODE-1", "", 250.00, 399.00, 18],   # resolved by code
+            ["", "Unique Kettle Name", 120.00, 199.00, 12],  # resolved by exact name
+        ],
+    )
+    r = _upload(client, proj, data)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["errors"] == []
+    assert set(body["priced"]) == {"SKU-CODE-1", by_name["code"]}
+
+    # GET reflects the persisted money (rupees parsed to paise).
+    row_code = _row_for(client, proj, int(by_code["id"]))
+    assert row_code["cost_price_paise"] == 25000
+    assert row_code["client_sell_price_paise"] == 39900
+    assert Decimal(str(row_code["tax_rate"])) == Decimal("18")
+
+    row_name = _row_for(client, proj, int(by_name["id"]))
+    assert row_name["cost_price_paise"] == 12000
+    assert row_name["client_sell_price_paise"] == 19900
+
+
+def test_bulk_code_match_is_exact_case_sensitive_no_crash(client: TestClient) -> None:
+    """Product codes are case-SENSITIVELY unique, so `CODE` and `code` can coexist. A pricing
+    row's product_code must resolve by EXACT match (not a case-folded one that would match
+    both and raise MultipleResultsFound -> a 500 that aborts the whole batch). The upload
+    prices exactly the exact-case product and leaves the other untouched."""
+    _as(client, "admin")
+    proj = _project_id(client)
+    upper = _new_product(client, "Upper Cased", code="CASECODE")
+    _new_product(client, "Lower Cased", code="casecode")  # coexists (case-sensitive unique)
+
+    data = _xlsx(
+        ["product_code", "cost_price", "client_sell"],
+        [["CASECODE", 200.00, 350.00]],
+    )
+    r = _upload(client, proj, data)
+    assert r.status_code == 200, r.text  # not a 500 from an ambiguous lookup
+    body = r.json()
+    assert body["errors"] == []
+    assert body["priced"] == ["CASECODE"]
+
+    # Only the exact-case product was priced/tagged; the other-case one is untouched.
+    rows = client.get("/api/v1/project-products", params={"project_id": proj}).json()
+    assert [int(r["product_id"]) for r in rows] == [int(upper["id"])]  # lower not tagged
+    assert rows[0]["cost_price_paise"] == 20000
+
+
+def test_bulk_unknown_and_ambiguous_are_row_errors(client: TestClient) -> None:
+    _as(client, "admin")
+    proj = _project_id(client)
+    # Two DIFFERENT products sharing the same name -> an ambiguous name lookup.
+    _new_product(client, "Twin", brand="A")
+    _new_product(client, "Twin", brand="B")
+
+    data = _xlsx(
+        ["product_code", "product_name", "cost_price"],
+        [
+            ["NO-SUCH-CODE", "", 100.00],   # unknown product
+            ["", "Twin", 100.00],           # ambiguous name
+        ],
+    )
+    r = _upload(client, proj, data)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["priced"] == []
+    msgs = {e["row"]: e["message"] for e in body["errors"]}
+    assert msgs[2] == "product not found — add it via the Products upload first"
+    assert msgs[3] == "ambiguous product name; use a product code"
+    # Nothing was tagged.
+    assert client.get("/api/v1/project-products", params={"project_id": proj}).json() == []
+
+
+def test_bulk_non_admin_cannot_set_actuals(client: TestClient) -> None:
+    """A NON-admin (OPERATE, no IAM) upload with actual_sell/actual_freight set: the actuals
+    are NOT persisted (admin GET still sees null) while the visible tiers ARE."""
+    _as(client, "admin")
+    proj = _project_id(client)
+    prod = _new_product(client, "Margin Widget", code="MARGIN-1")
+
+    _as(client, "operator")  # OPERATE, but NOT platform IAM -> non-admin
+    data = _xlsx(
+        ["product_code", "cost_price", "client_sell", "actual_sell", "actual_freight"],
+        [["MARGIN-1", 300.00, 500.00, 999.00, 777.00]],
+    )
+    r = _upload(client, proj, data)
+    assert r.status_code == 200, r.text
+    assert r.json()["priced"] == ["MARGIN-1"]
+
+    _as(client, "admin")  # only an admin can see the stored actual
+    row = _row_for(client, proj, int(prod["id"]))
+    assert row["sell_price_paise"] is None       # actual NOT persisted by a non-admin
+    assert row["freight_paise"] is None
+    assert row["cost_price_paise"] == 30000       # visible tiers DID persist
+    assert row["client_sell_price_paise"] == 50000
+
+
+def test_bulk_admin_can_set_actuals(client: TestClient) -> None:
+    _as(client, "admin")
+    proj = _project_id(client)
+    prod = _new_product(client, "Admin Margin", code="ADM-1")
+
+    data = _xlsx(
+        ["product_code", "client_sell", "actual_sell", "actual_freight"],
+        [["ADM-1", 500.00, 620.00, 45.00]],
+    )
+    r = _upload(client, proj, data)
+    assert r.status_code == 200, r.text
+    assert r.json()["priced"] == ["ADM-1"]
+
+    row = _row_for(client, proj, int(prod["id"]))
+    assert row["sell_price_paise"] == 62000       # admin CAN set the actual
+    assert row["freight_paise"] == 4500
+    assert row["client_sell_price_paise"] == 50000
+
+
+def test_bulk_template_download_masks_actual_columns(client: TestClient) -> None:
+    """The admin's template INCLUDES the two actual columns; the non-admin's OMITS them.
+    The download needs module VIEW."""
+    _as(client, "admin")
+    admin_dl = client.get("/api/v1/project-products/bulk-template.xlsx")
+    assert admin_dl.status_code == 200
+    admin_cols = _header_cols(admin_dl.content)
+    assert "actual_sell" in admin_cols
+    assert "actual_freight" in admin_cols
+
+    _as(client, "operator")  # non-admin (no IAM)
+    op_dl = client.get("/api/v1/project-products/bulk-template.xlsx")
+    assert op_dl.status_code == 200
+    op_cols = _header_cols(op_dl.content)
+    assert "actual_sell" not in op_cols
+    assert "actual_freight" not in op_cols
+    assert "client_sell" in op_cols  # visible columns still present
+
+
+def _header_cols(data: bytes) -> list[str]:
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        ws = wb.worksheets[0]
+        header = next(ws.iter_rows(values_only=True))
+        return [str(c) for c in header if c is not None]
+    finally:
+        wb.close()
+
+
+def test_bulk_money_and_tax_bounds_are_per_row_errors(client: TestClient) -> None:
+    """An over-scale tax row and an out-of-ceiling money row are per-row errors; the batch is
+    not poisoned (a valid row alongside them still prices)."""
+    _as(client, "admin")
+    proj = _project_id(client)
+    ok = _new_product(client, "Good Row", code="OK-1")
+    _new_product(client, "Bad Tax", code="BADTAX-1")
+    _new_product(client, "Huge Money", code="HUGE-1")
+
+    data = _xlsx(
+        ["product_code", "cost_price", "tax_rate"],
+        [
+            ["OK-1", 100.00, 18],           # valid
+            ["BADTAX-1", 100.00, "18.999"], # over-scale tax
+            ["HUGE-1", 10**14, 18],         # rupees -> 10**16 paise, over the ceiling
+        ],
+    )
+    r = _upload(client, proj, data)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["priced"] == ["OK-1"]
+    msgs = {e["row"]: e["message"] for e in body["errors"]}
+    assert msgs[3] == "tax_rate supports at most 2 decimal places"
+    assert "too large" in msgs[4]
+    # The valid row DID persist; the bad ones did not tag.
+    assert [row["product_id"] for row in
+            client.get("/api/v1/project-products", params={"project_id": proj}).json()] \
+        == [int(ok["id"])]
+
+
+def test_bulk_upload_missing_project_is_400(client: TestClient) -> None:
+    _as(client, "admin")
+    data = _xlsx(["product_code", "cost_price"], [["X", 1.00]])
+    r = _upload(client, 999999, data)
+    assert r.status_code == 400, r.text
+
+
+def test_bulk_upload_viewer_403_and_template_needs_view(client: TestClient) -> None:
+    _as(client, "admin")
+    proj = _project_id(client)
+    _new_product(client, "Guarded", code="GUARD-1")
+    data = _xlsx(["product_code", "cost_price"], [["GUARD-1", 10.00]])
+
+    _as(client, "viewer")  # VIEW only -> no product.tag
+    up = _upload(client, proj, data)
+    assert up.status_code == 403
+    # Template download only needs module VIEW -> a viewer CAN download it.
+    dl = client.get("/api/v1/project-products/bulk-template.xlsx")
+    assert dl.status_code == 200

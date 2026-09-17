@@ -15,10 +15,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
 from app.modules.sales_orders import products_service as service
 from app.modules.sales_orders.models import Product
@@ -27,6 +37,9 @@ from app.platform.auth import current_user
 from app.platform.models import User
 
 router = APIRouter()
+
+_UPLOAD_CHUNK = 1024 * 1024
+_XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _require_view(user: User) -> None:
@@ -77,6 +90,17 @@ class ProductOut(BaseModel):
     created_at: datetime
 
 
+class ProductBulkError(BaseModel):
+    row: int
+    message: str
+
+
+class ProductsBulkOut(BaseModel):
+    created: list[str]   # CODES of the products created this upload
+    updated: list[str]   # CODES of the products updated this upload
+    errors: list[ProductBulkError]
+
+
 # ------------------------------------------------------------------- routes
 
 @router.get("/products", response_model=list[ProductOut])
@@ -94,6 +118,58 @@ def list_products(
     return service.list_products(
         db, q=q, category=category, active=active, limit=limit, offset=offset,
         project_id=project_id,
+    )
+
+
+# --------------------------------------------------------------- bulk template
+#
+# Registered BEFORE `/products/{product_id}` so the literal `.xlsx` path is matched here
+# rather than trying (and failing) to coerce "bulk-template.xlsx" to an int product_id.
+@router.get("/products/bulk-template.xlsx")
+def download_bulk_template(
+    user: Annotated[User, Depends(current_user)],
+) -> Response:
+    """Download a ready-to-fill ``.xlsx`` template for the bulk product upsert: the exact
+    header the parser accepts + one illustrative example row. MANAGE-gated like the upload
+    (same as single create), so the download never leaks to a viewer."""
+    _require_manage(user)
+    return Response(
+        content=service.build_products_template_xlsx(),
+        media_type=_XLSX_MEDIA_TYPE,
+        headers={
+            "Content-Disposition": 'attachment; filename="products-bulk-template.xlsx"',
+        },
+    )
+
+
+# ------------------------------------------------------------------- upload
+
+@router.post("/products/upload", response_model=ProductsBulkOut, status_code=201)
+def upload_products(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    file: Annotated[UploadFile, File()],
+) -> ProductsBulkOut:
+    """Bulk CREATE/UPDATE products from an .xlsx. Each row matches an existing product by
+    exact ``code`` (when supplied) or by case-insensitive identity (name, brand,
+    model_number); a match is updated with the row's provided fields, a miss is created (code
+    auto-minted when omitted). Malformed / colliding / reserved-code rows come back per-row in
+    ``errors`` without poisoning the batch. MANAGE-gated (same as single create)."""
+    _require_manage(user)
+    max_bytes = get_settings().max_upload_bytes
+    data = bytearray()
+    while chunk := file.file.read(_UPLOAD_CHUNK):
+        if len(data) + len(chunk) > max_bytes:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "file too large")
+        data.extend(chunk)
+
+    result = service.bulk_upsert_from_excel(db, bytes(data), actor_uid=user.firebase_uid)
+    db.commit()
+    return ProductsBulkOut(
+        created=result.created,
+        updated=result.updated,
+        errors=[ProductBulkError(row=row, message=msg) for row, msg in result.errors],
     )
 
 

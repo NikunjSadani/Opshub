@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
+import { Link, Navigate, Route, Routes } from 'react-router-dom';
 import {
   Badge,
   Button,
@@ -26,6 +27,11 @@ import {
   type Product,
   type ProductFilters,
 } from '../../api/products';
+import { SALES_ORDERS_BASE } from './salesOrdersFormat';
+import { ProductsUpload } from './ProductsUpload';
+
+/** Route base for the Products tab (nested under the Sales Orders module). */
+const PRODUCTS_BASE = `${SALES_ORDERS_BASE}/products`;
 
 /** Pull a human string out of any thrown value — never "[object Object]". */
 function errorMessage(err: unknown): string {
@@ -259,12 +265,36 @@ function ProductModal({
   );
 }
 
-/** Product Master: searchable list + a MANAGE-gated create/edit modal. */
+/**
+ * Products tab shell: owns its own list / upload sub-routes (mounted at
+ * `sales_orders/products/*`). Server-side RBAC is the real gate; the create + upload
+ * affordances and the upload route are gated at MANAGE here for honest UX.
+ */
 export function ProductsPage() {
   const perms = usePermissions();
-  // Reads need VIEW; create + edit need MANAGE (matches the backend).
   const canManage = perms.atLeast('sales_orders', 'MANAGE');
+  // Defer the MANAGE route guard until /me resolves so a deep-link isn't bounced before
+  // permissions load (mirrors PurchaseOrdersPage's OPERATE guard).
+  const manageGuard = (node: ReactElement) =>
+    perms.loading ? (
+      <div className="grid place-items-center py-10 text-sm text-slate-400">Loading…</div>
+    ) : canManage ? (
+      node
+    ) : (
+      <Navigate to={PRODUCTS_BASE} replace />
+    );
 
+  return (
+    <Routes>
+      <Route index element={<ProductsRegister canManage={canManage} />} />
+      <Route path="upload" element={manageGuard(<ProductsUpload />)} />
+      <Route path="*" element={<Navigate to={PRODUCTS_BASE} replace />} />
+    </Routes>
+  );
+}
+
+/** Product Master: searchable list + a MANAGE-gated create/edit modal. */
+function ProductsRegister({ canManage }: { canManage: boolean }) {
   const [q, setQ] = useState('');
   const [category, setCategory] = useState('');
   const [active, setActive] = useState<'true' | 'false' | ''>('');
@@ -304,9 +334,16 @@ export function ProductsPage() {
         subtitle="The product master — every item that can appear on a sales or purchase order."
         actions={
           canManage ? (
-            <Button size="sm" onClick={openCreate}>
-              New product
-            </Button>
+            <div className="flex items-center gap-2">
+              <Link to={`${PRODUCTS_BASE}/upload`}>
+                <Button variant="secondary" size="sm">
+                  Upload .xlsx
+                </Button>
+              </Link>
+              <Button size="sm" onClick={openCreate}>
+                New product
+              </Button>
+            </div>
           ) : undefined
         }
       />
