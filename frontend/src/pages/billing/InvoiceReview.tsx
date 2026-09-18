@@ -1131,11 +1131,11 @@ export function InvoiceReview() {
           </>
         )}
 
-        {/* Cancel / Delete are MANAGE-only. Delete is always available (delete-and-re-upload);
-            cancel only applies to a not-yet-terminal invoice. */}
-        {canManage && (
+        {/* Delete is an OPERATE affordance (delete-and-re-upload, always available); Cancel
+            stays MANAGE-only and only applies to a not-yet-terminal invoice. */}
+        {canOperate && (
           <div className="ml-auto flex items-center gap-2">
-            {!alreadyConfirmed && !isCancelled && (
+            {canManage && !alreadyConfirmed && !isCancelled && (
               <Button
                 variant="secondary"
                 size="sm"

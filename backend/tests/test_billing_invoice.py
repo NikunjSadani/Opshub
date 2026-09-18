@@ -451,11 +451,11 @@ def test_rbac_viewer_and_operator_gates(client: TestClient) -> None:
     assert client.post(f"/api/v1/billing/invoices/{inv_id}/match").status_code == 403
     assert client.delete(f"/api/v1/billing/invoices/{inv_id}").status_code == 403
 
-    # OPERATOR: can match, cannot cancel / delete (MANAGE)
+    # OPERATOR: can match + DELETE (delete-and-re-upload is OPERATE); cannot cancel (MANAGE)
     _as(client, OPERATOR)
     assert client.post(f"/api/v1/billing/invoices/{inv_id}/match").status_code == 200
     assert client.post(f"/api/v1/billing/invoices/{inv_id}/cancel").status_code == 403
-    assert client.delete(f"/api/v1/billing/invoices/{inv_id}").status_code == 403
+    assert client.delete(f"/api/v1/billing/invoices/{inv_id}").status_code == 200
 
     # OUTSIDER: no access at all
     _as(client, OUTSIDER)

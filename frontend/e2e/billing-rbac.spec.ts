@@ -45,8 +45,8 @@ test.describe('Billing & Finance — RBAC gating', () => {
 
   test.afterEach(async ({ request }) => {
     if (!createdInvoiceId) return;
-    // Delete as dev-admin (delete needs MANAGE) so the later same-fixture upload in
-    // billing.spec is a fresh capture, not a DUPLICATE. Best-effort (DB is torn down anyway).
+    // Delete as dev-admin (delete needs OPERATE; admin covers it) so the later same-fixture
+    // upload in billing.spec is a fresh capture, not a DUPLICATE. Best-effort (DB torn down anyway).
     await request
       .delete(`/api/v1/billing/invoices/${createdInvoiceId}`, { headers: DEV_ADMIN })
       .catch(() => {});

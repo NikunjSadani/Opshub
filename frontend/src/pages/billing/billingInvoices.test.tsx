@@ -325,31 +325,37 @@ describe('Register (InvoicesPage)', () => {
     expect(deleted).toEqual(['7']);
   });
 
-  it('an OPERATE user sees the Review link but no per-row Delete on the register', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes('/billing/invoices')) return json([INVOICE_ROW]);
-        if (url.includes('/purchase-orders')) return json(PURCHASE_ORDERS);
-        if (url.includes('/projects/clients')) return json(CLIENTS);
-        if (url.endsWith('/me')) return meResponse('OPERATE');
-        throw new Error(`Unexpected fetch: ${url}`);
-      }),
-    );
+  it('an OPERATE user SEES per-row Delete; a VIEW user does not', async () => {
+    function renderAt(level: 'VIEW' | 'OPERATE') {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = String(input);
+          if (url.includes('/billing/invoices')) return json([INVOICE_ROW]);
+          if (url.includes('/purchase-orders')) return json(PURCHASE_ORDERS);
+          if (url.includes('/projects/clients')) return json(CLIENTS);
+          if (url.endsWith('/me')) return meResponse(level);
+          throw new Error(`Unexpected fetch: ${url}`);
+        }),
+      );
+      return renderWithProviders(
+        <Routes>
+          <Route path="/m/billing/*" element={<InvoicesPage />} />
+        </Routes>,
+        ['/m/billing'],
+      );
+    }
 
-    renderWithProviders(
-      <Routes>
-        <Route path="/m/billing/*" element={<InvoicesPage />} />
-      </Routes>,
-      ['/m/billing'],
-    );
-
-    expect(await screen.findByText('CINV-2026-005')).toBeInTheDocument();
-    const row = screen.getByText('CINV-2026-005').closest('tr') as HTMLElement;
-    // The Review link is present for everyone…
+    // OPERATE: delete-and-re-upload is an operator affordance -> the row Delete shows.
+    const view = renderAt('OPERATE');
+    let row = (await screen.findByText('CINV-2026-005')).closest('tr') as HTMLElement;
     expect(within(row).getByRole('link', { name: /review/i })).toBeInTheDocument();
-    // …but the MANAGE-only Delete button is absent for an operator.
+    expect(within(row).getByRole('button', { name: /delete/i })).toBeInTheDocument();
+    view.unmount();
+
+    // VIEW-only: read-only, no Delete.
+    renderAt('VIEW');
+    row = (await screen.findByText('CINV-2026-005')).closest('tr') as HTMLElement;
     expect(within(row).queryByRole('button', { name: /delete/i })).not.toBeInTheDocument();
   });
 
@@ -729,7 +735,7 @@ describe('InvoiceReview — detail + match', () => {
     expect(screen.queryByRole('button', { name: /cancel invoice/i })).not.toBeInTheDocument();
   });
 
-  it('an OPERATE user can confirm but gets no Cancel/Delete (MANAGE-only)', async () => {
+  it('an OPERATE user can confirm + Delete, but NOT Cancel (MANAGE-only)', async () => {
     const captured: unknown[] = [];
     stub({
       level: 'OPERATE',
@@ -746,8 +752,9 @@ describe('InvoiceReview — detail + match', () => {
 
     const confirm = await screen.findByRole('button', { name: /confirm invoice/i });
     expect(confirm).toBeEnabled();
-    // MANAGE-only actions are absent for an operator.
-    expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
+    // Delete is now an OPERATE affordance (delete-and-re-upload)…
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeInTheDocument();
+    // …but Cancel stays MANAGE-only, absent for an operator.
     expect(screen.queryByRole('button', { name: /cancel invoice/i })).not.toBeInTheDocument();
 
     // Confirm PATCHes the review endpoint with confirm:true.

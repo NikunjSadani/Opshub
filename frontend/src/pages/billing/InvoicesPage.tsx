@@ -55,8 +55,10 @@ const STATUS_OPTIONS: readonly SalesInvoiceStatus[] = [
 function Register() {
   const toast = useToast();
   const perms = usePermissions();
-  // Delete-and-re-upload is a MANAGE affordance (mirrors the invoice detail screen).
-  const canManage = perms.atLeast('billing', 'MANAGE');
+  // Delete-and-re-upload is an OPERATE affordance (an operator fixing a bad upload; mirrors
+  // the invoice detail screen). The backend still refuses deleting an invoice that has
+  // receivables against it, so the scope stays bounded.
+  const canOperate = perms.atLeast('billing', 'OPERATE');
   const deleteInvoice = useDeleteInvoice();
 
   const [q, setQ] = useState('');
@@ -232,7 +234,7 @@ function Register() {
                         >
                           {inv.status === 'CONFIRMED' || inv.status === 'CANCELLED' ? 'View' : 'Review'}
                         </Link>
-                        {canManage && (
+                        {canOperate && (
                           <Button
                             variant="danger"
                             size="sm"

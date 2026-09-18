@@ -545,8 +545,11 @@ def delete_invoice(
     user: Annotated[User, Depends(current_user)],
     db: Annotated[Session, Depends(get_db)],
 ) -> DeleteOut:
-    """Delete an invoice + its source blob (MANAGE). Supports delete-and-re-upload."""
-    rbac.require_level(user, rbac.BILLING, Level.MANAGE)
+    """Delete an invoice + its source blob (OPERATE). Supports delete-and-re-upload — an
+    operator fixing a bad upload. Still refuses (409) once an invoice has receivable records
+    (payments/credit-notes/advances) or gold-set provenance, so the destructive scope is
+    bounded regardless of tier."""
+    rbac.require_level(user, rbac.BILLING, Level.OPERATE)
     invoice = _get_invoice(db, invoice_id)
     try:
         service.delete_invoice(db, invoice, actor_uid=user.firebase_uid)
