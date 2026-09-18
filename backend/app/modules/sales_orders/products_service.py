@@ -21,6 +21,7 @@ import io
 import re
 from dataclasses import dataclass
 from dataclasses import field as dc_field
+from decimal import Decimal
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
@@ -28,6 +29,8 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.modules.challan.parsing import parse_qty
+from app.modules.masterdata.models import HsnCode
 from app.modules.sales_orders.models import Product, ProjectProduct
 from app.platform import audit
 
@@ -37,11 +40,19 @@ from app.platform import audit
 # with a system-generated one.
 _RESERVED_CODE_RE = re.compile(r"^PRD-\d{6,}$", re.IGNORECASE)
 
+# A valid statutory HSN/SAC code (mirrors the HSN master's own `HsnIn` guard): 2–12 digits.
+# The product path only seeds/reconciles `md_hsn` for codes in this shape, so a product's
+# free-form `hsn` (e.g. "8471 3090" or "ABC12") can never create an invalid master row the
+# HSN editor would itself reject.
+_HSN_CODE_RE = re.compile(r"^[0-9]{2,12}$")
+
 _MAX_NAME_LEN = 200
 _MAX_CODE_LEN = 40
 _MAX_SHORT_LEN = 120
 _MAX_UOM_LEN = 20
 _MAX_HSN_LEN = 10
+# `md_hsn.description` column cap — a synced product name is truncated to fit.
+_MAX_HSN_DESC_LEN = 300
 
 # Required (non-null) string fields and their column caps.
 _REQUIRED_FIELDS: dict[str, int] = {"name": _MAX_NAME_LEN, "uom": _MAX_UOM_LEN}
@@ -53,8 +64,10 @@ _OPTIONAL_FIELDS: dict[str, int] = {
     "category": _MAX_SHORT_LEN,
     "hsn": _MAX_HSN_LEN,
 }
-# Every mutable field a PATCH may touch (adds the boolean `active`).
-_PATCHABLE: frozenset[str] = frozenset(_REQUIRED_FIELDS) | frozenset(_OPTIONAL_FIELDS) | {"active"}
+# Every mutable field a PATCH may touch (adds the boolean `active` and the `gst_rate`).
+_PATCHABLE: frozenset[str] = (
+    frozenset(_REQUIRED_FIELDS) | frozenset(_OPTIONAL_FIELDS) | {"active", "gst_rate"}
+)
 
 
 class ProductError(Exception):
@@ -110,6 +123,110 @@ def _clean_optional(value: str | None, *, field: str, max_len: int) -> str | Non
     return cleaned
 
 
+def _clean_gst_rate(value: Decimal | None) -> Decimal | None:
+    """Validate an optional GST rate. None/absent clears it. A present value must be a
+    Decimal in 0..100 with at most 2 decimal places — mirrors the PO line's `tax_rate`
+    guard (range first, then reject an over-scale value rather than silently rounding it
+    to `Numeric(5,2)`). Raises `ProductError` (route -> 422) on a bad value."""
+    if value is None:
+        return None
+    if not isinstance(value, Decimal):
+        raise ProductError("gst_rate must be a number")
+    if value < 0 or value > 100:
+        raise ProductError("gst_rate must be between 0 and 100")
+    # Numeric(5,2): reject > 2 decimal places instead of letting Postgres round silently.
+    if value != value.quantize(Decimal("0.01")):
+        raise ProductError("gst_rate supports at most 2 decimal places")
+    return value
+
+
+def _upsert_hsn_master(
+    db: Session,
+    *,
+    hsn: str | None,
+    gst_rate: Decimal | None,
+    description: str | None,
+    actor_uid: str | None,
+    allow_update: bool,
+) -> tuple[str, Decimal | None]:
+    """Keep the challan HSN master (`md_hsn`) in sync from a product's (hsn, gst_rate).
+
+    NO-OP unless BOTH `hsn` and `gst_rate` are present AND `hsn` is a valid statutory code
+    (`_HSN_CODE_RE`). Otherwise:
+      * no `HsnCode` for that `hsn`  -> CREATE it (rate = the product's, description = the
+        product name truncated to fit, active=True), audited — this is how a NEW hsn gets
+        registered, always allowed;
+      * exists with a DIFFERENT rate and `allow_update` -> UPDATE it (old->new audited);
+      * exists with a DIFFERENT rate and NOT `allow_update` -> "protected" (leave it): a
+        routine product save must never silently rewrite a printed statutory rate — only the
+        EXPLICIT sync (allow_update=True) reconciles an existing rate;
+      * exists with the same rate     -> no-op.
+
+    Returns `(outcome, old_rate)` where outcome is
+    "created" | "updated" | "protected" | "noop". The `hsn` key is unique, so a concurrent
+    create is caught at flush and folded into the existing-row branch (never a 500)."""
+    if not hsn or gst_rate is None or not _HSN_CODE_RE.match(hsn):
+        return "noop", None
+
+    existing = db.execute(
+        select(HsnCode).where(HsnCode.hsn == hsn)
+    ).scalar_one_or_none()
+    if existing is None:
+        row = HsnCode(
+            hsn=hsn,
+            gst_rate=gst_rate,
+            description=(description or "")[:_MAX_HSN_DESC_LEN],
+            active=True,
+            updated_by=actor_uid,
+        )
+        try:
+            # `with` releases the savepoint on success; a concurrent create of the same
+            # hsn trips the UNIQUE index at flush and lands in the except.
+            with db.begin_nested():
+                db.add(row)
+                db.flush()
+        except IntegrityError:
+            # Another writer created this hsn first — re-read and fall into update below.
+            existing = db.execute(
+                select(HsnCode).where(HsnCode.hsn == hsn)
+            ).scalar_one_or_none()
+            if existing is None:  # pragma: no cover - re-raise an unexpected integrity error
+                raise
+        else:
+            audit.log(
+                db,
+                action="masterdata.hsn.synced",
+                actor_uid=actor_uid,
+                entity="md_hsn",
+                entity_id=str(row.id),
+                detail={"hsn": hsn, "gst_rate": str(gst_rate), "source": "product",
+                        "created": True},
+            )
+            return "created", None
+
+    # `existing` is set (either originally or after losing the create race).
+    if existing.gst_rate == gst_rate:  # Decimal equality is by value (18 == 18.00)
+        return "noop", existing.gst_rate
+    if not allow_update:
+        # A routine product save NEVER rewrites a curated statutory rate — leave it for the
+        # explicit Sync (which reports every change). A stray product typo can't corrupt the
+        # rate that prints on future challans for this hsn.
+        return "protected", existing.gst_rate
+    old_rate = existing.gst_rate
+    existing.gst_rate = gst_rate
+    existing.updated_by = actor_uid
+    audit.log(
+        db,
+        action="masterdata.hsn.synced",
+        actor_uid=actor_uid,
+        entity="md_hsn",
+        entity_id=str(existing.id),
+        detail={"hsn": hsn, "old_gst_rate": str(old_rate), "new_gst_rate": str(gst_rate),
+                "source": "product"},
+    )
+    return "updated", old_rate
+
+
 def create_product(
     db: Session,
     *,
@@ -120,6 +237,7 @@ def create_product(
     category: str | None = None,
     uom: str = "PCS",
     hsn: str | None = None,
+    gst_rate: Decimal | None = None,
     actor_uid: str | None = None,
 ) -> Product:
     """Create a product, deduped case-insensitively on (name, brand, model_number).
@@ -136,6 +254,7 @@ def create_product(
     clean_model = _clean_optional(model_number, field="model_number", max_len=_MAX_SHORT_LEN)
     clean_category = _clean_optional(category, field="category", max_len=_MAX_SHORT_LEN)
     clean_hsn = _clean_optional(hsn, field="hsn", max_len=_MAX_HSN_LEN)
+    clean_gst_rate = _clean_gst_rate(gst_rate)
 
     product = Product(
         name=clean_name,
@@ -145,6 +264,7 @@ def create_product(
         category=clean_category,
         uom=clean_uom,
         hsn=clean_hsn,
+        gst_rate=clean_gst_rate,
         created_by=actor_uid,
     )
     try:
@@ -186,7 +306,15 @@ def create_product(
             "category": clean_category,
             "uom": clean_uom,
             "hsn": clean_hsn,
+            "gst_rate": str(clean_gst_rate) if clean_gst_rate is not None else None,
         },
+    )
+
+    # Auto-register a NEW hsn into the challan HSN master (a fresh product is active).
+    # allow_update=False: a product save never rewrites an EXISTING curated rate.
+    _upsert_hsn_master(
+        db, hsn=clean_hsn, gst_rate=clean_gst_rate, description=clean_name,
+        actor_uid=actor_uid, allow_update=False,
     )
     return product
 
@@ -308,6 +436,12 @@ def update_product(
         product.active = value
         changed["active"] = value
 
+    if "gst_rate" in fields:
+        # bool is a subclass of int (not Decimal); an explicit null clears the rate.
+        clean_rate = _clean_gst_rate(fields["gst_rate"])
+        product.gst_rate = clean_rate
+        changed["gst_rate"] = str(clean_rate) if clean_rate is not None else None
+
     try:
         with db.begin_nested():
             db.flush()  # trips the identity/code unique backstop if this edit collides
@@ -322,6 +456,16 @@ def update_product(
         entity_id=str(product.id),
         detail=changed,
     )
+
+    # Sync the challan HSN master from the product's CURRENT (hsn, gst_rate) — but ONLY for an
+    # ACTIVE product (a soft-deleted product must never drive the live statutory rate), and
+    # allow_update=False so a routine edit auto-registers a new hsn but never rewrites an
+    # existing curated rate. No-op unless both hsn & gst_rate are present.
+    if product.active:
+        _upsert_hsn_master(
+            db, hsn=product.hsn, gst_rate=product.gst_rate, description=product.name,
+            actor_uid=actor_uid, allow_update=False,
+        )
     return product
 
 
@@ -352,16 +496,18 @@ _BULK_ALIASES: dict[str, str] = {
     "category": "category", "cat": "category",
     "uom": "uom", "unit": "uom", "units": "uom", "unit_of_measure": "uom",
     "hsn": "hsn", "hsn_code": "hsn",
+    "gst_rate": "gst_rate", "gst": "gst_rate", "gst_percent": "gst_rate", "tax": "gst_rate",
 }
 
 # The downloadable TEMPLATE: the canonical header in a fixed, friendly order + one example row.
 # `code` is left blank so the example creates (auto-minting a code); the operator fills a code
 # only to set a custom SKU or to update-by-code.
 _BULK_TEMPLATE_COLUMNS: tuple[str, ...] = (
-    "name", "code", "brand", "model_number", "category", "uom", "hsn",
+    "name", "code", "brand", "model_number", "category", "uom", "hsn", "gst_rate",
 )
 _BULK_TEMPLATE_EXAMPLE: tuple[object, ...] = (
-    "Sample Product — replace with your own", "", "Acme", "GX-100", "Appliances", "PCS", "8509",
+    "Sample Product — replace with your own", "", "Acme", "GX-100", "Appliances", "PCS",
+    "8509", 18,
 )
 
 
@@ -468,6 +614,19 @@ def _bulk_update_fields(cells: dict[str, str]) -> dict[str, Any]:
     return fields
 
 
+def _bulk_gst_rate(cells: dict[str, str]) -> Decimal | None:
+    """Parse the optional `gst_rate` cell to a Decimal (None when blank). A non-numeric cell
+    is a ``ProductError`` (per-row error). Range/scale (0..100, <=2 dp) is enforced downstream
+    by `create_product`/`update_product` via `_clean_gst_rate` — the SAME guard as the API."""
+    raw = cells.get("gst_rate", "").strip()
+    if not raw:
+        return None
+    parsed = parse_qty(raw)
+    if parsed is None:
+        raise ProductError("gst_rate must be a number between 0 and 100")
+    return parsed
+
+
 def _apply_bulk_row(
     db: Session, cells: dict[str, str], *, actor_uid: str | None
 ) -> tuple[str, str]:
@@ -479,6 +638,7 @@ def _apply_bulk_row(
     code = cells.get("code", "").strip()
     brand = cells.get("brand", "").strip()
     model = cells.get("model_number", "").strip()
+    gst_rate = _bulk_gst_rate(cells)  # non-numeric -> ProductError (per-row)
 
     match = _match_bulk_product(db, name=name, code=code, brand=brand, model=model)
     if match is None:
@@ -491,13 +651,17 @@ def _apply_bulk_row(
             category=cells.get("category", "").strip() or None,
             uom=cells.get("uom", "").strip() or "PCS",
             hsn=cells.get("hsn", "").strip() or None,
+            gst_rate=gst_rate,
             actor_uid=actor_uid,
         )
         return "created", product.code or ""
 
-    product = update_product(
-        db, product_id=match.id, fields=_bulk_update_fields(cells), actor_uid=actor_uid
-    )
+    fields = _bulk_update_fields(cells)
+    if cells.get("gst_rate", "").strip():
+        # Only inject when the cell carries a value — a blank cell leaves the rate untouched
+        # (bulk never CLEARS a field), matching the other descriptive columns.
+        fields["gst_rate"] = gst_rate
+    product = update_product(db, product_id=match.id, fields=fields, actor_uid=actor_uid)
     return "updated", product.code or ""
 
 
@@ -524,5 +688,96 @@ def bulk_upsert_from_excel(
             result.errors.append((sheet_row, str(exc)))
             continue
         (result.created if outcome == "created" else result.updated).append(code)
+
+    return result
+
+
+# ------------------------------------------------- manual HSN-master reconciliation
+#
+# A one-shot "sync all" that rebuilds `md_hsn` from every product carrying BOTH an `hsn`
+# and a `gst_rate`. Single-record create/update already sync as they go; this is the manual
+# backfill/repair an operator runs after entering rates in bulk.
+
+
+@dataclass
+class HsnSyncResult:
+    """Outcome of a full product -> `md_hsn` reconciliation.
+
+    * ``created``   — HSN codes newly inserted into `md_hsn`.
+    * ``updated``   — HSN codes whose rate was changed, each ``{hsn, old_rate, new_rate}``.
+    * ``conflicts`` — HSNs where >=2 ACTIVE products disagree on the rate, each
+      ``{hsn, rates, product_ids}``. A conflict is still APPLIED (deterministically, using
+      the most-recently-created active product's rate) so the run is STABLE; the bucket
+      flags the data for an operator to fix.
+    """
+
+    created: list[str] = dc_field(default_factory=list)
+    updated: list[dict[str, str]] = dc_field(default_factory=list)
+    conflicts: list[dict[str, Any]] = dc_field(default_factory=list)
+
+
+def _rate_winner(products: list[Product]) -> Product:
+    """The most-recently-created product (created_at, then id as a stable tiebreak) — the
+    deterministic choice whose rate wins for its hsn."""
+    return max(products, key=lambda p: (p.created_at, p.id))
+
+
+def sync_hsn_master_from_products(
+    db: Session, *, actor_uid: str | None = None
+) -> HsnSyncResult:
+    """Reconcile `md_hsn` from every ACTIVE product with BOTH `hsn` and `gst_rate` set.
+
+    Products are grouped by `hsn`; a group with NO active product is skipped entirely (a
+    soft-deleted product must not drive the live statutory rate). The authoritative rate is
+    the most-recently-created ACTIVE product's; when two or more active products carry
+    DIFFERENT rates the group is reported as a conflict AND still applied deterministically
+    (so re-running never thrashes `md_hsn`). Unlike a routine product save, this explicit
+    reconcile passes `allow_update=True`, so it MAY change an existing curated rate — that is
+    the deliberate, operator-initiated path, and every change is reported + audited. Caller
+    commits."""
+    result = HsnSyncResult()
+    products = list(
+        db.execute(
+            select(Product)
+            .where(Product.hsn.is_not(None), Product.gst_rate.is_not(None))
+            .order_by(Product.id)
+        ).scalars()
+    )
+
+    groups: dict[str, list[Product]] = {}
+    for product in products:
+        if product.hsn is None or product.gst_rate is None:  # narrows for the type checker
+            continue
+        groups.setdefault(product.hsn, []).append(product)
+
+    for hsn, group in groups.items():
+        active = [p for p in group if p.active]
+        if not active:
+            # No ACTIVE product carries this hsn — a soft-deleted product must not drive the
+            # live statutory rate, so skip it entirely (never seed/change md_hsn from it).
+            continue
+        # Distinct rates BY VALUE among active products (Decimal 18 == 18.00).
+        distinct_active = {p.gst_rate for p in active}
+        if len(distinct_active) >= 2:
+            result.conflicts.append({
+                "hsn": hsn,
+                "rates": sorted(str(r) for r in distinct_active),
+                "product_ids": sorted(p.id for p in active),
+            })
+        winner = _rate_winner(active)
+        # Re-validate the winner's rate — a rate written by a direct DB import bypasses the
+        # route/bulk guards; never propagate an out-of-range rate to the statutory master.
+        winner_rate = _clean_gst_rate(winner.gst_rate)
+
+        outcome, old_rate = _upsert_hsn_master(
+            db, hsn=hsn, gst_rate=winner_rate, description=winner.name,
+            actor_uid=actor_uid, allow_update=True,
+        )
+        if outcome == "created":
+            result.created.append(hsn)
+        elif outcome == "updated":
+            result.updated.append(
+                {"hsn": hsn, "old_rate": str(old_rate), "new_rate": str(winner_rate)}
+            )
 
     return result

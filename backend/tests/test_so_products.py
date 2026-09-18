@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 from collections.abc import Iterator
+from decimal import Decimal
 
 import pytest
 from fastapi import FastAPI
@@ -22,9 +23,11 @@ from sqlalchemy.pool import StaticPool
 # Import app.main so every module + table is registered on Base before create_all.
 import app.main  # noqa: F401
 from app.db import Base, get_db
+from app.modules.masterdata.models import HsnCode
+from app.modules.sales_orders.models import Product
 from app.modules.sales_orders.routes import router as sales_orders_router
 from app.platform.auth import current_user
-from app.platform.models import Level, Role, RoleModulePermission, User
+from app.platform.models import AuditLog, Level, Role, RoleModulePermission, User
 from app.platform.roles_builtin import ensure_builtin_roles
 
 
@@ -311,7 +314,7 @@ def test_migration_backfills_codeless_products() -> None:
 
 # --------------------------------------------------------- bulk upsert (Excel)
 
-_BULK_HEADER = ["name", "code", "brand", "model_number", "category", "uom", "hsn"]
+_BULK_HEADER = ["name", "code", "brand", "model_number", "category", "uom", "hsn", "gst_rate"]
 
 
 def _xlsx(header: list[str], rows: list[list[object]]) -> bytes:
@@ -472,3 +475,306 @@ def test_bulk_upload_requires_manage(client: TestClient) -> None:
     assert _upload(client, data).status_code == 403
     _as(client, "admin")
     assert client.get("/api/v1/products").json() == []  # nothing was created by the 403s
+
+
+# ------------------------------------------------- gst_rate + HSN-master sync
+
+
+def _hsn_rows(client: TestClient) -> dict[str, HsnCode]:
+    """Read the challan HSN master (`md_hsn`) directly, keyed by hsn — the route commits so a
+    fresh session sees the synced rows."""
+    db = client.app.state.TestSession()
+    try:
+        rows = db.execute(select(HsnCode)).scalars().all()
+        return {r.hsn: r for r in rows}
+    finally:
+        db.close()
+
+
+def test_create_with_gst_rate_persists_and_returns(client: TestClient) -> None:
+    _as(client, "admin")
+    r = client.post("/api/v1/products", json={"name": "Rated", "gst_rate": "18"})
+    assert r.status_code == 201, r.text
+    assert Decimal(str(r.json()["gst_rate"])) == Decimal("18")
+    # persisted on read-back too
+    pid = r.json()["id"]
+    assert Decimal(str(client.get(f"/api/v1/products/{pid}").json()["gst_rate"])) == Decimal("18")
+
+
+def test_gst_rate_over_100_is_422(client: TestClient) -> None:
+    _as(client, "admin")
+    assert client.post(
+        "/api/v1/products", json={"name": "TooBig", "gst_rate": "150"}
+    ).status_code == 422
+
+
+def test_gst_rate_over_scale_is_422(client: TestClient) -> None:
+    _as(client, "admin")
+    # 18.005 has 3 decimal places — Numeric(5,2) would silently round; reject instead.
+    assert client.post(
+        "/api/v1/products", json={"name": "OverScale", "gst_rate": "18.005"}
+    ).status_code == 422
+
+
+def test_update_can_set_and_clear_gst_rate(client: TestClient) -> None:
+    _as(client, "admin")
+    pid = client.post("/api/v1/products", json={"name": "Clearable"}).json()["id"]
+    assert client.get(f"/api/v1/products/{pid}").json()["gst_rate"] is None
+    r = client.patch(f"/api/v1/products/{pid}", json={"gst_rate": "12"})
+    assert r.status_code == 200 and Decimal(str(r.json()["gst_rate"])) == Decimal("12")
+    # explicit null clears it back to None
+    r2 = client.patch(f"/api/v1/products/{pid}", json={"gst_rate": None})
+    assert r2.status_code == 200 and r2.json()["gst_rate"] is None
+
+
+def test_create_with_hsn_and_rate_creates_hsn_master(client: TestClient) -> None:
+    _as(client, "admin")
+    assert "7001" not in _hsn_rows(client)
+    client.post("/api/v1/products", json={"name": "New HSN Prod", "hsn": "7001", "gst_rate": "18"})
+    rows = _hsn_rows(client)
+    assert "7001" in rows
+    assert Decimal(rows["7001"].gst_rate) == Decimal("18")
+    assert rows["7001"].active is True
+
+
+def test_product_save_protects_existing_hsn_rate_only_sync_reconciles(client: TestClient) -> None:
+    _as(client, "admin")
+    # Pre-seed md_hsn 7002 = 18 directly (a hand-curated HSN master row = the printed rate).
+    db = client.app.state.TestSession()
+    db.add(HsnCode(hsn="7002", description="seed", gst_rate=Decimal("18"), active=True))
+    db.commit()
+    db.close()
+    # A product on that HSN with a DIFFERENT rate must NOT rewrite the curated master...
+    pid = client.post(
+        "/api/v1/products", json={"name": "HSN Owner", "hsn": "7002", "gst_rate": "28"}
+    ).json()["id"]
+    assert Decimal(_hsn_rows(client)["7002"].gst_rate) == Decimal("18")  # protected on create
+    # ...nor does a later patch that changes only the rate.
+    client.patch(f"/api/v1/products/{pid}", json={"gst_rate": "5"})
+    assert Decimal(_hsn_rows(client)["7002"].gst_rate) == Decimal("18")  # still protected
+
+    # No per-save UPDATE audit fired for 7002 (a routine save never rewrites a printed rate).
+    db = client.app.state.TestSession()
+    synced = db.execute(
+        select(AuditLog).where(AuditLog.action == "masterdata.hsn.synced")
+    ).scalars().all()
+    db.close()
+    assert not [a for a in synced if a.detail.get("hsn") == "7002" and "old_gst_rate" in a.detail]
+
+    # Only the EXPLICIT sync reconciles it — to the product's CURRENT rate (5), audited old->new.
+    out = client.post("/api/v1/products/sync-hsn-master").json()
+    assert Decimal(_hsn_rows(client)["7002"].gst_rate) == Decimal("5")
+    updated = {u["hsn"]: u for u in out["updated"]}
+    assert Decimal(updated["7002"]["old_rate"]) == Decimal("18")
+    assert Decimal(updated["7002"]["new_rate"]) == Decimal("5")
+
+
+def test_inactive_product_save_never_syncs_hsn_master(client: TestClient) -> None:
+    """A soft-deleted product must NOT drive the live statutory rate: editing an inactive
+    product never touches md_hsn (per-save), and sync-all skips an hsn with no active product."""
+    _as(client, "admin")
+    db = client.app.state.TestSession()
+    db.add(HsnCode(hsn="7010", description="curated", gst_rate=Decimal("18"), active=True))
+    db.commit()
+    db.close()
+    pid = client.post(
+        "/api/v1/products", json={"name": "Retire Me", "hsn": "7010", "gst_rate": "18"}
+    ).json()["id"]
+    client.patch(f"/api/v1/products/{pid}", json={"active": False})
+    # Patch a harmless field with a divergent rate on the now-inactive product...
+    client.patch(f"/api/v1/products/{pid}", json={"gst_rate": "8", "category": "X"})
+    assert Decimal(_hsn_rows(client)["7010"].gst_rate) == Decimal("18")  # inactive save no-op
+    # ...and sync-all ignores it too (no active product carries 7010).
+    out = client.post("/api/v1/products/sync-hsn-master").json()
+    assert "7010" not in [u["hsn"] for u in out["updated"]]
+    assert Decimal(_hsn_rows(client)["7010"].gst_rate) == Decimal("18")
+
+
+def test_hsn_master_not_seeded_for_invalid_hsn_shape(client: TestClient) -> None:
+    """A product's free-form hsn that isn't a valid statutory code (2-12 digits) must never
+    create an md_hsn row the HSN editor would itself reject."""
+    _as(client, "admin")
+    client.post("/api/v1/products", json={"name": "Spaced", "hsn": "8471 30", "gst_rate": "18"})
+    client.post("/api/v1/products", json={"name": "Alpha", "hsn": "ABC12", "gst_rate": "18"})
+    rows = _hsn_rows(client)
+    assert "8471 30" not in rows and "ABC12" not in rows and rows == {}
+
+
+def test_zero_rate_nil_hsn_is_synced(client: TestClient) -> None:
+    """gst_rate 0 (a legit nil-rated HSN) is PRESENT, not falsy-skipped — it seeds md_hsn at 0."""
+    _as(client, "admin")
+    client.post("/api/v1/products", json={"name": "Nil Rated", "hsn": "7020", "gst_rate": "0"})
+    assert Decimal(_hsn_rows(client)["7020"].gst_rate) == Decimal("0")
+
+
+def test_hsn_master_untouched_when_rate_or_hsn_missing(client: TestClient) -> None:
+    _as(client, "admin")
+    # hsn but NO rate -> no master row.
+    client.post("/api/v1/products", json={"name": "HSN No Rate", "hsn": "7003"})
+    # rate but NO hsn -> no master row.
+    client.post("/api/v1/products", json={"name": "Rate No HSN", "gst_rate": "18"})
+    rows = _hsn_rows(client)
+    assert "7003" not in rows
+    assert rows == {}  # nothing at all was synced
+
+
+def test_bulk_upload_rate_populates_hsn_master(client: TestClient) -> None:
+    _as(client, "admin")
+    data = _xlsx(_BULK_HEADER, [
+        ["Bulk Rated", "", "Acme", "BR-1", "Appliances", "PCS", "7004", 12],
+    ])
+    r = _upload(client, data)
+    assert r.status_code == 201, r.text
+    assert r.json()["errors"] == [] and len(r.json()["created"]) == 1
+    rows = _hsn_rows(client)
+    assert "7004" in rows and Decimal(rows["7004"].gst_rate) == Decimal("12")
+
+
+def test_bulk_upload_bad_rate_is_row_error(client: TestClient) -> None:
+    """A non-numeric AND an out-of-range gst_rate are per-row errors (the SAME 0..100/scale
+    guard the API applies, enforced by create_product's _clean_gst_rate) — never a 500, and
+    nothing from the bad rows is synced to md_hsn."""
+    _as(client, "admin")
+    data = _xlsx(_BULK_HEADER, [
+        ["Bulk BadRate", "", "Acme", "BB-1", "", "PCS", "7005", "abc"],   # row 2: non-numeric
+        ["Bulk BigRate", "", "Acme", "BR-2", "", "PCS", "7006", "150"],   # row 3: > 100
+    ])
+    r = _upload(client, data)
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["created"] == [] and out["updated"] == []
+    assert {e["row"] for e in out["errors"]} == {2, 3}
+    assert all("gst_rate" in e["message"].lower() for e in out["errors"])
+    rows = _hsn_rows(client)
+    assert "7005" not in rows and "7006" not in rows  # nothing synced from the failed rows
+
+
+# ------------------------------------------------- POST /products/sync-hsn-master
+
+
+def _seed_product(
+    client: TestClient, *, name: str, hsn: str, rate: str, active: bool = True
+) -> int:
+    """Insert a product DIRECTLY (bypassing create_product, so NO auto-sync fires) — lets the
+    sync-hsn-master run prove it does the create/update/conflict work itself."""
+    db = client.app.state.TestSession()
+    p = Product(name=name, hsn=hsn, gst_rate=Decimal(rate), active=active)
+    db.add(p)
+    db.commit()
+    pid = p.id
+    db.close()
+    return pid
+
+
+def test_sync_hsn_master_buckets(client: TestClient) -> None:
+    _as(client, "admin")
+    # Pre-seed two master rows: one that will MATCH, one that will be UPDATED.
+    db = client.app.state.TestSession()
+    db.add(HsnCode(hsn="8002", description="", gst_rate=Decimal("12"), active=True))  # match
+    db.add(HsnCode(hsn="8003", description="", gst_rate=Decimal("18"), active=True))  # -> update
+    db.add(HsnCode(hsn="8004", description="", gst_rate=Decimal("18"), active=True))  # conflict
+    db.commit()
+    db.close()
+
+    _seed_product(client, name="P New", hsn="8001", rate="18")     # 8001 absent -> created
+    _seed_product(client, name="P Match", hsn="8002", rate="12")   # matches -> noop
+    _seed_product(client, name="P Update", hsn="8003", rate="28")  # 18 -> 28 updated
+    # A conflicting ACTIVE pair on 8004: 18 then 5 (5 is created later -> wins deterministically).
+    _seed_product(client, name="P Conf A", hsn="8004", rate="18")
+    _seed_product(client, name="P Conf B", hsn="8004", rate="5")
+
+    r = client.post("/api/v1/products/sync-hsn-master")
+    assert r.status_code == 200, r.text
+    out = r.json()
+
+    assert out["created"] == ["8001"]
+    assert Decimal(_hsn_rows(client)["8001"].gst_rate) == Decimal("18")
+
+    updated_by_hsn = {u["hsn"]: u for u in out["updated"]}
+    assert "8003" in updated_by_hsn
+    assert Decimal(updated_by_hsn["8003"]["old_rate"]) == Decimal("18")
+    assert Decimal(updated_by_hsn["8003"]["new_rate"]) == Decimal("28")
+    # 8002 matched -> not updated
+    assert "8002" not in updated_by_hsn
+
+    assert len(out["conflicts"]) == 1
+    conflict = out["conflicts"][0]
+    assert conflict["hsn"] == "8004"
+    assert {Decimal(x) for x in conflict["rates"]} == {Decimal("18"), Decimal("5")}
+    assert len(conflict["product_ids"]) == 2
+    # The conflict is APPLIED deterministically (most-recently-created active product = rate 5).
+    assert Decimal(_hsn_rows(client)["8004"].gst_rate) == Decimal("5")
+
+    # Re-running is STABLE: no new creates/updates, the conflict is still reported.
+    r2 = client.post("/api/v1/products/sync-hsn-master")
+    out2 = r2.json()
+    assert out2["created"] == [] and out2["updated"] == []
+    assert len(out2["conflicts"]) == 1
+
+
+def test_sync_hsn_master_requires_manage(client: TestClient) -> None:
+    _as(client, "operator")
+    assert client.post("/api/v1/products/sync-hsn-master").status_code == 403
+    _as(client, "viewer")
+    assert client.post("/api/v1/products/sync-hsn-master").status_code == 403
+
+
+def test_sync_hsn_master_bad_db_rate_is_422_not_500(client: TestClient) -> None:
+    """A rate written DIRECTLY into the DB out of range (bypassing the API guards) is caught
+    by the sync's re-validation and surfaced as a clean 422 (never a 500); fail-closed — the
+    bad rate never reaches md_hsn."""
+    _as(client, "admin")
+    _seed_product(client, name="Bad DB Rate", hsn="7099", rate="150")  # 150 > 100
+    r = client.post("/api/v1/products/sync-hsn-master")
+    assert r.status_code == 422, r.text
+    assert "7099" not in _hsn_rows(client)  # nothing corrupted the statutory master
+
+
+def test_migration_product_gst_rate_round_trips() -> None:
+    """Round-trip the additive `product.gst_rate` migration on sqlite: upgrade ADDS the
+    nullable column (no backfill), downgrade DROPS it."""
+    import importlib.util
+    from pathlib import Path
+
+    from sqlalchemy import create_engine, inspect, text
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    mig_path = (
+        Path(__file__).resolve().parents[1]
+        / "alembic" / "versions" / "e5a7c1f9b3d2_product_gst_rate.py"
+    )
+    spec = importlib.util.spec_from_file_location("_product_gst_rate", mig_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    assert migration.down_revision == "d4e6f8a1b3c5"
+
+    engine = create_engine("sqlite://", poolclass=StaticPool, future=True)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE product (id INTEGER PRIMARY KEY, name VARCHAR(200) NOT NULL)"
+        ))
+        conn.execute(text("INSERT INTO product (id, name) VALUES (1, 'Existing')"))
+
+    def _cols() -> set[str]:
+        with engine.connect() as conn:
+            return {c["name"] for c in inspect(conn).get_columns("product")}
+
+    assert "gst_rate" not in _cols()
+    with engine.begin() as conn:
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            migration.upgrade()
+    assert "gst_rate" in _cols()
+    # No backfill: the pre-existing row's gst_rate is NULL.
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT gst_rate FROM product WHERE id = 1")).scalar() is None
+
+    with engine.begin() as conn:
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            migration.downgrade()
+    assert "gst_rate" not in _cols()
+    engine.dispose()

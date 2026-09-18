@@ -13,6 +13,7 @@ Every write is audited by the service.
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Annotated, Any
 
 from fastapi import (
@@ -61,6 +62,8 @@ class ProductIn(BaseModel):
     category: str | None = Field(default=None, max_length=120)
     uom: str = Field(default="PCS", min_length=1, max_length=20)
     hsn: str | None = Field(default=None, max_length=10)
+    # GST % (0..100, <=2 dp). Numeric(5,2) — matches the PO line's tax_rate constraints.
+    gst_rate: Decimal | None = Field(default=None, ge=0, le=100, max_digits=5, decimal_places=2)
 
 
 class ProductUpdate(BaseModel):
@@ -73,6 +76,7 @@ class ProductUpdate(BaseModel):
     category: str | None = Field(default=None, max_length=120)
     uom: str | None = Field(default=None, min_length=1, max_length=20)
     hsn: str | None = Field(default=None, max_length=10)
+    gst_rate: Decimal | None = Field(default=None, ge=0, le=100, max_digits=5, decimal_places=2)
     active: bool | None = None
 
 
@@ -86,6 +90,7 @@ class ProductOut(BaseModel):
     category: str | None
     uom: str
     hsn: str | None
+    gst_rate: Decimal | None
     active: bool
     created_at: datetime
 
@@ -99,6 +104,24 @@ class ProductsBulkOut(BaseModel):
     created: list[str]   # CODES of the products created this upload
     updated: list[str]   # CODES of the products updated this upload
     errors: list[ProductBulkError]
+
+
+class HsnSyncUpdated(BaseModel):
+    hsn: str
+    old_rate: str
+    new_rate: str
+
+
+class HsnSyncConflict(BaseModel):
+    hsn: str
+    rates: list[str]         # the distinct rates the active products disagree on
+    product_ids: list[int]   # the active products carrying this hsn
+
+
+class ProductsHsnSyncOut(BaseModel):
+    created: list[str]                  # HSN codes newly added to md_hsn
+    updated: list[HsnSyncUpdated]       # HSN codes whose rate was corrected (old -> new)
+    conflicts: list[HsnSyncConflict]    # HSNs with disagreeing active products (still applied)
 
 
 # ------------------------------------------------------------------- routes
@@ -173,6 +196,36 @@ def upload_products(
     )
 
 
+# ------------------------------------------------------------ HSN-master reconcile
+#
+# Registered BEFORE `/products/{product_id}` so the literal path matches here rather than
+# coercing "sync-hsn-master" to an int product_id.
+@router.post("/products/sync-hsn-master", response_model=ProductsHsnSyncOut)
+def sync_hsn_master(
+    user: Annotated[User, Depends(current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ProductsHsnSyncOut:
+    """Rebuild the challan HSN master (`md_hsn`) from every product carrying BOTH an `hsn`
+    and a `gst_rate`. New HSNs are created, changed rates corrected (product master is the
+    source of truth), and HSNs where active products disagree are reported as ``conflicts``
+    while still applying a deterministic rate so the run is stable. MANAGE-gated (same as
+    the product bulk upload)."""
+    _require_manage(user)
+    try:
+        # Re-validation of a winning rate can raise (e.g. a rate imported directly into the DB
+        # out of the 0..100 range) — surface it as a clean 422, never a 500, mirroring the
+        # create/patch routes. The run is fail-closed: nothing is committed on the raise.
+        result = service.sync_hsn_master_from_products(db, actor_uid=user.firebase_uid)
+    except service.ProductError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    db.commit()
+    return ProductsHsnSyncOut(
+        created=result.created,
+        updated=[HsnSyncUpdated(**u) for u in result.updated],
+        conflicts=[HsnSyncConflict(**c) for c in result.conflicts],
+    )
+
+
 @router.get("/products/{product_id}", response_model=ProductOut)
 def get_product(
     product_id: int,
@@ -203,6 +256,7 @@ def create_product(
             category=body.category,
             uom=body.uom,
             hsn=body.hsn,
+            gst_rate=body.gst_rate,
             actor_uid=user.firebase_uid,
         )
     except service.DuplicateProduct as exc:

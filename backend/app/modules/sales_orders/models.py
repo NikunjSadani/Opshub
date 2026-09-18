@@ -96,6 +96,10 @@ class Product(Base):
     category: Mapped[str | None] = mapped_column(String(120))
     uom: Mapped[str] = mapped_column(String(20), default="PCS")  # unit of measure
     hsn: Mapped[str | None] = mapped_column(String(10))
+    # GST % on this product (Numeric(5,2), 0..100). NULLABLE — existing rows carry none
+    # until a rate is entered. Source of truth for the challan HSN master's rate: saving a
+    # product with BOTH hsn and gst_rate upserts `md_hsn` (see products_service sync).
+    gst_rate: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     active: Mapped[bool] = mapped_column(default=True)
     created_by: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

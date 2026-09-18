@@ -55,6 +55,7 @@ const PRODUCTS = [
     category: 'Lighting',
     uom: 'PCS',
     hsn: '8539',
+    gst_rate: '18.00',
     active: true,
     created_at: '2026-08-01T00:00:00Z',
   },
@@ -67,6 +68,7 @@ const PRODUCTS = [
     category: 'Accessories',
     uom: 'PCS',
     hsn: null,
+    gst_rate: null,
     active: false,
     created_at: '2026-08-02T00:00:00Z',
   },
@@ -151,6 +153,154 @@ describe('ProductsPage', () => {
     expect(postedBody).toMatchObject({ name: 'Ceiling Fan', uom: 'PCS' });
     // The modal closes on success.
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('sends gst_rate (as a string) on create', async () => {
+    let postedBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        if (url.includes('/products') && method === 'POST') {
+          postedBody = JSON.parse(String(init?.body));
+          return json({ ...PRODUCTS[0], id: '9', name: 'Taxed Item', code: null }, 201);
+        }
+        if (url.includes('/products')) return json(PRODUCTS);
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<ProductsPage />);
+    await screen.findByText('15W LED Bulb');
+
+    fireEvent.click(screen.getByRole('button', { name: /new product/i }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/name/i), { target: { value: 'Taxed Item' } });
+    fireEvent.change(within(dialog).getByLabelText(/gst rate/i), { target: { value: '18.5' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /create product/i }));
+
+    await waitFor(() => expect(postedBody).not.toBeNull());
+    // Sent as a STRING (mirrors tax_rate) — no NaN / precision loss.
+    expect(postedBody).toMatchObject({ name: 'Taxed Item', gst_rate: '18.5' });
+  });
+
+  it('round-trips gst_rate on edit and sends null when cleared', async () => {
+    let firstBody: Record<string, unknown> | null = null;
+    let secondBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        if (url.includes('/products/1') && method === 'PATCH') {
+          const body = JSON.parse(String(init?.body));
+          if (firstBody === null) firstBody = body;
+          else secondBody = body;
+          return json({ ...PRODUCTS[0] }, 200);
+        }
+        if (url.includes('/products')) return json(PRODUCTS);
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<ProductsPage />);
+    const row = (await screen.findByText('15W LED Bulb')).closest('tr') as HTMLElement;
+
+    // Edit #1: the current GST value ("18.00") is seeded into the form and sent back verbatim.
+    fireEvent.click(within(row).getByRole('button', { name: /^edit$/i }));
+    let dialog = await screen.findByRole('dialog', { name: /edit product/i });
+    expect(within(dialog).getByLabelText(/gst rate/i)).toHaveValue('18.00');
+    fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(firstBody).not.toBeNull());
+    expect(firstBody).toMatchObject({ gst_rate: '18.00' });
+
+    // Edit #2: clearing the field sends an explicit null (clears it on the backend).
+    fireEvent.click(within(row).getByRole('button', { name: /^edit$/i }));
+    dialog = await screen.findByRole('dialog', { name: /edit product/i });
+    fireEvent.change(within(dialog).getByLabelText(/gst rate/i), { target: { value: '' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(secondBody).not.toBeNull());
+    expect(secondBody!.gst_rate).toBeNull();
+  });
+
+  it('blocks an out-of-range gst_rate inline', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        if (url.includes('/products')) return json(PRODUCTS);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(<ProductsPage />);
+    await screen.findByText('15W LED Bulb');
+
+    fireEvent.click(screen.getByRole('button', { name: /new product/i }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText(/name/i), { target: { value: 'Bad Tax' } });
+    fireEvent.change(within(dialog).getByLabelText(/gst rate/i), { target: { value: '150' } });
+
+    expect(within(dialog).getByText(/Enter a GST rate from 0 to 100\./i)).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: /create product/i })).toBeDisabled();
+  });
+
+  it('Sync HSN master POSTs the endpoint and surfaces created/updated counts + conflicts', async () => {
+    let syncMethod: string | null = null;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        if (url.includes('/products/sync-hsn-master') && method === 'POST') {
+          syncMethod = method;
+          return json({
+            created: ['85399090'],
+            updated: [{ hsn: '94054090', old_rate: '12', new_rate: '18' }],
+            conflicts: [
+              { hsn: '84713090', rates: ['18', '12'], product_ids: [3, 7] },
+            ],
+          });
+        }
+        if (url.includes('/products')) return json(PRODUCTS);
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(<ProductsPage />);
+    await screen.findByText('15W LED Bulb');
+
+    fireEvent.click(screen.getByRole('button', { name: /sync hsn master/i }));
+
+    // The results modal shows the created/updated counts AND the conflict (hsn + rates).
+    const dialog = await screen.findByRole('dialog', { name: /hsn master sync/i });
+    expect(within(dialog).getByText(/HSN 84713090/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/conflicting rates 18, 12/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/85399090/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/12% → 18%/)).toBeInTheDocument();
+    expect(syncMethod).toBe('POST');
+  });
+
+  it('hides the Sync HSN master button for a non-MANAGE user', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith('/me')) return meResponse('VIEW');
+        if (url.includes('/products')) return json(PRODUCTS);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(<ProductsPage />);
+    await screen.findByText('15W LED Bulb');
+
+    expect(screen.queryByRole('button', { name: /sync hsn master/i })).not.toBeInTheDocument();
   });
 
   it('Copy duplicates a product: opens a prefilled create modal with a cleared code, POSTs it', async () => {

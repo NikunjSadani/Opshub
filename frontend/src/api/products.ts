@@ -30,6 +30,9 @@ export interface Product {
   uom: string;
   /** HSN/SAC tax code. */
   hsn: string | null;
+  /** GST rate percent as a string, e.g. "18.00" (backend `Decimal`, serialized like the
+   * PO line / project-products `tax_rate`). null when unset. */
+  gst_rate: string | null;
   active: boolean;
   /** ISO datetime string (backend `datetime`). */
   created_at: string;
@@ -44,6 +47,8 @@ export interface ProductInput {
   category?: string;
   uom: string;
   hsn?: string;
+  /** GST % 0..100 as a string (mirrors `tax_rate`); omit to leave unset. */
+  gst_rate?: string;
 }
 
 /** Body for editing a product — every field optional, plus the active toggle. */
@@ -55,6 +60,8 @@ export interface ProductUpdate {
   category?: string;
   uom?: string;
   hsn?: string;
+  /** GST % 0..100 as a string; send `null` to clear it (an omitted key is left untouched). */
+  gst_rate?: string | null;
   active?: boolean;
 }
 
@@ -135,6 +142,45 @@ export function useUpdateProduct(): UseMutationResult<
       qc.setQueryData(productKeys.detail(product.id), product);
       void qc.invalidateQueries({ queryKey: ['products', 'list'] });
     },
+  });
+}
+
+// ----------------------------------------------------- HSN-master reconcile
+
+/** One HSN whose master rate was corrected from the product data (old → new). */
+export interface HsnSyncUpdated {
+  hsn: string;
+  old_rate: string;
+  new_rate: string;
+}
+
+/** One HSN where active products disagree on the rate (a deterministic rate was still
+ * applied; the operator should fix the underlying product data). */
+export interface HsnSyncConflict {
+  hsn: string;
+  /** The distinct rates the active products disagree on, e.g. ["18", "12"]. */
+  rates: string[];
+  /** The active products carrying this HSN. */
+  product_ids: number[];
+}
+
+/** Result of `POST /products/sync-hsn-master` (backend `ProductsHsnSyncOut`). */
+export interface ProductsHsnSyncResult {
+  /** HSN codes newly added to the challan HSN master. */
+  created: string[];
+  updated: HsnSyncUpdated[];
+  conflicts: HsnSyncConflict[];
+}
+
+/**
+ * Rebuild the challan HSN master (`md_hsn`) from every product carrying both an HSN and a
+ * GST rate (MANAGE). Returns the created / rate-corrected / conflicting HSNs so the UI can
+ * surface conflicts for the operator to fix. Takes no body.
+ */
+export function useSyncHsnMaster(): UseMutationResult<ProductsHsnSyncResult, ApiError, void> {
+  const { post } = useApi();
+  return useMutation<ProductsHsnSyncResult, ApiError, void>({
+    mutationFn: () => post<ProductsHsnSyncResult>('/products/sync-hsn-master'),
   });
 }
 
