@@ -16,7 +16,8 @@ test.describe('Challan lifecycle', () => {
     await page.setInputFiles('#challan-file', TEMPLATE);
     await page.getByRole('button', { name: 'Upload & validate' }).click();
 
-    // Validated -> the Generate action for the 2 example challans is offered.
+    // Validated -> pick the numbering series (a dropdown of configured series) then Generate.
+    await page.getByLabel('Series').selectOption('L');
     const generate = page.getByRole('button', { name: /Generate 2 challans?/ });
     await expect(generate).toBeVisible();
     await generate.click();

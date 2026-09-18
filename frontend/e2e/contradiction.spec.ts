@@ -33,6 +33,7 @@ test.describe('Consignee contradiction review', () => {
     await page.goto(NEW);
     await page.setInputFiles('#challan-file', TEMPLATE);
     await page.getByRole('button', { name: 'Upload & validate' }).click();
+    await page.getByLabel('Series').selectOption('L');
     await page.getByRole('button', { name: /Generate \d+ challans?/ }).click();
     await expect(page.getByRole('button', { name: 'Download ZIP' })).toBeEnabled({
       timeout: 20_000,
@@ -74,6 +75,7 @@ test.describe('Consignee contradiction review', () => {
     await save.click();
 
     // --- 5. Batch flips to VALIDATED -> Step 3 Generate re-enables -> COMPLETED. ---
+    await page.getByLabel('Series').selectOption('L');
     const generate = page.getByRole('button', { name: /Generate \d+ challans?/ });
     await expect(generate).toBeVisible({ timeout: 15_000 });
     await generate.click();

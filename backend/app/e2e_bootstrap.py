@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.modules.masterdata.models import Consignor, HsnCode
+from app.modules.masterdata.models import Consignor, HsnCode, Series
 from app.modules.projects import service as projects
 from app.modules.projects.models import ProjectClient
 
@@ -36,6 +36,13 @@ def bootstrap(db: Session) -> None:
             state="Maharashtra", address="Howrah warehouse", phone="", active=True))
     if db.execute(select(HsnCode).where(HsnCode.hsn == "1509")).scalar_one_or_none() is None:
         db.add(HsnCode(hsn="1509", description="Olive oil", gst_rate=Decimal("5"), active=True))
+    # The challan Series MASTER (md_series) — the challan-generate screen now sources its
+    # series dropdown from here, so the numbering series the specs mint into ('L' for the
+    # lifecycle/contradiction flows, 'D' for the download flow) must exist here as active
+    # entries (their numbering counters are seeded separately by those specs / the engine).
+    for letter, label in (("L", "Lifecycle"), ("D", "Download")):
+        if db.execute(select(Series).where(Series.letter == letter)).scalar_one_or_none() is None:
+            db.add(Series(letter=letter, label=label, active=True))
     db.flush()
 
     client = db.execute(

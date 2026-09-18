@@ -61,8 +61,9 @@ test.describe('Challan range/list download', () => {
     await page.setInputFiles('#challan-file', TEMPLATE);
     await page.getByRole('button', { name: 'Upload & validate' }).click();
 
-    // --- Number & generate INTO our dedicated series. ---
-    await page.getByLabel('Series').fill(SERIES);
+    // --- Number & generate INTO our dedicated series (now a dropdown of configured series;
+    // 'D' is seeded active by the e2e bootstrap). ---
+    await page.getByLabel('Series').selectOption(SERIES);
     const generate = page.getByRole('button', { name: /Generate 2 challans?/ });
     await expect(generate).toBeVisible();
     await generate.click();
