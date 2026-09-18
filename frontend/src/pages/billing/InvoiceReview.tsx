@@ -76,6 +76,33 @@ function isResolved(f: BillingFieldOut | undefined, edit: string | undefined): b
   return f != null && (f.status === 'OK' || f.status === 'CORRECTED');
 }
 
+/**
+ * The value the extractor gives a field, as an EDITABLE string (no edit applied), for DISPLAY
+ * in the input. Money is rendered in rupees (value_norm is integer paise) to match the input;
+ * non-money uses the normalized value, falling back to the raw OCR text so the operator can
+ * see what was read.
+ */
+function extractedShown(f: BillingFieldOut): string {
+  if (isMoneyField(f.field_path)) {
+    return f.value_norm != null ? (Number(f.value_norm) / 100).toFixed(2) : '';
+  }
+  return f.value_norm ?? f.value_raw ?? '';
+}
+
+/**
+ * The extractor's value as an editable string ONLY when it is a NORMALIZED value the backend
+ * will accept as a correction — money in rupees, or a non-empty normalized non-money value.
+ * Returns null when there is nothing safe to one-click accept: we deliberately never seed the
+ * raw OCR text, because a field whose value_norm is null did not normalize (e.g. a
+ * LOW_CONFIDENCE date whose raw string never parsed to an ISO date — the backend coercion
+ * would reject it 400 at confirm). In that case the operator must enter the value by hand
+ * rather than be lured by an enabled Confirm into a guaranteed dead end.
+ */
+function acceptableValue(f: BillingFieldOut): string | null {
+  if (f.value_norm == null || f.value_norm.trim() === '') return null;
+  return isMoneyField(f.field_path) ? (Number(f.value_norm) / 100).toFixed(2) : f.value_norm;
+}
+
 function sectionOf(fieldPath: string): 'header' | 'totals' | 'other' {
   if (fieldPath.startsWith('header.')) return 'header';
   if (fieldPath.startsWith('totals.')) return 'totals';
@@ -104,9 +131,15 @@ function FieldRow({
   // Money fields are EDITED in rupees (the read path stores integer paise), so an
   // untouched money value shows value_norm/100 with 2 decimals. Raw OCR text is not
   // prefilled for money — it is often the exact misread that flagged the field.
-  const shown = isMoney
-    ? edit ?? (field.value_norm != null ? (Number(field.value_norm) / 100).toFixed(2) : '')
-    : edit ?? field.value_norm ?? field.value_raw ?? '';
+  const shown = edit ?? extractedShown(field);
+  // The "Accept extracted value" affordance: only when the field is editable
+  // (LOW_CONFIDENCE/MISSING), NOT yet resolved, and the extractor produced a NORMALIZED value
+  // the backend will accept (never the raw OCR fallback — see acceptableValue). One click seeds
+  // the edit buffer with that value (exactly as if the operator re-typed it), which resolves the
+  // field and hides the button. Deriving from the field (not `shown`) means a cleared edit still
+  // re-offers the button.
+  const acceptable = acceptableValue(field);
+  const canAcceptExtracted = editable && !isResolved(field, edit) && acceptable != null;
   const hint = isMoney
     ? 'Enter amount in ₹'
     : field.value_raw
@@ -160,6 +193,19 @@ function FieldRow({
               <span id={hintId} className="mt-1 block text-xs text-slate-400">
                 {hint}
               </span>
+            )}
+            {canAcceptExtracted && (
+              <div className="mt-1.5">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => { if (acceptable != null) onEdit(acceptable); }}
+                  aria-label={`Accept extracted value for ${fieldLabel(field.field_path)}`}
+                >
+                  Accept extracted value
+                </Button>
+              </div>
             )}
           </>
         ) : (

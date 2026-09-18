@@ -3,6 +3,7 @@ import { Link, Navigate, Route, Routes } from 'react-router-dom';
 import {
   Badge,
   Button,
+  ConfirmDialog,
   ErrorState,
   Loading,
   PageHeader,
@@ -15,19 +16,28 @@ import {
   Th,
   Tr,
   Td,
+  useToast,
 } from '../../ui';
+import { usePermissions } from '../../auth/AuthProvider';
 import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { useClientsQuery } from '../../api/projects';
 import { usePurchaseOrdersQuery } from '../../api/purchaseOrders';
 import {
   useBillingInvoicesQuery,
+  useDeleteInvoice,
   type BillingInvoiceFilters,
   type SalesInvoiceStatus,
 } from '../../api/billingInvoices';
 import { BILLING_BASE } from './billingFormat';
 import { InvoiceUpload } from './InvoiceUpload';
 import { InvoiceReview } from './InvoiceReview';
-import { INVOICE_STATUS_LABEL, INVOICE_STATUS_TONE, formatDate, money } from './billingInvoiceFormat';
+import {
+  INVOICE_STATUS_LABEL,
+  INVOICE_STATUS_TONE,
+  errorMessage,
+  formatDate,
+  money,
+} from './billingInvoiceFormat';
 
 /** Every stored invoice status, in display order (used by the status filter). */
 const STATUS_OPTIONS: readonly SalesInvoiceStatus[] = [
@@ -43,10 +53,20 @@ const STATUS_OPTIONS: readonly SalesInvoiceStatus[] = [
 ];
 
 function Register() {
+  const toast = useToast();
+  const perms = usePermissions();
+  // Delete-and-re-upload is a MANAGE affordance (mirrors the invoice detail screen).
+  const canManage = perms.atLeast('billing', 'MANAGE');
+  const deleteInvoice = useDeleteInvoice();
+
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<SalesInvoiceStatus | ''>('');
   const [clientId, setClientId] = useState('');
   const [poId, setPoId] = useState('');
+  // A single dialog drives every row's delete: `deleteTarget` is the id of the invoice
+  // pending deletion (null = closed). One dialog, not one per row. The row id is a string
+  // on the wire (backend `InvoiceOut`), so track it as such.
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   const clientsQuery = useClientsQuery();
   // POs for the filter are scoped to the chosen client (or all when none chosen).
@@ -73,6 +93,36 @@ function Register() {
     // A PO belongs to one client — clear a stale PO filter when the client changes.
     setPoId('');
   }
+
+  function onConfirmDelete() {
+    if (deleteTarget == null) return;
+    deleteInvoice.mutate(deleteTarget, {
+      onSuccess: () => {
+        setDeleteTarget(null);
+        // The mutation invalidates the register, so the row disappears on its own.
+        toast.success('Invoice deleted.');
+      },
+      // Surface the backend's honest refusal (e.g. 409 "invoice has receivable records and
+      // cannot be deleted") instead of failing silently.
+      onError: (err) => {
+        setDeleteTarget(null);
+        toast.error(errorMessage(err));
+      },
+    });
+  }
+
+  // The row being deleted (matched by stable id) drives a row-specific confirm — the one
+  // safety net against a wrong-row click on a long list. A CONFIRMED invoice also gets an
+  // explicit warning, because deleting it reverses its billed-qty contribution to the PO.
+  const deleteRow = deleteTarget != null ? rows.find((r) => r.id === deleteTarget) : undefined;
+  const deleteLabel = deleteRow?.invoice_number ?? (deleteRow ? `#${deleteRow.id}` : '');
+  const deleteTitle = deleteRow ? `Delete invoice ${deleteLabel}?` : 'Delete this invoice?';
+  const deleteMessage =
+    'This permanently deletes the invoice and its source PDF. This cannot be undone. ' +
+    'An invoice that already has payments, credit notes or advances against it cannot be deleted.' +
+    (deleteRow?.status === 'CONFIRMED'
+      ? ' Note: this invoice is CONFIRMED — deleting it reverses its billed quantity on the linked PO.'
+      : '');
 
   return (
     <div>
@@ -175,13 +225,23 @@ function Register() {
                       </Badge>
                     </Td>
                     <Td>
-                      <div className="flex justify-end">
+                      <div className="flex items-center justify-end gap-3">
                         <Link
                           to={`${BILLING_BASE}/${inv.id}`}
                           className="text-sm font-medium text-brand-600 hover:text-brand-700"
                         >
                           {inv.status === 'CONFIRMED' || inv.status === 'CANCELLED' ? 'View' : 'Review'}
                         </Link>
+                        {canManage && (
+                          <Button
+                            variant="danger"
+                            size="sm"
+                            aria-label={`Delete invoice ${inv.invoice_number ?? inv.id}`}
+                            onClick={() => setDeleteTarget(inv.id)}
+                          >
+                            Delete
+                          </Button>
+                        )}
                       </div>
                     </Td>
                   </Tr>
@@ -205,6 +265,19 @@ function Register() {
           </div>
         </>
       )}
+
+      {/* One dialog for the whole list, driven by the pending-delete id. Mirrors the
+          invoice detail screen's delete (permanent, blocked once receivables exist). */}
+      <ConfirmDialog
+        open={deleteTarget != null}
+        title={deleteTitle}
+        confirmLabel="Delete invoice"
+        danger
+        loading={deleteInvoice.isPending}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={onConfirmDelete}
+        message={deleteMessage}
+      />
     </div>
   );
 }

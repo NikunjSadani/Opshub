@@ -271,6 +271,125 @@ describe('Register (InvoicesPage)', () => {
     fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'CONFIRMED' } });
     await waitFor(() => expect(seen.some((u) => u.includes('status=CONFIRMED'))).toBe(true));
   });
+
+  it('deletes the CLICKED row (not another) and names it in the confirm — a shared dialog over two rows', async () => {
+    // Two rows so the single shared `deleteTarget` is actually exercised: clicking row #7's
+    // Delete must delete #7, not #5. #7 is CONFIRMED, so the dialog must also name it and warn.
+    const OTHER_ROW = {
+      ...INVOICE_ROW,
+      id: 7,
+      invoice_number: 'CINV-2026-009',
+      status: 'CONFIRMED',
+      po_id: 50,
+    };
+    const deleted: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const del = url.match(/\/billing\/invoices\/(\d+)$/);
+        if (del && method === 'DELETE') {
+          deleted.push(del[1]);
+          return json({ id: Number(del[1]), deleted: true });
+        }
+        if (url.includes('/billing/invoices')) return json([INVOICE_ROW, OTHER_ROW]);
+        if (url.includes('/purchase-orders')) return json(PURCHASE_ORDERS);
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/billing/*" element={<InvoicesPage />} />
+      </Routes>,
+      ['/m/billing'],
+    );
+
+    // Click the SECOND row's Delete (invoice #7 / CINV-2026-009).
+    const other = (await screen.findByText('CINV-2026-009')).closest('tr') as HTMLElement;
+    fireEvent.click(
+      within(other).getByRole('button', { name: /delete invoice CINV-2026-009/i }),
+    );
+
+    // The shared dialog names the CLICKED invoice and warns because it is CONFIRMED.
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Delete invoice CINV-2026-009\?/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/this invoice is CONFIRMED/i)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: /^delete invoice$/i }));
+
+    // Exactly #7 is deleted — never the other row.
+    await waitFor(() => expect(deleted).toHaveLength(1));
+    expect(deleted).toEqual(['7']);
+  });
+
+  it('an OPERATE user sees the Review link but no per-row Delete on the register', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/billing/invoices')) return json([INVOICE_ROW]);
+        if (url.includes('/purchase-orders')) return json(PURCHASE_ORDERS);
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.endsWith('/me')) return meResponse('OPERATE');
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/billing/*" element={<InvoicesPage />} />
+      </Routes>,
+      ['/m/billing'],
+    );
+
+    expect(await screen.findByText('CINV-2026-005')).toBeInTheDocument();
+    const row = screen.getByText('CINV-2026-005').closest('tr') as HTMLElement;
+    // The Review link is present for everyone…
+    expect(within(row).getByRole('link', { name: /review/i })).toBeInTheDocument();
+    // …but the MANAGE-only Delete button is absent for an operator.
+    expect(within(row).queryByRole('button', { name: /delete/i })).not.toBeInTheDocument();
+  });
+
+  it('surfaces the backend refusal (409) when a register row cannot be deleted', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.match(/\/billing\/invoices\/5$/) && method === 'DELETE') {
+          return json({ detail: 'invoice has receivable records and cannot be deleted' }, 409);
+        }
+        if (url.includes('/billing/invoices')) return json([INVOICE_ROW]);
+        if (url.includes('/purchase-orders')) return json(PURCHASE_ORDERS);
+        if (url.includes('/projects/clients')) return json(CLIENTS);
+        if (url.endsWith('/me')) return meResponse('MANAGE');
+        throw new Error(`Unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/m/billing/*" element={<InvoicesPage />} />
+      </Routes>,
+      ['/m/billing'],
+    );
+
+    expect(await screen.findByText('CINV-2026-005')).toBeInTheDocument();
+    const row = screen.getByText('CINV-2026-005').closest('tr') as HTMLElement;
+    fireEvent.click(
+      within(row).getByRole('button', { name: /delete invoice CINV-2026-005/i }),
+    );
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: /^delete invoice$/i }));
+
+    // The exact server reason is surfaced (as an error toast), not a silent failure.
+    expect(
+      await screen.findByText(/invoice has receivable records and cannot be deleted/i),
+    ).toBeInTheDocument();
+  });
 });
 
 describe('InvoiceUpload', () => {
@@ -698,6 +817,119 @@ describe('InvoiceReview — detail + match', () => {
     expect(await screen.findByLabelText(/Match line 1 to a PO line/i)).toBeInTheDocument();
     expect(screen.queryByText(/No PO linked/i)).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Project attribution')).not.toBeInTheDocument();
+  });
+
+  // --- "Accept extracted value" affordance ------------------------------------
+  // A PO-less detail whose grand-total is LOW_CONFIDENCE (all other required fields OK).
+  // Confirm is blocked only by that one weak field; nothing else gates it.
+  function detailLowGrandTotal() {
+    const fields = detail().fields.map((f) =>
+      f.field_path === 'totals.grand_total_paise'
+        ? { ...f, status: 'LOW_CONFIDENCE', confidence: 0.4 }
+        : f,
+    );
+    return detail({
+      po_id: null,
+      status: 'MATCHED',
+      review_reasons: [],
+      fields,
+      lines: [{ ...detail().lines[0], po_line_item_id: null, match_status: 'UNMATCHED' }],
+    });
+  }
+
+  it('accepts a low-confidence required field via its Accept button, enabling Confirm', async () => {
+    stub({ level: 'OPERATE', onDetail: () => json(detailLowGrandTotal()) });
+    renderReview();
+
+    // Confirm is blocked while the grand-total is unresolved.
+    const confirm = await screen.findByRole('button', { name: /confirm invoice/i });
+    expect(confirm).toBeDisabled();
+
+    // The per-field Accept button seeds the extracted value → the field resolves.
+    const accept = screen.getByRole('button', {
+      name: /Accept extracted value for Grand total/i,
+    });
+    fireEvent.click(accept);
+
+    await waitFor(() => expect(confirm).toBeEnabled());
+    // Once resolved, the Accept affordance disappears (its condition no longer holds).
+    expect(
+      screen.queryByRole('button', { name: /Accept extracted value for Grand total/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows no Accept affordance when every required field is OK/CORRECTED', async () => {
+    // One field flipped to CORRECTED, the rest OK → nothing is acceptable.
+    const fields = detail().fields.map((f) =>
+      f.field_path === 'header.invoice_number' ? { ...f, status: 'CORRECTED' } : f,
+    );
+    stub({ level: 'OPERATE', onDetail: () => json(detail({ fields })) });
+    renderReview();
+
+    await screen.findByRole('button', { name: /confirm invoice/i });
+    // No per-field Accept button renders for already-resolved fields.
+    expect(
+      screen.queryByRole('button', { name: /Accept extracted value/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('confirming after Accept sends a correction carrying the extracted value', async () => {
+    const captured: unknown[] = [];
+    stub({
+      level: 'OPERATE',
+      onDetail: () => json(detailLowGrandTotal()),
+      capture: { confirm: (b) => captured.push(b) },
+    });
+    renderReview();
+
+    const confirm = await screen.findByRole('button', { name: /confirm invoice/i });
+    fireEvent.click(
+      screen.getByRole('button', { name: /Accept extracted value for Grand total/i }),
+    );
+    await waitFor(() => expect(confirm).toBeEnabled());
+
+    fireEvent.click(confirm);
+    await waitFor(() => expect(captured.length).toBe(1));
+    // The seeded edit rides the confirm as a correction: grand_total in integer paise.
+    expect(captured[0]).toEqual({
+      corrections: [{ field_path: 'totals.grand_total_paise', value: '1180000' }],
+      confirm: true,
+    });
+  });
+
+  it('offers no Accept for a low-confidence field with no normalized value (unparseable date)', async () => {
+    // A LOW_CONFIDENCE invoice_date whose raw OCR text never parsed to an ISO date carries
+    // value_norm=null + a non-ISO value_raw — exactly how the extractor emits it. Accepting the
+    // raw string would enable Confirm and then be REJECTED (400) by the backend date coercion,
+    // so the affordance must NOT appear: the operator has to enter the date by hand. Confirm
+    // stays blocked on that required field.
+    const fields = detail().fields.map((f) =>
+      f.field_path === 'header.invoice_date'
+        ? { ...f, status: 'LOW_CONFIDENCE', confidence: 0.4, value_norm: null, value_raw: '10-05-2026' }
+        : f,
+    );
+    stub({
+      level: 'OPERATE',
+      onDetail: () =>
+        json(
+          detail({
+            po_id: null,
+            status: 'MATCHED',
+            review_reasons: [],
+            fields,
+            lines: [{ ...detail().lines[0], po_line_item_id: null, match_status: 'UNMATCHED' }],
+          }),
+        ),
+    });
+    renderReview();
+
+    const confirm = await screen.findByRole('button', { name: /confirm invoice/i });
+    // The raw OCR date is shown in the input, but there is nothing safe to one-click accept…
+    expect(
+      screen.queryByRole('button', { name: /Accept extracted value for Invoice date/i }),
+    ).not.toBeInTheDocument();
+    // …so Confirm remains blocked on the unresolved required date.
+    expect(confirm).toBeDisabled();
   });
 });
 
