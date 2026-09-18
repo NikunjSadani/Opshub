@@ -8,6 +8,15 @@ import { ToastProvider } from '../../ui';
 import { NewChallan } from './NewChallan';
 import { Batches } from './Batches';
 
+// Active numbering series returned by GET /masterdata/series?active=true. The
+// series dropdown on both screens is populated from these; a single series is
+// auto-selected, two-or-more force a conscious choice.
+const SINGLE_SERIES = [{ id: 1, letter: 'L', label: 'Local', active: true }];
+const TWO_SERIES = [
+  { id: 1, letter: 'L', label: 'Local', active: true },
+  { id: 2, letter: 'B', label: 'Bengaluru', active: true },
+];
+
 /**
  * Build the `GET /me` permission payload for the acting dev user (read off the
  * `X-Dev-Uid` header the mock provider sends). dev-admin/dev-manager get MANAGE
@@ -81,6 +90,12 @@ describe('NewChallan upload flow', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.includes('/masterdata/series')) {
+          return new Response(JSON.stringify(SINGLE_SERIES), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
         if (url.includes('/challan/batches')) {
           return new Response('[]', {
             status: 200,
@@ -120,6 +135,12 @@ describe('NewChallan upload flow', () => {
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.includes('/masterdata/series')) {
+          return new Response(JSON.stringify(SINGLE_SERIES), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
         if (url.includes('/challan/batches') && method === 'POST') {
           return new Response(
             JSON.stringify({
@@ -169,6 +190,174 @@ describe('NewChallan upload flow', () => {
     expect(generate).toBeEnabled();
   });
 
+  it('renders a series DROPDOWN (2 configured), blocks Generate until one is chosen, and sends the chosen letter (not "L")', async () => {
+    const VALIDATED = {
+      id: 42,
+      status: 'VALIDATED',
+      challan_count: 3,
+      line_count: 7,
+      message: null,
+      error_report_file_id: null,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+    let generateBody: unknown = null;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const json = (data: unknown) =>
+          new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        if (url.includes('/masterdata/series')) return json(TWO_SERIES);
+        if (url.includes('/generate') && method === 'POST') {
+          generateBody = JSON.parse(String(init?.body));
+          return json({ ...VALIDATED, status: 'GENERATING' });
+        }
+        if (url.includes('/challan/batches') && method === 'POST') return json(VALIDATED);
+        if (url.includes('/challan/batches')) return json([]);
+        if (url.endsWith('/me')) return meResponse(init);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderNewChallan();
+
+    const fileInput = document.getElementById('challan-file') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(['data'], 'challans.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+        ],
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /upload & validate/i }));
+
+    // Step 3: the Series control is a <select> listing BOTH configured series.
+    expect(await screen.findByRole('option', { name: /Local/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Bengaluru/ })).toBeInTheDocument();
+    const seriesSelect = screen.getByLabelText(/series/i) as HTMLSelectElement;
+    expect(seriesSelect.tagName).toBe('SELECT');
+
+    // Two series -> no preselection -> Generate disabled until a conscious choice.
+    const generate = screen.getByRole('button', { name: /generate 3 challans/i });
+    expect(generate).toBeDisabled();
+
+    fireEvent.change(seriesSelect, { target: { value: 'B' } });
+    expect(generate).toBeEnabled();
+    fireEvent.click(generate);
+
+    // The generate call carries the SELECTED letter, never a hardcoded "L".
+    await waitFor(() => expect(generateBody).toEqual({ series: 'B' }));
+  });
+
+  it('preselects the sole configured series so Generate is enabled without an extra click', async () => {
+    const VALIDATED = {
+      id: 43,
+      status: 'VALIDATED',
+      challan_count: 2,
+      line_count: 5,
+      message: null,
+      error_report_file_id: null,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const json = (data: unknown) =>
+          new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        if (url.includes('/masterdata/series')) return json(SINGLE_SERIES);
+        if (url.includes('/challan/batches') && method === 'POST') return json(VALIDATED);
+        if (url.includes('/challan/batches')) return json([]);
+        if (url.endsWith('/me')) return meResponse(init);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderNewChallan();
+
+    const fileInput = document.getElementById('challan-file') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(['data'], 'challans.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+        ],
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /upload & validate/i }));
+
+    // The sole series is preselected, so Generate is enabled immediately.
+    const generate = await screen.findByRole('button', { name: /generate 2 challans/i });
+    expect(generate).toBeEnabled();
+    const seriesSelect = screen.getByLabelText(/series/i) as HTMLSelectElement;
+    expect(seriesSelect.value).toBe('L');
+  });
+
+  it('shows a "No series configured" hint and keeps Generate disabled when there are zero series', async () => {
+    const VALIDATED = {
+      id: 44,
+      status: 'VALIDATED',
+      challan_count: 4,
+      line_count: 9,
+      message: null,
+      error_report_file_id: null,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const json = (data: unknown) =>
+          new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        if (url.includes('/masterdata/series')) return json([]);
+        if (url.includes('/challan/batches') && method === 'POST') return json(VALIDATED);
+        if (url.includes('/challan/batches')) return json([]);
+        if (url.endsWith('/me')) return meResponse(init);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderNewChallan();
+
+    const fileInput = document.getElementById('challan-file') as HTMLInputElement;
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(['data'], 'challans.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+        ],
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /upload & validate/i }));
+
+    // No dropdown; an inline hint appears and Generate stays disabled (no crash).
+    expect(await screen.findByText(/no series configured/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/series/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /generate 4 challans/i })).toBeDisabled();
+  });
+
   it('renders the review panel for a NEEDS_REVIEW batch and blocks generation until every field is decided', async () => {
     const NEEDS_REVIEW_BATCH = {
       id: 55,
@@ -213,6 +402,7 @@ describe('NewChallan upload flow', () => {
             headers: { 'content-type': 'application/json' },
           });
 
+        if (url.includes('/masterdata/series')) return json(SINGLE_SERIES);
         if (url.includes('/decisions')) {
           if (method === 'PATCH') {
             patchBody = JSON.parse(String(init?.body));
@@ -317,6 +507,7 @@ describe('NewChallan upload flow', () => {
             status: 200,
             headers: { 'content-type': 'application/json' },
           });
+        if (url.includes('/masterdata/series')) return json(SINGLE_SERIES);
         if (url.includes('/decisions')) {
           if (method === 'PATCH') {
             patchBody = JSON.parse(String(init?.body));
@@ -398,6 +589,7 @@ describe('Batches review affordance', () => {
             status: 200,
             headers: { 'content-type': 'application/json' },
           });
+        if (url.includes('/masterdata/series')) return json(SINGLE_SERIES);
         if (url.includes('/decisions')) return json(DECISIONS);
         if (url.includes('/challan/batches')) return json([NEEDS_REVIEW_BATCH]);
         if (url.endsWith('/me')) return meResponse(init);
@@ -419,7 +611,7 @@ describe('Batches review affordance', () => {
     expect(await screen.findByText('Pincode')).toBeInTheDocument();
   });
 
-  it('offers Retry generation on a FAILED row and Recover on a GENERATING row (admin)', async () => {
+  it('offers Retry generation on a FAILED row (series dropdown, sends the selected letter) and Recover on a GENERATING row (admin)', async () => {
     const FAILED = {
       id: 70,
       status: 'FAILED',
@@ -452,6 +644,7 @@ describe('Batches review affordance', () => {
             status: 200,
             headers: { 'content-type': 'application/json' },
           });
+        if (url.includes('/masterdata/series')) return json(TWO_SERIES);
         if (url.includes('/generate') && method === 'POST') {
           generateBody = JSON.parse(String(init?.body));
           return json({ ...FAILED, status: 'GENERATING' });
@@ -464,16 +657,80 @@ describe('Batches review affordance', () => {
 
     renderBatches();
 
-    // FAILED -> Retry generation; opens a series prompt and POSTs /generate.
+    // FAILED -> Retry generation; opens a dialog with a SERIES DROPDOWN (not a
+    // free-text field) populated from the configured series.
     const retry = await screen.findByRole('button', { name: /retry generation/i });
     fireEvent.click(retry);
     expect(await screen.findByRole('dialog')).toBeInTheDocument();
-    // Confirm with the default series.
-    fireEvent.click(screen.getAllByRole('button', { name: /retry generation/i }).pop()!);
-    await waitFor(() => expect(generateBody).toEqual({ series: 'L' }));
+    const seriesSelect = screen.getByLabelText(/series/i) as HTMLSelectElement;
+    expect(seriesSelect.tagName).toBe('SELECT');
+    expect(screen.getByRole('option', { name: /Local/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Bengaluru/ })).toBeInTheDocument();
+
+    // With 2+ series there is no preselection, so the confirm button is disabled
+    // until the operator consciously chooses one.
+    const confirm = screen.getAllByRole('button', { name: /retry generation/i }).pop()!;
+    expect(confirm).toBeDisabled();
+
+    // Choose "B" and confirm — the POST carries the SELECTED letter, not "L".
+    fireEvent.change(seriesSelect, { target: { value: 'B' } });
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+    await waitFor(() => expect(generateBody).toEqual({ series: 'B' }));
 
     // GENERATING -> Recover is available to an admin.
     expect(screen.getByRole('button', { name: /^recover$/i })).toBeInTheDocument();
+  });
+
+  it('preselects the sole configured series in the retry dialog so Retry is enabled without a pick', async () => {
+    // MED-1 guard: with exactly one active series, opening the retry dialog must leave "Retry
+    // generation" ENABLED (the lone series auto-selected) — never stranded disabled behind a
+    // hidden placeholder. Confirming sends that series ('L').
+    const FAILED = {
+      id: 70,
+      status: 'FAILED',
+      challan_count: 3,
+      line_count: 6,
+      message: 'render crashed midway',
+      error_report_file_id: null,
+      zip_file_id: null,
+      merged_pdf_file_id: null,
+    };
+    let generateBody: unknown = null;
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        const json = (data: unknown) =>
+          new Response(JSON.stringify(data), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        if (url.includes('/masterdata/series')) return json(SINGLE_SERIES);
+        if (url.includes('/generate') && method === 'POST') {
+          generateBody = JSON.parse(String(init?.body));
+          return json({ ...FAILED, status: 'GENERATING' });
+        }
+        if (url.includes('/challan/batches')) return json([FAILED]);
+        if (url.endsWith('/me')) return meResponse(init);
+        throw new Error(`Unexpected fetch: ${url}`);
+      }),
+    );
+
+    renderBatches();
+
+    const retry = await screen.findByRole('button', { name: /retry generation/i });
+    fireEvent.click(retry);
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+    const seriesSelect = screen.getByLabelText(/series/i) as HTMLSelectElement;
+    expect(seriesSelect.value).toBe('L'); // sole series auto-selected
+    const confirm = screen.getAllByRole('button', { name: /retry generation/i }).pop()!;
+    expect(confirm).toBeEnabled(); // enabled without an extra pick
+    fireEvent.click(confirm);
+    await waitFor(() => expect(generateBody).toEqual({ series: 'L' }));
   });
 
   it('hides Recover from a non-admin on a GENERATING row and shows a hint instead', async () => {
@@ -491,6 +748,11 @@ describe('Batches review affordance', () => {
       'fetch',
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.includes('/masterdata/series'))
+          return new Response(JSON.stringify(SINGLE_SERIES), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
         if (url.includes('/challan/batches'))
           return new Response(JSON.stringify([GENERATING]), {
             status: 200,
@@ -538,6 +800,7 @@ describe('Batches review affordance', () => {
             status: 200,
             headers: { 'content-type': 'application/json' },
           });
+        if (url.includes('/masterdata/series')) return json(SINGLE_SERIES);
         if (url.includes('/decisions')) return json(DECISIONS);
         if (url.includes('/challan/batches')) return json([NEEDS_REVIEW_BATCH]);
         if (url.endsWith('/me')) return meResponse(init);

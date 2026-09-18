@@ -1,14 +1,14 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import {
   Badge,
   Button,
-  ConfirmDialog,
   ErrorState,
   Loading,
+  Modal,
   PageHeader,
+  SelectField,
   StatePanel,
   Table,
-  TextField,
   THead,
   Th,
   Tr,
@@ -23,12 +23,9 @@ import {
   useRecoverBatch,
   type BatchOut,
 } from '../../api/challan';
+import { useMasterList, type Series } from '../../api/masterdata';
 import { BATCH_STATUS_LABEL, BATCH_STATUS_TONE, batchArtifacts, errorMessage } from './challanFormat';
 import { ReviewPanel } from './ReviewPanel';
-
-// Same series shape as New Challan step 3 — kept in sync so a retry from here
-// enforces the identical rule.
-const SERIES_RE = /^[A-Za-z0-9]{1,8}$/;
 
 export function Batches() {
   const toast = useToast();
@@ -53,8 +50,25 @@ export function Batches() {
   const generate = useGenerateBatch();
   const recover = useRecoverBatch();
   const [retryTarget, setRetryTarget] = useState<BatchOut | null>(null);
-  const [retrySeries, setRetrySeries] = useState('L');
-  const [retryError, setRetryError] = useState<string | undefined>();
+  // The retry series (its `letter`). A dropdown of configured series, never free
+  // text, so a retry can't be numbered into the wrong statutory sequence.
+  const [retrySeries, setRetrySeries] = useState('');
+
+  // Configured, active numbering series — the only valid retry choices.
+  const seriesQuery = useMasterList<Series>('series', { active: 'true' });
+  const activeSeries = seriesQuery.data ?? [];
+  const seriesLoading = seriesQuery.isPending;
+  const noSeries = !seriesLoading && !seriesQuery.isError && activeSeries.length === 0;
+
+  // Self-heal the preselect (mirrors NewChallan): if the series list resolves AFTER the retry
+  // dialog was opened (openRetry read undefined data), fill the sole series so Retry isn't
+  // stranded disabled with a hidden placeholder. `prev || …` never overrides a 2+ force-choice
+  // or an operator's pick.
+  useEffect(() => {
+    const list = seriesQuery.data;
+    if (!list) return;
+    setRetrySeries((prev) => prev || (list.length === 1 ? list[0].letter : ''));
+  }, [seriesQuery.data]);
 
   async function onDownload(fileId: number | null, fallback: string) {
     if (fileId == null || downloadingId != null) return;
@@ -76,23 +90,19 @@ export function Batches() {
 
   function openRetry(b: BatchOut) {
     setRetryTarget(b);
-    setRetrySeries('L');
-    setRetryError(undefined);
+    // Preselect the sole configured series; with 2+ force a conscious choice.
+    const list = seriesQuery.data;
+    setRetrySeries(list && list.length === 1 ? list[0].letter : '');
     generate.reset();
   }
 
   function closeRetry() {
     setRetryTarget(null);
-    setRetryError(undefined);
     generate.reset();
   }
 
   function confirmRetry() {
-    if (!retryTarget) return;
-    if (!SERIES_RE.test(retrySeries)) {
-      setRetryError(retrySeries ? '1–8 letters/digits' : 'Series is required');
-      return;
-    }
+    if (!retryTarget || !retrySeries) return;
     generate.mutate(
       { batchId: retryTarget.id, series: retrySeries },
       {
@@ -241,37 +251,61 @@ export function Batches() {
         </Table>
       )}
 
-      <ConfirmDialog
+      <Modal
         open={retryTarget != null}
         title="Retry generation"
-        confirmLabel="Retry generation"
-        loading={generate.isPending}
-        onConfirm={confirmRetry}
-        onCancel={closeRetry}
-        message={
-          <div>
-            <p className="mb-3">
-              Re-run generation for batch{' '}
-              <span className="font-semibold">#{retryTarget?.id}</span>. Already-issued challans
-              keep their numbers; only the un-issued ones are generated. Do not re-upload the
-              workbook — that would create duplicate challan numbers.
-            </p>
-            <div className="max-w-[10rem]">
-              <TextField
+        busy={generate.isPending}
+        onClose={closeRetry}
+        footer={
+          <>
+            <Button variant="secondary" onClick={closeRetry} disabled={generate.isPending}>
+              Cancel
+            </Button>
+            <Button onClick={confirmRetry} loading={generate.isPending} disabled={!retrySeries}>
+              Retry generation
+            </Button>
+          </>
+        }
+      >
+        <div className="text-sm text-slate-600">
+          <p className="mb-3">
+            Re-run generation for batch{' '}
+            <span className="font-semibold">#{retryTarget?.id}</span>. Already-issued challans keep
+            their numbers; only the un-issued ones are generated. Do not re-upload the workbook —
+            that would create duplicate challan numbers.
+          </p>
+          <div className="max-w-[10rem]">
+            {seriesQuery.isError ? (
+              <p className="text-sm text-rose-600">
+                Couldn&rsquo;t load the series list. Refresh and try again.
+              </p>
+            ) : noSeries ? (
+              <p className="text-sm text-amber-700">
+                No series configured — add one in Master Data → Series.
+              </p>
+            ) : (
+              <SelectField
                 label="Series"
                 value={retrySeries}
-                onChange={(e) => {
-                  setRetrySeries(e.target.value);
-                  if (retryError) setRetryError(undefined);
-                }}
-                error={retryError}
-                hint="Number prefix, e.g. L"
-                maxLength={8}
-              />
-            </div>
+                onChange={(e) => setRetrySeries(e.target.value)}
+                disabled={seriesLoading}
+                hint="Numbering sequence"
+              >
+                {activeSeries.length !== 1 && (
+                  <option value="" disabled>
+                    {seriesLoading ? 'Loading series…' : 'Select a series…'}
+                  </option>
+                )}
+                {activeSeries.map((s) => (
+                  <option key={s.id} value={s.letter}>
+                    {s.label ? `${s.letter} — ${s.label}` : s.letter}
+                  </option>
+                ))}
+              </SelectField>
+            )}
           </div>
-        }
-      />
+        </div>
+      </Modal>
     </div>
   );
 }

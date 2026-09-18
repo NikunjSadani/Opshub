@@ -8,9 +8,9 @@ import {
   ErrorState,
   Loading,
   PageHeader,
+  SelectField,
   Spinner,
   StatePanel,
-  TextField,
   useToast,
 } from '../../ui';
 import { useApi } from '../../api/client';
@@ -22,6 +22,7 @@ import {
   useUploadBatch,
   type BatchOut,
 } from '../../api/challan';
+import { useMasterList, type Series } from '../../api/masterdata';
 import {
   BATCH_STATUS_LABEL,
   BATCH_STATUS_TONE,
@@ -31,7 +32,6 @@ import {
 } from './challanFormat';
 import { ReviewPanel } from './ReviewPanel';
 
-const SERIES_RE = /^[A-Za-z0-9]{1,8}$/;
 const BATCHES_TAB = '/m/document_automation/batches';
 
 /**
@@ -83,9 +83,27 @@ export function NewChallan() {
   // Which artifact download is in flight (keyed by file id), so a double-click
   // can't start the same download twice.
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
-  const [series, setSeries] = useState('L');
+  // The chosen numbering series (its `letter`). Starts empty; a single configured
+  // series is auto-selected below, but with 2+ the operator MUST choose one — a
+  // dropdown of configured series, never free text, so a valid-but-wrong series
+  // can't be typed into the wrong statutory sequence.
+  const [series, setSeries] = useState('');
   const [activeBatchId, setActiveBatchId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Configured, active numbering series — the only valid choices for this batch.
+  const seriesQuery = useMasterList<Series>('series', { active: 'true' });
+  const activeSeries = seriesQuery.data ?? [];
+  const seriesLoading = seriesQuery.isPending;
+  const noSeries = !seriesLoading && !seriesQuery.isError && activeSeries.length === 0;
+
+  // Preselect the sole configured series (no friction); with 2+ leave it empty so
+  // the operator consciously picks the right statutory sequence.
+  useEffect(() => {
+    const list = seriesQuery.data;
+    if (!list) return;
+    setSeries((prev) => prev || (list.length === 1 ? list[0].letter : ''));
+  }, [seriesQuery.data]);
 
   const upload = useUploadBatch();
   const generate = useGenerateBatch();
@@ -96,7 +114,6 @@ export function NewChallan() {
   // mutations invalidate ['challan','batches']).
   const recent = useBatchesQuery(5);
 
-  const seriesValid = SERIES_RE.test(series);
   const validated = uploaded?.status === 'VALIDATED';
   const needsReview = uploaded?.status === 'NEEDS_REVIEW';
   // Contradictions for the review panel — owned here so the live region can
@@ -128,7 +145,9 @@ export function NewChallan() {
   function reset() {
     setFile(null);
     setUploaded(null);
-    setSeries('L');
+    // Re-apply the single-series preselection; 2+ resets to "choose again".
+    const list = seriesQuery.data;
+    setSeries(list && list.length === 1 ? list[0].letter : '');
     setActiveBatchId(null);
     setStalled(false);
     upload.reset();
@@ -160,7 +179,7 @@ export function NewChallan() {
   }
 
   function onGenerate() {
-    if (!uploaded || !seriesValid) return;
+    if (!uploaded || !series) return;
     generate.mutate(
       { batchId: uploaded.id, series },
       {
@@ -371,19 +390,37 @@ export function NewChallan() {
           {validated && activeBatchId == null && (
             <>
               <div className="max-w-[10rem]">
-                <TextField
-                  label="Series"
-                  value={series}
-                  onChange={(e) => setSeries(e.target.value)}
-                  error={
-                    !seriesValid ? (series ? '1–8 letters/digits' : 'Series is required') : undefined
-                  }
-                  hint="Number prefix, e.g. L"
-                  maxLength={8}
-                />
+                {seriesQuery.isError ? (
+                  <p className="text-sm text-rose-600">
+                    Couldn&rsquo;t load the series list. Refresh and try again.
+                  </p>
+                ) : noSeries ? (
+                  <p className="text-sm text-amber-700">
+                    No series configured — add one in Master Data → Series.
+                  </p>
+                ) : (
+                  <SelectField
+                    label="Series"
+                    value={series}
+                    onChange={(e) => setSeries(e.target.value)}
+                    disabled={seriesLoading}
+                    hint="Numbering sequence"
+                  >
+                    {activeSeries.length !== 1 && (
+                      <option value="" disabled>
+                        {seriesLoading ? 'Loading series…' : 'Select a series…'}
+                      </option>
+                    )}
+                    {activeSeries.map((s) => (
+                      <option key={s.id} value={s.letter}>
+                        {s.label ? `${s.letter} — ${s.label}` : s.letter}
+                      </option>
+                    ))}
+                  </SelectField>
+                )}
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
-                <Button onClick={onGenerate} disabled={!seriesValid} loading={generate.isPending}>
+                <Button onClick={onGenerate} disabled={!series} loading={generate.isPending}>
                   Generate {uploaded!.challan_count} challan{uploaded!.challan_count === 1 ? '' : 's'}
                   {batchHasWarnings(uploaded!) ? ' (warnings)' : ''}
                 </Button>
@@ -455,7 +492,7 @@ export function NewChallan() {
                 <>
                   <p className="text-sm text-rose-600">{batch.message ?? 'Generation failed.'}</p>
                   <div className="mt-4 flex flex-wrap gap-2">
-                    <Button onClick={onGenerate} loading={generate.isPending} disabled={!seriesValid}>
+                    <Button onClick={onGenerate} loading={generate.isPending} disabled={!series}>
                       Retry generation
                     </Button>
                     <Button variant="ghost" onClick={reset} disabled={generate.isPending}>
