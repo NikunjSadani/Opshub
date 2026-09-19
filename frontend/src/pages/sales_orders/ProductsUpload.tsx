@@ -83,7 +83,7 @@ export function ProductsUpload() {
     <div>
       <PageHeader
         title="Bulk upload products"
-        subtitle="Upload one .xlsx to create or update products. Each row is matched by product code."
+        subtitle="Upload one .xlsx to add products in bulk. A new product's code is auto-generated; to update existing products instead, add a code column with their code."
         actions={
           <Link
             to={PRODUCTS_BASE}
@@ -107,8 +107,9 @@ export function ProductsUpload() {
           className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-md file:border-0 file:bg-brand-50 file:px-3 file:py-2 file:text-sm file:font-medium file:text-brand-700 hover:file:bg-brand-100"
         />
         <p className="mt-1 text-xs text-slate-400">
-          Columns: code, name, brand, model_number, category, uom, hsn. A row whose code
-          already exists updates that product; a new code creates one.
+          Template columns: name, brand, model_number, category, uom, hsn, gst_rate — a new product's
+          code is auto-generated. To UPDATE existing products instead, add a{' '}
+          <span className="font-medium">code</span> column with their code.
         </p>
         <div className="mt-2">
           <Button variant="ghost" onClick={() => void onDownloadTemplate()} loading={downloading}>

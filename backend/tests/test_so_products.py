@@ -314,7 +314,11 @@ def test_migration_backfills_codeless_products() -> None:
 
 # --------------------------------------------------------- bulk upsert (Excel)
 
+# A full upload header INCLUDING `code` — the parser accepts it (update-by-code), so the
+# upload tests below drive it; `code` is deliberately NOT in the downloadable TEMPLATE.
 _BULK_HEADER = ["name", "code", "brand", "model_number", "category", "uom", "hsn", "gst_rate"]
+# The downloadable TEMPLATE's columns — `code` OMITTED (auto-generated on create).
+_TEMPLATE_HEADER = ["name", "brand", "model_number", "category", "uom", "hsn", "gst_rate"]
 
 
 def _xlsx(header: list[str], rows: list[list[object]]) -> bytes:
@@ -338,7 +342,8 @@ def _upload(client: TestClient, data: bytes) -> object:
 
 def test_bulk_template_download(client: TestClient) -> None:
     """The template endpoint returns an .xlsx (correct content-type + attachment name) whose
-    first sheet's header row is EXACTLY the parser's expected columns, in order."""
+    first sheet's header row is EXACTLY the template columns (no `code` — it's auto-generated),
+    in order."""
     _as(client, "admin")
     r = client.get("/api/v1/products/bulk-template.xlsx")
     assert r.status_code == 200, r.text
@@ -349,9 +354,9 @@ def test_bulk_template_download(client: TestClient) -> None:
     ws = wb.worksheets[0]
     rows = list(ws.iter_rows(values_only=True))
     wb.close()
-    assert list(rows[0]) == _BULK_HEADER  # header matches the parser's exact columns, in order
-    assert len(rows) == 2                 # header + one illustrative example row
-    assert rows[1][0]                     # the example row carries a name
+    assert list(rows[0]) == _TEMPLATE_HEADER  # template columns (no `code`), in order
+    assert len(rows) == 2                     # header + one illustrative example row
+    assert rows[1][0]                         # the example row carries a name
 
 
 def test_bulk_template_requires_manage(client: TestClient) -> None:

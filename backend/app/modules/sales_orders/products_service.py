@@ -500,13 +500,15 @@ _BULK_ALIASES: dict[str, str] = {
 }
 
 # The downloadable TEMPLATE: the canonical header in a fixed, friendly order + one example row.
-# `code` is left blank so the example creates (auto-minting a code); the operator fills a code
-# only to set a custom SKU or to update-by-code.
+# `code` is intentionally OMITTED from the template — a new product's code is auto-generated
+# (`PRD-######`), so it's blank noise for the common "add products" flow. The PARSER still
+# accepts a `code`/`product_code`/`sku` column if the operator adds one, so update-by-code
+# (matching an existing product to modify it) keeps working — the upload screen says so.
 _BULK_TEMPLATE_COLUMNS: tuple[str, ...] = (
-    "name", "code", "brand", "model_number", "category", "uom", "hsn", "gst_rate",
+    "name", "brand", "model_number", "category", "uom", "hsn", "gst_rate",
 )
 _BULK_TEMPLATE_EXAMPLE: tuple[object, ...] = (
-    "Sample Product — replace with your own", "", "Acme", "GX-100", "Appliances", "PCS",
+    "Sample Product — replace with your own", "Acme", "GX-100", "Appliances", "PCS",
     "8509", 18,
 )
 
