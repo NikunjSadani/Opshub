@@ -283,6 +283,10 @@ export interface PickerProduct {
   brand: string | null;
   model_number: string | null;
   uom: string;
+  /** GST rate percent as a string (e.g. "18.00"), or null. The `/products` search endpoint
+   * (backend `ProductOut`) returns it, so the picker can pre-fill a line's tax rate. Optional
+   * because a PickerProduct synthesized locally (e.g. from a project template) may omit it. */
+  gst_rate?: string | null;
 }
 
 /** A client's GSTIN, for the optional GSTIN picker (subset of the projects `GstinOut`). */

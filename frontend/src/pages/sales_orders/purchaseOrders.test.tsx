@@ -62,7 +62,11 @@ const PROJECTS = [
   },
 ];
 const PRODUCTS = [
-  { id: '5', code: 'P1', name: 'Widget', brand: 'Acme', model_number: null, uom: 'PCS' },
+  // The `/products` search (ProductOut) carries gst_rate — the picker pre-fills a line's tax.
+  { id: '5', code: 'P1', name: 'Widget', brand: 'Acme', model_number: null, uom: 'PCS', gst_rate: '18.00' },
+  // A second product at a DIFFERENT rate, to prove swapping a line's product re-derives the
+  // auto-filled tax (Widget 18% → Gadget 5%).
+  { id: '6', code: 'P2', name: 'Gadget', brand: 'Acme', model_number: null, uom: 'PCS', gst_rate: '5.00' },
 ];
 
 /** A project's tagged product WITH a pricing template (ProjectProductOut). Money is paise;
@@ -414,6 +418,54 @@ describe('PO create form', () => {
     await waitFor(() =>
       expect(state.urls.some((u) => u.includes('/products') && u.includes('q=wid'))).toBe(true),
     );
+  });
+});
+
+describe('PO create form — tax pre-fill from the product GST rate', () => {
+  it("picking a product for a blank line pre-fills the line's tax rate from its gst_rate", async () => {
+    stubCreateForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+
+    // Blank line: pick Widget (gst_rate "18.00") → the tax input pre-fills to 18.00.
+    await selectProduct(/Widget/);
+    expect((screen.getByLabelText(/tax rate/i) as HTMLInputElement).value).toBe('18.00');
+  });
+
+  it('picking a product does NOT overwrite a tax rate the operator already typed', async () => {
+    stubCreateForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+
+    // Operator types a rate FIRST; picking a product must leave it untouched.
+    fireEvent.change(screen.getByLabelText(/tax rate/i), { target: { value: '9' } });
+    await selectProduct(/Widget/);
+    expect((screen.getByLabelText(/tax rate/i) as HTMLInputElement).value).toBe('9');
+  });
+
+  it('SWAPPING a line to a different product re-derives an auto-filled tax rate', async () => {
+    stubCreateForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+
+    // Pick Widget → auto-fills 18.00…
+    await selectProduct(/Widget/);
+    expect((screen.getByLabelText(/tax rate/i) as HTMLInputElement).value).toBe('18.00');
+    // …then swap the SAME line to Gadget (5%): the auto-filled rate updates to 5.00, not 18.
+    await selectProduct(/Gadget/);
+    expect((screen.getByLabelText(/tax rate/i) as HTMLInputElement).value).toBe('5.00');
+  });
+
+  it('SWAPPING a product does NOT re-derive a rate the operator typed', async () => {
+    stubCreateForm('OPERATE');
+    renderWithProviders(<POForm />);
+    await screen.findByLabelText(/po number/i);
+
+    // Pick Widget (auto 18) → operator OVERRIDES to 12 → swap to Gadget: their 12 survives.
+    await selectProduct(/Widget/);
+    fireEvent.change(screen.getByLabelText(/tax rate/i), { target: { value: '12' } });
+    await selectProduct(/Gadget/);
+    expect((screen.getByLabelText(/tax rate/i) as HTMLInputElement).value).toBe('12');
   });
 });
 

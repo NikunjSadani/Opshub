@@ -763,3 +763,129 @@ def test_bulk_upload_viewer_403_and_template_needs_view(client: TestClient) -> N
     # Template download only needs module VIEW -> a viewer CAN download it.
     dl = client.get("/api/v1/project-products/bulk-template.xlsx")
     assert dl.status_code == 200
+
+
+# ------------------------------------------- tax_rate defaults from product gst_rate
+
+def test_tag_defaults_tax_rate_from_product_gst(client: TestClient) -> None:
+    # A NEW tag with NO tax_rate inherits the product's gst_rate (product -> template -> PO).
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Gst Mixer", gst_rate=18)
+
+    r = client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
+    assert r.status_code == 201, r.text
+    assert Decimal(str(r.json()["tax_rate"])) == Decimal("18")
+    assert Decimal(str(_sole(client, proj)["tax_rate"])) == Decimal("18")
+
+
+def test_tag_explicit_tax_rate_not_overridden_by_gst(client: TestClient) -> None:
+    # An explicit tax_rate always wins over the product's gst_rate default.
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Explicit Tax", gst_rate=18)
+
+    r = client.post(
+        "/api/v1/project-products",
+        json={"project_id": proj, "product_id": pid, "tax_rate": "12"},
+    )
+    assert r.status_code == 201, r.text
+    assert Decimal(str(r.json()["tax_rate"])) == Decimal("12")   # NOT defaulted to 18
+
+
+def test_tag_explicit_zero_tax_rate_preserved(client: TestClient) -> None:
+    # An explicit 0% (nil-rated) is a real choice and must NOT be defaulted away.
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Nil Rated", gst_rate=18)
+
+    r = client.post(
+        "/api/v1/project-products",
+        json={"project_id": proj, "product_id": pid, "tax_rate": "0"},
+    )
+    assert r.status_code == 201, r.text
+    assert Decimal(str(r.json()["tax_rate"])) == Decimal("0")   # 0 preserved, NOT -> 18
+
+
+def test_tag_no_product_gst_leaves_tax_unset(client: TestClient) -> None:
+    # No product gst_rate to default from -> the template's tax_rate stays unset (None).
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "No Gst Product")  # gst_rate defaults to None
+
+    r = client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
+    assert r.status_code == 201, r.text
+    assert r.json()["tax_rate"] is None
+    assert _sole(client, proj)["tax_rate"] is None
+
+
+def test_idempotent_retag_keeps_defaulted_tax_rate(client: TestClient) -> None:
+    # First tag defaults tax_rate from gst (18); a re-tag is idempotent and never re-defaults
+    # or clobbers the stored value.
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Retag Gst", gst_rate=18)
+    first = client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
+    assert first.status_code == 201, first.text
+    assert Decimal(str(first.json()["tax_rate"])) == Decimal("18")
+
+    again = client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
+    assert again.status_code == 200, again.text
+    assert Decimal(str(again.json()["tax_rate"])) == Decimal("18")   # unchanged
+
+
+def test_update_template_omitting_tax_rate_leaves_it_unchanged(client: TestClient) -> None:
+    # Editing an existing template must NEVER re-default: a PATCH that omits tax_rate leaves
+    # the stored value untouched (partial update).
+    _as(client, "admin")
+    proj = _project_id(client)
+    pid = _make_product(client, "Edit Keeps Tax", gst_rate=18)
+    client.post("/api/v1/project-products", json={"project_id": proj, "product_id": pid})
+    assert Decimal(str(_sole(client, proj)["tax_rate"])) == Decimal("18")
+
+    r = client.patch(f"/api/v1/project-products/{proj}/{pid}", json={"cost_price_paise": 3500})
+    assert r.status_code == 200, r.text
+    assert r.json()["cost_price_paise"] == 3500
+    assert Decimal(str(r.json()["tax_rate"])) == Decimal("18")   # untouched, not re-defaulted
+
+
+def test_bulk_new_tag_inherits_product_gst_default(client: TestClient) -> None:
+    # The bulk path routes NEW tags through tag_product: a row with a BLANK tax_rate on a new
+    # tag inherits the product's gst_rate default.
+    _as(client, "admin")
+    proj = _project_id(client)
+    prod = _new_product(client, "Bulk Gst", code="BULK-GST-1", gst_rate=18)
+
+    data = _xlsx(
+        ["product_code", "cost_price", "tax_rate"],
+        [["BULK-GST-1", 250.00, ""]],   # blank tax cell -> inherit product gst_rate
+    )
+    r = _upload(client, proj, data)
+    assert r.status_code == 200, r.text
+    assert r.json()["priced"] == ["BULK-GST-1"]
+
+    row = _row_for(client, proj, int(prod["id"]))
+    assert row["cost_price_paise"] == 25000
+    assert Decimal(str(row["tax_rate"])) == Decimal("18")   # inherited default
+
+
+def test_bulk_blank_tax_on_existing_tag_does_not_redefault(client: TestClient) -> None:
+    # An EXISTING tag priced at 5% must NOT jump to the product's 18% when a later bulk row
+    # leaves the tax cell blank — the default fires ONLY on tag creation, never on re-price.
+    _as(client, "admin")
+    proj = _project_id(client)
+    prod = _new_product(client, "Existing Priced", code="EXIST-TAX-1", gst_rate=18)
+
+    # 1) Tag + price it at an EXPLICIT 5% (creates the tag with tax 5, not the product's 18).
+    r1 = _upload(client, proj, _xlsx(
+        ["product_code", "cost_price", "tax_rate"], [["EXIST-TAX-1", 100.00, 5]]))
+    assert r1.status_code == 200, r1.text
+    assert Decimal(str(_row_for(client, proj, int(prod["id"]))["tax_rate"])) == Decimal("5")
+
+    # 2) Re-price the SAME product with a BLANK tax cell — the stored 5% must stay 5%.
+    r2 = _upload(client, proj, _xlsx(
+        ["product_code", "cost_price"], [["EXIST-TAX-1", 200.00]]))
+    assert r2.status_code == 200, r2.text
+    row = _row_for(client, proj, int(prod["id"]))
+    assert row["cost_price_paise"] == 20000               # cost updated
+    assert Decimal(str(row["tax_rate"])) == Decimal("5")  # tax NOT re-defaulted to 18

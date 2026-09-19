@@ -142,7 +142,14 @@ def tag_product(
     tag = ProjectProduct(
         project_id=project_id, product_id=product_id, created_by=actor_uid
     )
-    _apply_fields(tag, fields or {})
+    seed = dict(fields or {})
+    # Default the template's tax rate from the product's GST rate on a NEW tag only, so the
+    # rate flows product -> project template -> PO without re-typing. Only when NO usable
+    # tax_rate was supplied (key absent or None) — an explicit value (incl. Decimal('0') for
+    # a 0% nil-rated line) is always honoured, never overridden.
+    if seed.get("tax_rate") is None and product.gst_rate is not None:
+        seed["tax_rate"] = product.gst_rate
+    _apply_fields(tag, seed)
     try:
         # `with` releases the savepoint on success; a concurrent tag of the same pair
         # trips the `uq_project_product` unique constraint at flush and lands here —

@@ -286,7 +286,22 @@ export function POForm() {
   function selectProduct(key: number, id: string) {
     const found = products.find((p) => p.id === id);
     if (found) setSelectedProducts((prev) => ({ ...prev, [id]: found }));
-    updateLine(key, { productId: id });
+    const patch: Partial<LineRow> = { productId: id };
+    // Convenience pre-fill: seed this line's tax rate from the picked product's GST rate.
+    // Provenance-aware "never overwrite a TYPED rate": we replace the rate only when it is
+    // blank OR still equal to the PREVIOUSLY picked product's gst_rate (i.e. it was itself
+    // auto-filled and untouched) — so SWAPPING a line's product correctly updates the rate,
+    // while a hand-typed rate is preserved. A new product with no gst_rate blanks an
+    // auto-filled rate (don't leave the old product's rate on a different product).
+    // The template path (templateToLine) never runs through here and is untouched.
+    const line = lines.find((l) => l.key === key);
+    if (line) {
+      const prevGst = line.productId ? selectedProducts[line.productId]?.gst_rate : undefined;
+      const current = line.taxRate.trim();
+      const wasAutoFilled = current === '' || (prevGst != null && current === prevGst);
+      if (wasAutoFilled) patch.taxRate = found?.gst_rate ?? '';
+    }
+    updateLine(key, patch);
   }
   function addLine() {
     setLines((prev) => [...prev, blankLine()]);
